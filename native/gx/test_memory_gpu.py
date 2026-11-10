@@ -145,9 +145,24 @@ def main():
             actual=bytes(mem2[at:at+4])
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
                 raise RuntimeError(f'Orthographic near-plane {"XY" if xy else "XYZ"} mismatch: {actual.hex()} != {expected.hex()}')
+        # Ten-bit texture dimensions encode size minus one. Maximum-size I4
+        # atlases must still resolve and sample real MEM2 data in either axis.
+        large_tile=0x100c0000
+        for width,height in ((1024,8),(8,1024),(128,1024)):
+            c.memset(c.addressof(mem2)+0xc0000,0xff,width*height//2)
+            send(bp([(0x4f,0),(0x50,0),(0x51,0xffffff),(0x52,(1<<14)|(1<<11))]))
+            send(cp(0x50,(1<<9)|(1<<13))+cp(0x70,1|(4<<1)|(5<<14))+
+                 xf(0x1020,floats([1,0,1,0,-1,0])+struct.pack('>I',1))+
+                 bp([(0x88,((height-1)<<10)|(width-1)),(0x94,large_tile>>5),
+                     (0x30,width-1),(0x31,height-1)]))
+            send(quad+bp([(0x52,1<<14),(0x45,2)]))
+            actual=bytes(mem2[at:at+4])
+            if any(abs(a-b)>3 for a,b in zip(actual,expected)):
+                raise RuntimeError(f'Maximum I4 texture {width}x{height}: {actual.hex()} != {expected.hex()}')
+        if large_tile not in reads:raise RuntimeError('Maximum I4 texture was never resolved from MEM2')
         result=dict(result='passed',library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
                     abi=abi,mem2_texture=True,mem2_display_copy=True,cpu_rewrite=True,mem1_preserved=True,
-                    mem2_indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True)
+                    mem2_indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True,max_texture_dimensions=True)
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result))
     finally:

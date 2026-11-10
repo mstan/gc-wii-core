@@ -12,6 +12,10 @@ def once(text,old,new):
     return text.replace(old,new,1)
 
 def compose(text,root):
+    # Materialize the hardware's full 1..1024 range. The donor's raw fallback
+    # getters mask after adding one, which turns a 1024-pixel axis into zero.
+    text=once(text,'        slot.mWidth = 0;\n        slot.mHeight = 0;',
+        '        slot.mWidth = (value & 0x3ffu) + 1u;\n        slot.mHeight = ((value >> 10) & 0x3ffu) + 1u;')
     text=once(text,'return (reg & 0x001FFFFFu) << 5;',
         'return (reg & (GC_WII_GX_WII ? 0x00FFFFFFu : 0x001FFFFFu)) << 5;')
     text=once(text,'#include "command_processor.hpp"',
