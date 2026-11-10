@@ -118,8 +118,36 @@ def main():
         if tile not in reads or writes!=[destination,destination]:raise RuntimeError('Physical bank identities were lost')
         if bytes(mem1[0x10000:0x10000+640*480*2])!=bytes([0xa5])*(640*480*2):
             raise RuntimeError('MEM2 copy overwrote MEM1')
+        # Indexed arrays retain their address while the CPU changes vertex
+        # colors. A missing epoch callback must hash the real array bytes.
+        positions=0x10000200;colors=0x10000400
+        c.memmove(c.addressof(mem2)+0x100,bytes([0]*4+[255]*4)*4,32)
+        vertices=[(-1,-1),(1,-1),(1,1),(-1,1)]
+        c.memmove(c.addressof(mem2)+0x200,b''.join(floats([x,y,.5]) for x,y in vertices),48)
+        c.memmove(c.addressof(mem2)+0x400,bytes([255,255,255,0])*4,16)
+        send(cp(0x50,(2<<9)|(2<<13))+cp(0xa0,positions)+cp(0xb0,12)+cp(0xa2,colors)+cp(0xb2,4)+
+             bp([(0x41,1|0x18|(4<<8)|(5<<5))]))
+        indexed=b'\x80\0\4'+bytes([0,0,1,1,2,2,3,3])
+        send(indexed+bp([(0x52,1<<14),(0x45,2)]))
+        c.memmove(c.addressof(mem2)+0x400,bytes([255])*16,16)
+        send(indexed+bp([(0x52,1<<14),(0x45,2)]))
+        actual=bytes(mem2[at:at+4]);expected=bytes([235,128,235,128])
+        if any(abs(a-b)>3 for a,b in zip(actual,expected)):
+            raise RuntimeError(f'MEM2 indexed vertex rewrite mismatch: {actual.hex()} != {expected.hex()}')
+        # 2D menus put XY geometry exactly on an orthographic near plane.
+        # Compare explicit XYZ(z=0) and the hardware's implicit XY z=0.
+        for xy in (False,True):
+            send(bp([(0x41,0x18),(0x4f,0),(0x50,0),(0x51,0xffffff),(0x52,(1<<14)|(1<<11))]))
+            send(cp(0x50,(1<<9)|(1<<13))+cp(0x70,(0 if xy else 1)|(4<<1)|(5<<14))+
+                 xf(0x1020,floats([1,0,1,0,-.002,-1])+struct.pack('>I',1)))
+            flat=b'\x80\0\4'+b''.join(floats([x,y] if xy else [x,y,0])+bytes([255]*4) for x,y in vertices)
+            send(flat+bp([(0x52,1<<14),(0x45,2)]))
+            actual=bytes(mem2[at:at+4])
+            if any(abs(a-b)>3 for a,b in zip(actual,expected)):
+                raise RuntimeError(f'Orthographic near-plane {"XY" if xy else "XYZ"} mismatch: {actual.hex()} != {expected.hex()}')
         result=dict(result='passed',library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
-                    abi=abi,mem2_texture=True,mem2_display_copy=True,cpu_rewrite=True,mem1_preserved=True)
+                    abi=abi,mem2_texture=True,mem2_display_copy=True,cpu_rewrite=True,mem1_preserved=True,
+                    mem2_indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True)
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result))
     finally:
