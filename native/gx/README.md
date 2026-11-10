@@ -13,6 +13,12 @@ and reverse-address callbacks, keeping physical identities in copy/epoch
 callbacks. Consumers own memory maps, coherence, completion, scanout selection,
 audio and persistent paths. The old single-MEM1 setup is retained for GameCube.
 
+ABI12 appends focused, image-relative mouse state to the status result. Pointer
+coordinates are normalized to 0..65535 inside the aspect-fitted image, accounting
+for logical window units and physical pixel dimensions. Positions outside the
+image or an unfocused/hidden window are invalid. Button bits are left/right/middle;
+consumers map them to their own input devices. Rebuild consumers for the new ABI.
+
 `GC_WII_GX_WII=ON` selects Wii texture/TLUT/copy address fields when building
 the service. The default retains GameCube masks. `test_memory_gpu.py` exercises
 real FIFO draws from MEM2 textures, MEM2 XFB writes, CPU rewrites and bank

@@ -5,7 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define GCNLLR_NATIVE_GX_ABI 11u
+#define GCNLLR_NATIVE_GX_ABI 12u
 #define GCNLLR_NATIVE_GX_COMPLETED_SCANOUT 1u
 #define GCNLLR_NATIVE_GX_RESIDENT_COPY 2u
 #define GCNLLR_NATIVE_GX_STREAMED_COPY 4u
@@ -80,6 +80,15 @@ typedef struct {
     int (*resolve_memory)(void* user,uint32_t address,uint32_t size,GcnllrNativeGxMemory* range);
     int (*locate_memory)(void* user,const void* bytes,uint32_t size,uint32_t* physical_address);
 } GcnllrNativeGxConfig;
+/* Host pointer relative to the displayed image, independent of a console's
+ * controller protocol. Coordinates span 0..65535, left/top to right/bottom.
+ * Buttons: 1 left, 2 right, 4 middle. Invalid outside the image or when the
+ * renderer window lacks input focus; consumers must release mouse buttons. */
+typedef struct {
+    uint32_t valid,buttons;
+    uint16_t x,y;
+} GcnllrNativeGxPointer;
+
 typedef struct {
     uint64_t fifo_bytes, draws, display_copies, texture_copies, readback_ns;
     uint32_t failed, quit;
@@ -90,6 +99,7 @@ typedef struct {
     uint64_t resident_copies,resident_materializations,resident_scanouts;
     uint64_t resident_textures,resident_texture_hits,resident_texture_materializations;
     uint64_t resident_texture_incompatible;
+    GcnllrNativeGxPointer pointer;
 } GcnllrNativeGxStatus;
 typedef struct {
     uint32_t abi;

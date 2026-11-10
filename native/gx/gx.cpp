@@ -4,6 +4,7 @@
 #include "texture_encode.hpp"
 #include "owned_texture.hpp"
 #include "raster_viewport.hpp"
+#include "pointer.hpp"
 #include "gpu_bridge.hpp"
 #include <unordered_map>
 #include "fifo_worker.hpp"
@@ -279,7 +280,17 @@ void pump(bool force=false) {
     for (const auto* event=aurora_update();event && event->type!=AURORA_NONE;++event)
         if (event->type==AURORA_EXIT) state.quit=1;
     auto& pad=state.pad;
+    state.pointer={};
     if (config.hidden) {pad={};pad.stick_x=pad.stick_y=pad.substick_x=pad.substick_y=128;return;}
+    auto* window=aurora::window::get_sdl_window();
+    if(window && SDL_GetMouseFocus()==window && SDL_GetKeyboardFocus()==window) {
+        float x,y;const auto buttons=SDL_GetMouseState(&x,&y);
+        const auto size=aurora::window::get_window_size();
+        state.pointer=gcnllr::image_pointer(x,y,
+            ((buttons&SDL_BUTTON_LMASK)?1u:0u)|((buttons&SDL_BUTTON_RMASK)?2u:0u)|
+            ((buttons&SDL_BUTTON_MMASK)?4u:0u),size.width,size.height,
+            size.native_fb_width,size.native_fb_height,size.fb_width,size.fb_height);
+    }
     const bool* keys=SDL_GetKeyboardState(nullptr);
     pad={}; pad.stick_x=uint8_t(128+100*(int(keys[SDL_SCANCODE_RIGHT])-int(keys[SDL_SCANCODE_LEFT])));
     pad.stick_y=uint8_t(128+100*(int(keys[SDL_SCANCODE_UP])-int(keys[SDL_SCANCODE_DOWN])));
