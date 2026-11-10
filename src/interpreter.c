@@ -851,17 +851,17 @@ static int execute_float(CPUState* cpu, const PPCInst* in) {
         if (in->op == PPC_OP_PSQ_STU || in->op == PPC_OP_PSQ_STUX) cpu->gpr[in->rA] = ea;
         break;
 
-    case PPC_OP_FADDS: cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] + cpu->fpr[in->rB]); break;
-    case PPC_OP_FSUBS: cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] - cpu->fpr[in->rB]); break;
-    case PPC_OP_FMULS: cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] * cpu->fpr[in->rC]); break;
-    case PPC_OP_FDIVS: cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] / cpu->fpr[in->rB]); break;
+    case PPC_OP_FADDS: ppc_fadds(cpu, in->rD, in->rA, in->rB); break;
+    case PPC_OP_FSUBS: ppc_fsubs(cpu, in->rD, in->rA, in->rB); break;
+    case PPC_OP_FMULS: ppc_fmuls(cpu, in->rD, in->rA, in->rC); break;
+    case PPC_OP_FDIVS: ppc_fdivs(cpu, in->rD, in->rA, in->rB); break;
     case PPC_OP_FADD: cpu->fpr[in->rD] = cpu->fpr[in->rA] + cpu->fpr[in->rB]; break;
     case PPC_OP_FSUB: cpu->fpr[in->rD] = cpu->fpr[in->rA] - cpu->fpr[in->rB]; break;
     case PPC_OP_FMUL: cpu->fpr[in->rD] = cpu->fpr[in->rA] * cpu->fpr[in->rC]; break;
     case PPC_OP_FDIV: cpu->fpr[in->rD] = cpu->fpr[in->rA] / cpu->fpr[in->rB]; break;
     case PPC_OP_FRES:
         if (!ppc_fres(cpu, cpu->fpr[in->rB], &x)) return 1;
-        cpu->fpr[in->rD] = x; break;
+        cpu->fpr[in->rD] = cpu->ps1[in->rD] = x; break;
     case PPC_OP_FRSQRTE:
         if (!ppc_frsqrte(cpu, cpu->fpr[in->rB], &x)) return 1;
         cpu->fpr[in->rD] = x; break;
@@ -869,7 +869,7 @@ static int execute_float(CPUState* cpu, const PPCInst* in) {
         if (ppc_fma(cpu, cpu->fpr[in->rA], cpu->fpr[in->rC], cpu->fpr[in->rB],
                     true, in->op == PPC_OP_FMSUBS || in->op == PPC_OP_FNMSUBS,
                     in->op == PPC_OP_FNMADDS || in->op == PPC_OP_FNMSUBS, &x))
-            cpu->fpr[in->rD] = x;
+            cpu->fpr[in->rD] = cpu->ps1[in->rD] = x;
         break;
     case PPC_OP_FMADD: case PPC_OP_FMSUB: case PPC_OP_FNMADD: case PPC_OP_FNMSUB:
         if (ppc_fma(cpu, cpu->fpr[in->rA], cpu->fpr[in->rC], cpu->fpr[in->rB],
@@ -885,7 +885,7 @@ static int execute_float(CPUState* cpu, const PPCInst* in) {
     case PPC_OP_FNEG: cpu->fpr[in->rD] = -cpu->fpr[in->rB]; break;
     case PPC_OP_FABS: cpu->fpr[in->rD] = fabs(cpu->fpr[in->rB]); break;
     case PPC_OP_FNABS: cpu->fpr[in->rD] = -fabs(cpu->fpr[in->rB]); break;
-    case PPC_OP_FRSP: cpu->fpr[in->rD] = (f64)(f32)cpu->fpr[in->rB]; break;
+    case PPC_OP_FRSP: ppc_frsp(cpu, in->rD, in->rB); break;
     case PPC_OP_FSEL:
         cpu->fpr[in->rD] = cpu->fpr[in->rA] >= 0.0 ? cpu->fpr[in->rC] : cpu->fpr[in->rB]; break;
     case PPC_OP_FCMPU: case PPC_OP_FCMPO:
@@ -948,11 +948,13 @@ static int execute_float(CPUState* cpu, const PPCInst* in) {
         cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] + cpu->ps1[in->rB]);
         cpu->ps1[in->rD] = cpu->ps1[in->rC]; break;
     case PPC_OP_PS_SUM1:
-        cpu->fpr[in->rD] = cpu->fpr[in->rC];
-        cpu->ps1[in->rD] = (f64)(f32)(cpu->ps1[in->rA] + cpu->fpr[in->rB]); break;
+        x = cpu->fpr[in->rC];
+        y = (f64)(f32)(cpu->fpr[in->rA] + cpu->ps1[in->rB]);
+        cpu->fpr[in->rD] = x; cpu->ps1[in->rD] = y; break;
     case PPC_OP_PS_MULS0:
-        cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] * cpu->fpr[in->rC]);
-        cpu->ps1[in->rD] = (f64)(f32)(cpu->ps1[in->rA] * cpu->fpr[in->rC]); break;
+        x = (f64)(f32)(cpu->fpr[in->rA] * cpu->fpr[in->rC]);
+        y = (f64)(f32)(cpu->ps1[in->rA] * cpu->fpr[in->rC]);
+        cpu->fpr[in->rD] = x; cpu->ps1[in->rD] = y; break;
     case PPC_OP_PS_MULS1:
         cpu->fpr[in->rD] = (f64)(f32)(cpu->fpr[in->rA] * cpu->ps1[in->rC]);
         cpu->ps1[in->rD] = (f64)(f32)(cpu->ps1[in->rA] * cpu->ps1[in->rC]); break;

@@ -61,6 +61,7 @@ int main(void) {
     put_insn(&cpu, 0x80001104u, 0x1022182Au); /* ps_add f1,f2,f3 */
     CHECK(gcn_interpreter_step(&cpu));
     CHECK(fabs(cpu.fpr[1] - 3.75) < 0.000001);
+    CHECK(fabs(cpu.ps1[1] - 3.75) < 0.000001);
     CHECK(gcn_interpreter_step(&cpu));
     CHECK(fabs(cpu.fpr[1] - 3.75) < 0.000001);
     CHECK(fabs(cpu.ps1[1] - 12.0) < 0.000001);
@@ -82,6 +83,26 @@ int main(void) {
 
     CHECK(gcn_interpreter_instruction_count() == 12u);
     CHECK(gcn_interpreter_unique_miss_count() == 1u);
+    /* Both lanes must observe the old scalar when the destination overlaps
+     * the broadcast source. Matrix routines use these in-place forms. */
+    cpu.pc = 0x80001200u;
+    cpu.fpr[2] = 2.0; cpu.ps1[2] = 3.0;
+    cpu.fpr[3] = 4.0; cpu.ps1[3] = 99.0;
+    put_insn(&cpu, cpu.pc, (4u<<26)|(3u<<21)|(2u<<16)|(3u<<6)|(12u<<1)); /* ps_muls0 f3,f2,f3 */
+    CHECK(gcn_interpreter_step(&cpu));
+    CHECK(cpu.fpr[3] == 8.0 && cpu.ps1[3] == 12.0);
+    cpu.fpr[3] = 4.0; cpu.ps1[3] = 11.0; cpu.fpr[4] = 9.0;
+    put_insn(&cpu, cpu.pc, (4u<<26)|(2u<<21)|(2u<<16)|(3u<<11)|(4u<<6)|(11u<<1)); /* ps_sum1 f2,f2,f4,f3 */
+    CHECK(gcn_interpreter_step(&cpu));
+    CHECK(cpu.fpr[2] == 9.0 && cpu.ps1[2] == 13.0);
+
+    /* A scalar single result is duplicated; a subsequent paired operation
+     * must not see the destination's previous second lane. */
+    cpu.fpr[2] = 1.25; cpu.ps1[2] = 40.0;
+    cpu.fpr[3] = 2.5; cpu.ps1[3] = 80.0;
+    put_insn(&cpu, cpu.pc, 0xEC42182Au); /* fadds f2,f2,f3 */
+    CHECK(gcn_interpreter_step(&cpu));
+    CHECK(cpu.fpr[2] == 3.75 && cpu.ps1[2] == 3.75);
     cpu_free(&cpu);
     return failures ? 1 : 0;
 }
