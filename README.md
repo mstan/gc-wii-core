@@ -8,7 +8,8 @@ consumers; it does not establish a working Wii machine.
 
 Consumers add this directory through CMake. Supply `GC_WII_POWERPC_CORE_DIR`,
 `GC_WII_IPL_TOOLS_DIR` and `GC_WII_TRACE_INCLUDE_DIR` when using a layout other
-than gcnllr's. DSP instruction execution comes from the pinned `gc-dsp-core`
+than gcnllr's. The IPL descrambler and trace-format header are included with
+their original provenance. DSP instruction execution comes from the pinned `gc-dsp-core`
 submodule; initialize submodules recursively.
 
 The reusable low-level implementations cover memory/CPU glue, interrupts,

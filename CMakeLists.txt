@@ -4,8 +4,8 @@ project(gcnrecomp_runtime C CXX)
 # Consumers supply architecture and firmware-tool packages explicitly. Defaults
 # retain the established GameCube layout during the shared-core extraction.
 set(GC_WII_POWERPC_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../recompiler" CACHE PATH "Shared PowerPC compiler source package")
-set(GC_WII_IPL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools/ipl_descramble" CACHE PATH "IPL descrambler source directory")
-set(GC_WII_TRACE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../oracle" CACHE PATH "Trace format include directory")
+set(GC_WII_IPL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/ipl_descramble" CACHE PATH "IPL descrambler source directory")
+set(GC_WII_TRACE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/oracle" CACHE PATH "Trace format include directory")
 
 option(GCN_USE_CCACHE "Use ccache when it is available" ON)
 if(GCN_USE_CCACHE)
