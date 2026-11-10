@@ -18,13 +18,15 @@ void gcn_cp_set_irq(GcnCp* cp, GcnCpIrqFn fn, void* user) {
     cp->irq_user = user;
 }
 
-void gcn_cp_init(GcnCp* cp) {
+void gcn_cp_init_model(GcnCp* cp, bool wii) {
     /* CommandProcessorManager::Init:107-126 — status has CommandIdle+ReadIdle
      * (computed on read here), ctrl=0, fifo Init()=all zero. Metrics MMIOs are
      * fixed constants: all 0 except CLKS_PER_VTX_OUT = 4 (.cpp:165-191). */
     memset(cp, 0, sizeof *cp);
     cp->reg[GCN_CP_CLKS_PER_VTX_OUT >> 1] = 4u;
+    cp->fifo_hi_mask = wii ? 0x1fffu : GCN_CP_WMASK_HI;
 }
+void gcn_cp_init(GcnCp* cp) {gcn_cp_init_model(cp, false);}
 
 /* ---- 32-bit view of a FIFO register (LO half at lo_off, HI half at lo_off+2 —
  *      MMIO::Utils::LowPart/HighPart, CommandProcessor.cpp:142-156). ---- */
@@ -110,7 +112,7 @@ static void cp_write16(GcnCp* cp, u32 off, u16 value) {
         /* FIFO regs: LO halves mask 0xffe0, HI halves mask 0x03ff (GCN). Then
          * recompute status — a pointer/distance/watermark change can breach a
          * watermark (GX_PLAN: "after every ... pointer-register write"). */
-        u16 mask = (off & 2u) ? GCN_CP_WMASK_HI : GCN_CP_WMASK_LO;
+        u16 mask = (off & 2u) ? cp->fifo_hi_mask : GCN_CP_WMASK_LO;
         cp->reg[off >> 1] = value & mask;
         cp_update_interrupts(cp);
         return;

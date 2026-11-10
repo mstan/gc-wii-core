@@ -6,7 +6,10 @@
  * and burst.
  */
 #include "gp/gp.h"
+#ifndef GCNLLR_GPU_DEVICE_ONLY
 #include "gx/gx.h"         /* gcn_gx_pipeline_drain — fifo-reset join (G3) */
+#endif
+#include "memory/memory.h"
 #include "cpu/native_code.h"
 #include "cpu/fifo_submit.h"
 #include "debug/rings.h"
@@ -25,6 +28,7 @@ void gcn_gp_init(GcnGp* gp, GcnPi* pi, GcnCp* cp) {
     gp->cp = cp;
     s_gp = gp;
 }
+void gcn_gp_set_drain_hook(GcnGp* gp,void (*drain)(void*),void* user) {gp->drain=drain;gp->drain_user=user;}
 
 void gcn_gp_reset(void) {
     /* ProcessorInterface.cpp:118-119 / GPFifo::ResetGatherPipe:80-83 — drop any
@@ -35,7 +39,10 @@ void gcn_gp_reset(void) {
      * G3: a fifo reset with pipelined-but-undecoded bytes queued would let
      * pre-reset commands execute after the reset the synchronous design
      * decoded them before — join first (no-op with the pipeline off). */
-    gcn_gx_pipeline_drain();
+    if(s_gp && s_gp->drain)s_gp->drain(s_gp->drain_user);
+#ifndef GCNLLR_GPU_DEVICE_ONLY
+    else gcn_gx_pipeline_drain();
+#endif
     if (s_gp)
         s_gp->count = 0;
 }
@@ -52,9 +59,11 @@ static void gp_flush_burst(GcnGp* gp, CPUState* cpu) {
     /* Copy 32 bytes into guest RAM at the physical write pointer (GPFifo.cpp:96
      * memory.CopyToEmu). Bounds-checked; the pointer is guest-physical. */
     u32 phys = wptr & 0x1FFFFFFFu;
-    if (cpu && cpu->ram && (u64)phys + GCN_GP_GATHER_SIZE <= (u64)cpu->ram_size) {
+    u32 available=0;
+    u8* destination=cpu ? gcn_mem_resolve(cpu,phys,&available):NULL;
+    if (destination && available>=GCN_GP_GATHER_SIZE) {
         gcn_ring_watch_check_span(phys, GCN_GP_GATHER_SIZE, 0x6A6A6A00u); /* [gcn-watch] */
-        memcpy(cpu->ram + phys, gp->stage, GCN_GP_GATHER_SIZE);
+        memcpy(destination, gp->stage, GCN_GP_GATHER_SIZE);
         /* Device write to RAM: dirty the miss-CRC identity only (the guest
          * must icbi before executing gather-written bytes). */
         gcn_native_code_content_dirty(phys, GCN_GP_GATHER_SIZE);

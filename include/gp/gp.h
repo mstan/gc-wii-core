@@ -46,11 +46,15 @@ typedef struct {
     u32    count;                            /* bytes staged so far    */
     GcnPi* pi;                               /* PI FIFO base/end/wptr owner */
     GcnCp* cp;                               /* CP side (link/status/interrupt) */
+    void (*drain)(void* user);
+    void* drain_user;
 } GcnGp;
 
 void gcn_gp_init(GcnGp* gp, GcnPi* pi, GcnCp* cp);
 u32  gcn_gp_read(void* user, CPUState* cpu, u32 addr, u8 size);
 void gcn_gp_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size);
+int gcn_gp_write_stream(void* user,CPUState* cpu,const u8* bytes,u32 size);
+void gcn_gp_set_drain_hook(GcnGp*,void (*drain)(void*),void* user);
 
 /* Reset the gather-pipe staging (PI_FIFO_RESET / GXAbortFrame). Matches the
  * `void(void)` hook type pi.h exposes; operates on the registered singleton. */

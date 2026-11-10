@@ -126,9 +126,11 @@ typedef struct {
     int irq_level;               /* last CP->PI line level (edge detect for ring) */
     GcnCpIrqFn irq;
     void*      irq_user;
+    u16 fifo_hi_mask;            /* GC: 0x03ff; Wii: 0x1fff physical address */
 } GcnCp;
 
 void gcn_cp_init(GcnCp* cp);
+void gcn_cp_init_model(GcnCp* cp, bool wii);
 void gcn_cp_set_irq(GcnCp* cp, GcnCpIrqFn fn, void* user);
 u32  gcn_cp_read(void* user, CPUState* cpu, u32 addr, u8 size);
 void gcn_cp_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size);

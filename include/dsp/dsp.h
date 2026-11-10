@@ -108,6 +108,7 @@ typedef struct {
     u16   aid_blocks_left;            /* remaining 32-byte blocks          */
     u8    aid_int_pending;            /* fifo-start AID int, fires next tick */
     u32   aid_accum;                  /* tick accumulator (block pacing)   */
+    u32   aid_start_cycles;           /* remaining fifo-start IRQ latency */
     u8*   mem1;                       /* source backing for AID DMA         */
     u32   mem1_size;
 
@@ -132,6 +133,11 @@ bool gcn_dsp_aram_advance(GcnDsp* dsp, u32 ppc_cycles);
 /* Real bytes plus deferred completion. Consumers provide their ARAM backing;
  * Wii aliases this view onto MEM2. Invalid ranges fail without claiming DMA. */
 bool gcn_dsp_aram_transfer(GcnDsp* dsp, CPUState* cpu, u8* aram, u32 aram_size);
+u16 gcn_dsp_aid_read16(const GcnDsp*,u32 off);
+void gcn_dsp_aid_write16(GcnDsp*,u32 off,u16 value,bool wii);
+/* Real 32-byte main-RAM reads at a consumer-selected clock/rate. NULL CPU
+ * retains the legacy MEM1 binding; supplied CPU resolves both Wii banks. */
+bool gcn_dsp_aid_advance(GcnDsp*,CPUState*,u32 cycles,u32 cycles_per_block);
 
 /* irom/coef are the raw big-endian DSP ROM bytes (dsp_rom.bin / dsp_coef.bin);
  * mem1 is the guest MEM1 backing the DSP DMAs against. */

@@ -27,3 +27,9 @@ completion ABI in `include/gcnllr/native_gx.h`. Its donor dependency graph is
 supplied by the consumer. Wii address fields are a separate build selection;
 GameCube defaults and the software GX reference remain available. See the
 service README for the explicit bank callbacks and focused GPU check.
+
+CP initialization can select Wii FIFO address masks while the existing entry
+point retains GameCube masks. Gather bursts resolve main-memory banks through
+the shared bus, and consumers may supply an ordered drain hook. The extracted
+audio-DMA register/pump functions serve both the legacy DSP wrapper and native
+consumers, with explicit transfer periods and optional multi-bank CPU memory.

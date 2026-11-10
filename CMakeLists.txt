@@ -104,6 +104,7 @@ add_library(gcn_runtime_core STATIC
   src/overlay_module.c
   src/native_code.c
   src/dsp_regs.c
+  src/audio_dma.c
   src/title_module_none.c
   src/overlay_none.c
   src/rings.c

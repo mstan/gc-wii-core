@@ -239,33 +239,7 @@ void gcn_dsp_free(GcnDsp* dsp) {
  * "fifo start" interrupt latched at enable time (aid_int_pending — Dolphin
  * schedules it 200 cycles after the CONTROL_LEN write) also lands here. */
 static void dsp_aid_tick(GcnDsp* dsp, u32 core_cycles) {
-    if (dsp->aid_int_pending) {
-        dsp->aid_int_pending = 0;
-        dsp->csr |= GCN_DSP_CSR_AIDINT;
-    }
-    dsp->aid_accum += core_cycles;
-    if (dsp->aid_accum < GCN_DSP_AID_CORE_CYCLES_PER_BLOCK)
-        return;
-    dsp->aid_accum -= GCN_DSP_AID_CORE_CYCLES_PER_BLOCK;
-    if (!(dsp->aid_ctrl & GCN_DSP_AID_ENABLE))
-        return;
-    /* Dolphin sends the current 32-byte block to the external audio FIFO
-     * before updating the zero-based countdown/address. Keep that exact
-     * ordering: the interrupt handler may already have programmed the next
-     * autoload buffer while this one is still playing. */
-    if (dsp->audio_sink && dsp->mem1 &&
-        (u64)dsp->aid_cur_addr + 32u <= dsp->mem1_size) {
-        dsp->audio_sink(dsp->audio_user, dsp->mem1 + dsp->aid_cur_addr, 32u);
-    }
-    if (dsp->aid_blocks_left != 0) {
-        dsp->aid_blocks_left--;
-        dsp->aid_cur_addr += 32;
-    }
-    if (dsp->aid_blocks_left == 0) {
-        dsp->aid_cur_addr    = dsp->aid_source;
-        dsp->aid_blocks_left = (u16)(dsp->aid_ctrl & GCN_DSP_AID_NUMBLOCKS);
-        dsp->csr |= GCN_DSP_CSR_AIDINT;
-    }
+    (void)gcn_dsp_aid_advance(dsp, NULL, core_cycles, GCN_DSP_AID_CORE_CYCLES_PER_BLOCK);
 }
 
 /* Run all owed DSP cycles now (declared in dsp.h). Called before any CPU
@@ -488,17 +462,7 @@ static void write_csr(GcnDsp* dsp, u16 w) {
 }
 
 /* Audio-DMA 16-bit register read (DSP.cpp RegisterMMIO:314-361). */
-static u32 read16_aid(GcnDsp* dsp, u32 off) {
-    switch (off) {
-    case GCN_DSP_AID_START_HI:   return dsp->aid_source >> 16;
-    case GCN_DSP_AID_START_LO:   return dsp->aid_source & 0xFFFFu;
-    case GCN_DSP_AID_CTRL:       return dsp->aid_ctrl;
-    case GCN_DSP_AID_BLOCKS_LEFT:
-        /* Zero-based countdown (DSP.cpp:354-359). */
-        return dsp->aid_blocks_left > 0 ? (u32)dsp->aid_blocks_left - 1u : 0u;
-    default:                     return dsp->reg[idx16(off)];
-    }
-}
+static u32 read16_aid(GcnDsp* dsp, u32 off) {return gcn_dsp_aid_read16(dsp,off);}
 
 u32 gcn_dsp_read(void* user, CPUState* cpu, u32 addr, u8 size) {
     (void)cpu; (void)size;
@@ -530,34 +494,7 @@ u32 gcn_dsp_read(void* user, CPUState* cpu, u32 addr, u8 size) {
 
 /* Audio-DMA 16-bit register write (DSP.cpp RegisterMMIO:314-361). The GCN
  * address restriction masks are DSP.cpp:200-203; BLOCKS_LEFT is InvalidWrite. */
-static void write16_aid(GcnDsp* dsp, u32 off, u16 value) {
-    switch (off) {
-    case GCN_DSP_AID_START_HI:
-        dsp->aid_source = (dsp->aid_source & 0x0000FFFFu) | ((u32)(value & 0x03FFu) << 16);
-        return;
-    case GCN_DSP_AID_START_LO:
-        dsp->aid_source = (dsp->aid_source & 0xFFFF0000u) | (value & 0xFFE0u);
-        return;
-    case GCN_DSP_AID_CTRL: {
-        /* On a 0->1 enable edge, load the transfer and raise the fifo-start AID
-         * interrupt one tick later (DSP.cpp:326-347). While already enabled the
-         * new values autoload when the current transfer wraps. */
-        int already_enabled = (dsp->aid_ctrl & GCN_DSP_AID_ENABLE) != 0;
-        dsp->aid_ctrl = value;
-        if (!already_enabled && (value & GCN_DSP_AID_ENABLE)) {
-            dsp->aid_cur_addr    = dsp->aid_source;
-            dsp->aid_blocks_left = (u16)(value & GCN_DSP_AID_NUMBLOCKS);
-            dsp->aid_int_pending = 1;
-        }
-        return;
-    }
-    case GCN_DSP_AID_BLOCKS_LEFT:
-        return;                       /* read-only (DSP.cpp:361 InvalidWrite) */
-    default:
-        dsp->reg[idx16(off)] = value;
-        return;
-    }
-}
+static void write16_aid(GcnDsp* dsp, u32 off, u16 value) {gcn_dsp_aid_write16(dsp,off,value,false);}
 
 void gcn_dsp_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size) {
     GcnDsp* dsp = (GcnDsp*)user;
