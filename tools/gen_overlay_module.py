@@ -70,6 +70,9 @@ def parse_args() -> argparse.Namespace:
                         "the END -- the journal spans many builds, so scoring "
                         "it from the start measures history, not this build")
     p.add_argument("--jobs", type=int, default=2)
+    p.add_argument("--cpu", choices=("gekko","broadway","espresso"), default="gekko")
+    p.add_argument("--preserve-pc", action="store_true",
+                   help="Compile each captured execution namespace without alias rewriting")
     return p.parse_args()
 
 
@@ -111,22 +114,24 @@ def canonical(addr: int) -> int:
 
 
 def recompile(dolrecomp: Path, blob: Path, addr: int, suffix: str,
-              workdir: Path) -> Path | None:
+              workdir: Path, cpu: str = "gekko") -> Path | None:
     """Recompile one captured page.
 
-    `addr` MUST already be canonical (the cached 0x8xxxxxxx view). The runtime
-    canonicalizes the dispatch address before lookup, and the generated body
+    `addr` MUST match the table's execution namespace. The generated body
     switches on ctx->pc against its own compile-time labels -- so if the page
     is compiled at the raw captured base (e.g. physical 0x00000000) while the
     table registers it canonically (0x80000000), the switch matches nothing,
     the function returns having done nothing, dispatch still reports success,
     and the block loop spins on an unchanging pc forever. That is not
     hypothetical: it happened, and presented as 5M blocks/s with zero frames.
+    --preserve-pc retains raw physical/cached/uncached entries and the shared
+    runtime selects them without changing the live PC. The default continues
+    preparing cached entries for existing GameCube callers.
     """
     out = workdir / ("%08X%s" % (addr, suffix))
     cmd = [str(dolrecomp), "--gamecube-ipl", str(blob), str(out),
            "--base", "0x%08X" % addr, "--entry", "0x%08X" % addr,
-           "--chunk-instructions", "1024", "--symbol-suffix", suffix]
+           "--chunk-instructions", "1024", "--symbol-suffix", suffix,"--cpu",cpu]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("  ! recompile failed for 0x%08X %s: %s"
@@ -192,7 +197,7 @@ def main() -> int:
             h = fnv1a64(data)
             # Canonical from here on: compile base, symbol, and table entry all
             # agree, which is the invariant the label check above enforces.
-            caddr = canonical(addr)
+            caddr = addr if args.preserve_pc else canonical(addr)
             if (caddr, h) in seen:
                 continue
             seen.add((caddr, h))
@@ -214,7 +219,7 @@ def main() -> int:
 
         def run_one(item):
             addr, h, blob, suffix = item
-            return item, recompile(args.dolrecomp, blob, addr, suffix, tmpdir)
+            return item, recompile(args.dolrecomp, blob, addr, suffix, tmpdir,args.cpu)
 
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             for (addr, h, _blob, suffix), chunk in pool.map(run_one, work):

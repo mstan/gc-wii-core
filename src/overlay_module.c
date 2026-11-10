@@ -81,13 +81,10 @@ bool gcn_overlay_module_call(GcnOverlayModule* module, CPUState* cpu,
     if (!module || !module->page_count || !cpu || !cpu->ram ||
         !canonical_mem1(address, &canonical, &offset))
         return false;
-    /* These bodies were compiled at cached PCs. Rewriting a physical/uncached
-     * PC changes observable branch/LR/exception semantics, even for identical
-     * RAM bytes. Such aliases need separately compiled native candidates. */
-    if (address != canonical)
-        return false;
-
-    int found = find_page(module, canonical);
+    /* Lookup preserves the execution namespace. A physical/uncached entry
+     * requires its own compiled body; identical RAM does not authorize
+     * rewriting observable branch/LR/exception PCs. */
+    int found = find_page(module, address);
     if (found < 0)
         return false;
     u32 page_index = (u32)found;
@@ -95,7 +92,9 @@ bool gcn_overlay_module_call(GcnOverlayModule* module, CPUState* cpu,
     u32 resident = module->resident[page_index];
     if (resident == GCN_OVERLAY_UNKNOWN) {
         /* Hash the whole page, not the entry offset. */
-        u32 page_offset = module->pages[page_index].start - GC_RAM_BASE;
+        u32 page_offset, ignored;
+        if (!canonical_mem1(module->pages[page_index].start, &ignored, &page_offset))
+            return false;
         resident = resolve_resident(module, cpu, page_index, page_offset);
     }
     if (resident == GCN_OVERLAY_NONE)
@@ -115,13 +114,13 @@ void gcn_overlay_module_invalidate(GcnOverlayModule* module, u32 address,
         !canonical_mem1(address, &canonical, &offset))
         return;
 
-    const u64 end = (u64)canonical + size;
+    const u64 end = (u64)offset + size;
     for (u32 i = 0; i < module->page_count; i++) {
         const GcnOverlayPage* page = &module->pages[i];
-        if (page->end <= canonical)
+        u32 page_offset, ignored;
+        if (!canonical_mem1(page->start, &ignored, &page_offset) ||
+            (u64)page_offset + (page->end-page->start) <= offset || page_offset >= end)
             continue;
-        if ((u64)page->start >= end)
-            break;
         if (module->resident[i] != GCN_OVERLAY_UNKNOWN &&
             module->resident[i] != GCN_OVERLAY_NONE)
             module->pages_resident--;

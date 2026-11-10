@@ -150,6 +150,10 @@ add_executable(test_aot_module tests/test_aot_module.c)
 target_link_libraries(test_aot_module PRIVATE gcn_runtime_core)
 add_test(NAME aot_module_identity COMMAND test_aot_module)
 
+add_executable(test_overlay_module tests/test_overlay_module.c)
+target_link_libraries(test_overlay_module PRIVATE gcn_runtime_core)
+add_test(NAME overlay_pc_namespaces COMMAND test_overlay_module)
+
 add_executable(test_dsp_registers tests/test_dsp_registers.c)
 target_link_libraries(test_dsp_registers PRIVATE gcn_runtime_core)
 add_test(NAME dsp_register_reset COMMAND test_dsp_registers)
