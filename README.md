@@ -1,0 +1,21 @@
+# gc-wii-core
+
+Shared low-level machine/device source package extracted from `mstan/gcnllr`
+commit `f07bfb9515082a964c36a4bbafb095dbb2d584b7`, directory
+`third_party/lle/runtime`. Original runtime sources are unchanged. The initial
+package retains the GameCube executable and reference GX renderer as compatible
+consumers; it does not establish a working Wii machine.
+
+Consumers add this directory through CMake. Supply `GC_WII_POWERPC_CORE_DIR`,
+`GC_WII_IPL_TOOLS_DIR` and `GC_WII_TRACE_INCLUDE_DIR` when using a layout other
+than gcnllr's. DSP instruction execution comes from the pinned `gc-dsp-core`
+submodule; initialize submodules recursively.
+
+The reusable low-level implementations cover memory/CPU glue, interrupts,
+GX/FIFO/VI, DSP registers, AI, disc, EXI, SI and persistence. Console composition,
+memory-map extensions, firmware policy and host integration remain consumers'
+responsibility. Wii-specific IOS, NAND, IPC and input integration is pending.
+
+The package retains its GPL license and imported file notices. DSP ancestry is
+documented in `dsp_lle/UPSTREAM.md`. Firmware, games, generated guest code and
+native saves must never be committed.
