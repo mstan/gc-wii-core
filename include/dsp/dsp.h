@@ -129,6 +129,9 @@ void gcn_dsp_reg_write16(GcnDsp* dsp, u32 off, u16 value);
 /* Advance the CPU-side ARAM engine. Returns true exactly when this call
  * completes an active transfer and latches ARINT. */
 bool gcn_dsp_aram_advance(GcnDsp* dsp, u32 ppc_cycles);
+/* Real bytes plus deferred completion. Consumers provide their ARAM backing;
+ * Wii aliases this view onto MEM2. Invalid ranges fail without claiming DMA. */
+bool gcn_dsp_aram_transfer(GcnDsp* dsp, CPUState* cpu, u8* aram, u32 aram_size);
 
 /* irom/coef are the raw big-endian DSP ROM bytes (dsp_rom.bin / dsp_coef.bin);
  * mem1 is the guest MEM1 backing the DSP DMAs against. */

@@ -17,7 +17,16 @@ void gcn_ai_set_irq(GcnAi* ai, GcnAiIrqFn fn, void* user) {
 }
 
 void gcn_ai_init(GcnAi* ai) {
+    gcn_ai_init_model(ai, false);
+}
+
+void gcn_ai_init_model(GcnAi* ai, bool is_wii) {
     memset(ai, 0, sizeof *ai);
+    /* Broadway needs quarter-cycle precision at 32 kHz. Gekko preserves its
+     * existing half-cycle representation and exact phase values. */
+    ai->phase_scale = is_wii ? 4u : 2u;
+    ai->sample_cycles_48 = is_wii ? 60750u : GCN_AI_CYCLES_PER_SAMPLE_48KHZ_X2;
+    ai->sample_cycles_32 = is_wii ? 91125u : GCN_AI_CYCLES_PER_SAMPLE_32KHZ_X2;
     ai->control = GCN_AI_CR_RESET_VALUE;   /* AIS=48kHz | AID=32kHz (0x42) */
     s_ai = ai;
 }
@@ -157,9 +166,9 @@ void gcn_ai_tick(u32 cycles) {
         return;   /* Update():142 / IsPlaying():323-326 */
 
     u32 threshold_x2 = (ai->control & GCN_AI_CR_AISFR)
-                            ? GCN_AI_CYCLES_PER_SAMPLE_48KHZ_X2
-                            : GCN_AI_CYCLES_PER_SAMPLE_32KHZ_X2;
-    ai->cycle_accum_x2 += (u64)cycles * 2u;
+                         ? ai->sample_cycles_48
+                         : ai->sample_cycles_32;
+    ai->cycle_accum_x2 += (u64)cycles * ai->phase_scale;
     while (ai->cycle_accum_x2 >= threshold_x2) {
         ai->cycle_accum_x2 -= threshold_x2;
         ai_advance_sample(ai);

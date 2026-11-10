@@ -203,6 +203,7 @@ enum {
 typedef void (*GcnDiIrqFn)(void* user, int level);
 
 typedef struct {
+    u32 core_clock;
     u32 disr;            /* DISR   */
     u32 dicvr;           /* DICVR  */
     u32 cmdbuf[3];       /* DICMDBUF0..2 */
@@ -250,6 +251,7 @@ typedef struct {
 } GcnDi;
 
 void gcn_di_init(GcnDi* di);
+void gcn_di_init_model(GcnDi* di, bool is_wii);
 void gcn_di_set_irq(GcnDi* di, GcnDiIrqFn fn, void* user);
 /* Advance pending DI work by `core_cycles` and complete any command whose
  * Dolphin-style delay has elapsed. Called once per block by the dispatch loop,

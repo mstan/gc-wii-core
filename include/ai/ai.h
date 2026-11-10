@@ -128,6 +128,7 @@
 typedef void (*GcnAiIrqFn)(void* user, int level);
 
 typedef struct {
+    u32 sample_cycles_48, sample_cycles_32, phase_scale;
     u32 control;        /* AICR                                            */
     u32 volume;         /* AIVR                                            */
     u32 sample_counter; /* AISCNT                                          */
@@ -146,6 +147,7 @@ typedef struct {
  * AIINT (gcn_ai_tick, transcribing IncreaseSampleCount/GenerateAudioInterrupt),
  * and wire the resulting line into PI. */
 void gcn_ai_init(GcnAi* ai);
+void gcn_ai_init_model(GcnAi* ai, bool is_wii);
 /* Register the AI interrupt-line sink (boot.c trampoline into PI INT_CAUSE_AI). */
 void gcn_ai_set_irq(GcnAi* ai, GcnAiIrqFn fn, void* user);
 u32  gcn_ai_read(void* user, CPUState* cpu, u32 addr, u8 size);

@@ -5,6 +5,8 @@
  * e13ab348f13cd67879f6db6e9d7185410f8f62c6.
  */
 #include "dsp/dsp.h"
+#include "memory/memory.h"
+#include "cpu/native_code.h"
 
 #include <string.h>
 
@@ -69,5 +71,26 @@ bool gcn_dsp_aram_advance(GcnDsp* dsp, u32 ppc_cycles) {
     dsp->dma_active = false;
     dsp->dma_cycles_left = 0u;
     dsp->csr |= GCN_DSP_CSR_ARINT;
+    return true;
+}
+
+bool gcn_dsp_aram_transfer(GcnDsp* dsp, CPUState* cpu, u8* aram, u32 aram_size) {
+    u32 main=(u32)dsp->reg[idx16(GCN_DSP_AR_MMADDR)]<<16 | dsp->reg[idx16(GCN_DSP_AR_MMADDR)+1];
+    u32 aux=(u32)dsp->reg[idx16(GCN_DSP_AR_ARADDR)]<<16 | dsp->reg[idx16(GCN_DSP_AR_ARADDR)+1];
+    u32 count=(u32)dsp->reg[idx16(GCN_DSP_AR_CNT)]<<16 | dsp->reg[idx16(GCN_DSP_AR_CNT)+1];
+    u32 bytes=count&0x03ffffffu, available;
+    u8* memory=gcn_mem_resolve(cpu,main,&available);
+    if(!aram || !memory || bytes>available || aux>aram_size || bytes>aram_size-aux) return false;
+    if(count&0x80000000u) {
+        if(cpu->reserve_valid && bytes) {
+            u32 reservation=gcn_reservation_key(cpu->reserve_addr)&~31u;
+            if(main<reservation+32u && reservation<(u64)main+bytes)cpu->reserve_valid=false;
+        }
+        gcn_native_code_content_dirty(main,bytes);
+        memmove(memory,aram+aux,bytes);
+    }else memmove(aram+aux,memory,bytes);
+    dsp->dma_active=true;
+    dsp->dma_cycles_left=(bytes/32u)*GCN_DSP_ARAM_TICKS_PER_32B;
+    if(!dsp->dma_cycles_left)dsp->dma_cycles_left=1;
     return true;
 }

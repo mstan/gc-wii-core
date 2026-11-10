@@ -116,7 +116,11 @@ static inline u32 gcn_reservation_key(u32 addr) {
         return addr - GC_RAM_UNCACHED;
     if (addr < GC_MAIN_RAM_SIZE)
         return addr;
-    return addr; /* not RAM: no alias to fold, compare raw */
+    if (addr >= WII_MEM2_BASE && addr - WII_MEM2_BASE < WII_MEM2_SIZE)
+        return 0x10000000u + addr - WII_MEM2_BASE;
+    if (addr >= WII_MEM2_UNCACHED && addr - WII_MEM2_UNCACHED < WII_MEM2_SIZE)
+        return 0x10000000u + addr - WII_MEM2_UNCACHED;
+    return addr; /* physical memory or non-RAM */
 }
 
 /* True when a store to `addr` must break a reservation held at `reserve_addr`

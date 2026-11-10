@@ -627,6 +627,7 @@ int main(int argc, char** argv) {
      * menu reads the revision at stage-2 pc 0x813004B0. */
     static GcnPi pi;
     gcn_pi_init(&pi);
+    gcn_pi_set_refresh_hook(&pi, gcn_dsp_flush_lazy_pi);
     gcn_mmio_register(&bus, "PI", GCN_PI_BASE, GCN_PI_SIZE,
                       gcn_pi_read, gcn_pi_write, &pi);
 

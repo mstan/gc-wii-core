@@ -180,6 +180,11 @@ u8* gcn_mem_resolve(CPUState* cpu, u32 addr, u32* avail) {
         return cpu->ram + addr;
     }
     if (cpu->mem2 && cpu->mem2_size) {
+        if (addr >= 0x10000000u && addr - 0x10000000u < cpu->mem2_size) {
+            u32 offset = addr - 0x10000000u;
+            *avail = cpu->mem2_size - offset;
+            return cpu->mem2 + offset;
+        }
         if (addr >= WII_MEM2_BASE && addr < WII_MEM2_BASE + cpu->mem2_size) {
             u32 offset = addr - WII_MEM2_BASE;
             *avail = cpu->mem2_size - offset;

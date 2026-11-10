@@ -136,6 +136,7 @@ typedef struct {
     u16 reg[GCN_VI_SIZE / 2];     /* 16-bit register backing (off >> 1)       */
     u32 half_line_count;          /* halflines into the current frame         */
     u64 now_cycles;               /* device clock at the last tick            */
+    u32 core_clock;              /* consumer-selected Gekko/Broadway clock */
     u64 last_cycles;              /* cycle stamp of the last halfline edge    */
     u64 ticks_last_line_start;    /* cycle stamp of the current full line     */
     u64 tphl_cache;               /* memoized vi_ticks_per_halfline result    */
@@ -150,6 +151,7 @@ typedef struct {
 } GcnVi;
 
 void gcn_vi_init(GcnVi* vi);
+void gcn_vi_init_model(GcnVi* vi, bool is_wii);
 void gcn_vi_set_irq(GcnVi* vi, GcnViIrqFn fn, void* user);
 /* Register the per-halfline SI-poll scheduling hook fired from vi_advance_halfline. */
 void gcn_vi_set_si_poll_hook(GcnVi* vi, GcnViSiPollFn fn, void* user);

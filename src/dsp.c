@@ -443,26 +443,14 @@ static void aram_dma_kick(GcnDsp* dsp, CPUState* cpu) {
     u8* aram = dsp_lle_aram();          /* shared with the DSP accelerator */
     u32 aram_size = dsp_lle_aram_size();
 
-    if (aram && len &&
-        (u64)mmaddr + len <= cpu->ram_size &&
-        (u64)araddr + len <= aram_size) {
-        if (to_aram) {
-            memcpy(aram + araddr, cpu->ram + mmaddr, len);
-        } else {
-            gcn_ring_watch_check_span(mmaddr, len, 0xD5BD5B00u); /* [gcn-watch] */
-            /* ARAM->MEM1 DMA rewrites guest RAM outside the memory.c store
-             * helpers. Content-dirty only (miss-CRC identity): architecturally
-             * the icache still holds the old lines until the guest icbi's the
-             * range, same convention as dcbz / gather-pipe / GX RAM writes. */
-            gcn_native_code_content_dirty(mmaddr, len);
-            memcpy(cpu->ram + mmaddr, aram + araddr, len);
-        }
+    if (!to_aram && len && (u64)mmaddr+len<=cpu->ram_size &&
+        (u64)araddr+len<=aram_size)
+        gcn_ring_watch_check_span(mmaddr,len,0xD5BD5B00u);
+    if (!gcn_dsp_aram_transfer(dsp,cpu,aram,aram_size)) {
+        fprintf(stderr,"gcn DSP: invalid ARAM DMA range at pc=%08x\n",cpu->pc);
+        cpu->halted=true;
+        return;
     }
-
-    dsp->dma_active = true;
-    dsp->dma_cycles_left = (len / 32u) * GCN_DSP_ARAM_TICKS_PER_32B;
-    if (!dsp->dma_cycles_left)
-        dsp->dma_cycles_left = 1u;
     gcn_ring_event(GCN_EV_ARAM_DMA, (u32)to_aram, len, cpu->pc);
 }
 

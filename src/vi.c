@@ -86,7 +86,7 @@ static u64 vi_ticks_per_halfline(GcnVi* vi) {
     u32 key = (clock_bit << 10) | hlw;
     if (key != vi->tphl_key) {
         u32 clock_hz = clock_bit ? 54000000u : 27000000u;
-        u64 ticks_per_sample = 2ull * GCN_VI_CORE_CLOCK / clock_hz;
+        u64 ticks_per_sample = 2ull * vi->core_clock / clock_hz;
         vi->tphl_cache = ticks_per_sample * hlw;
         vi->tphl_key = key;
     }
@@ -173,7 +173,7 @@ static void vi_advance_halfline(GcnVi* vi) {
             ? even_field_begin
             : vi_halflines_field(vi, GCN_VI_VTE_HI, GCN_VI_VTE_LO);
         double field_period_sec = (double)(vi_ticks_per_halfline(vi) * (u64)field_hl) /
-                                   (double)GCN_VI_CORE_CLOCK;
+                                   (double)vi->core_clock;
         vi->field_hook(vi->field_hook_user, field_period_sec);
     }
 
@@ -347,7 +347,12 @@ void gcn_vi_print_present_stats(void) {
 }
 
 void gcn_vi_init(GcnVi* vi) {
+    gcn_vi_init_model(vi, false);
+}
+
+void gcn_vi_init_model(GcnVi* vi, bool is_wii) {
     memset(vi, 0, sizeof *vi);
+    vi->core_clock = is_wii ? 729000000u : GCN_VI_CORE_CLOCK;
 
     /* Power-on register state: Dolphin VideoInterfaceManager::Init() calls
      * Preset(true) UNCONDITIONALLY (VideoInterface.cpp:96-186), so the VI

@@ -8,7 +8,6 @@
 #include "pi/pi.h"
 #include "cpu/native_boundary.h"
 #include "debug/rings.h"
-#include "dsp/dsp.h"   /* gcn_dsp_flush: catch the DSP core up before INTSR/INTMR observe it */
 
 #include <string.h>
 
@@ -26,12 +25,22 @@ bool gcn_pi_external_pending(void) {
 }
 
 void gcn_pi_init(GcnPi* pi) {
+    gcn_pi_init_model(pi, false);
+}
+
+void gcn_pi_init_model(GcnPi* pi, bool is_wii) {
     memset(pi, 0, sizeof *pi);
+    pi->is_wii = is_wii;
+    pi->fifo_pointer_mask = is_wii ? 0x1fffffe0u : 0x03ffffe0u;
     /* Power-on cause word (Dolphin ProcessorInterface Init:54): reset button
      * released (RST_BUTTON high) + the VI bit, which stays set until the
      * first VI interrupt-register evaluation deasserts the line. */
     pi->intsr = GCN_PI_INT_RST_BUTTON | GCN_PI_INT_VI;
     s_pi = pi;
+}
+
+void gcn_pi_set_refresh_hook(GcnPi* pi, GcnPiRefreshFn fn) {
+    pi->refresh_hook = fn;
 }
 
 static u32 pi_index(u32 addr) {
@@ -106,7 +115,7 @@ u32 gcn_pi_read(void* user, CPUState* cpu, u32 addr, u8 size) {
          * — the DSP cause bit (0x40, INT_CAUSE_DSP) has to be fresh even
          * though gcn_pi_deliver_external never ran to trigger a flush
          * indirectly. */
-        gcn_dsp_flush_lazy_pi();
+        if (pi->refresh_hook) pi->refresh_hook();
         /* atomic: see gcn_pi_set_interrupt */
         return __atomic_load_n(&pi->intsr, __ATOMIC_ACQUIRE);
     }
@@ -131,7 +140,7 @@ void gcn_pi_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size) {
          * debt not yet run) newly deliverable, so catch the core up before the
          * new mask takes effect — otherwise a real pending DSP condition could
          * be missed for one more block. */
-        gcn_dsp_flush_lazy_pi();
+        if (pi->refresh_hook) pi->refresh_hook();
         pi->reg[pi_index(addr)] = value;
         return;
     }
@@ -149,7 +158,7 @@ void gcn_pi_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size) {
          * re-spins the DVD drive (ResetDrive(true)) — see pi.h's
          * reset_drive_hook doc comment and di.h's "drive re-spin trigger". */
         pi->reg[pi_index(addr)] = value;
-        if ((~value & 0x4u) && pi->reset_drive_hook)
+        if (!pi->is_wii && (~value & 0x4u) && pi->reset_drive_hook)
             pi->reset_drive_hook();
         return;
     }
@@ -158,7 +167,7 @@ void gcn_pi_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size) {
         /* Gather-pipe FIFO pointers: hardware ignores upper + low-5 bits so the
          * burst-advanced write pointer lands on `end` exactly and wraps
          * (ProcessorInterface.cpp:91-110). See PI_FIFO_PTR_MASK. */
-        pi->reg[pi_index(addr)] = value & PI_FIFO_PTR_MASK;
+        pi->reg[pi_index(addr)] = value & pi->fifo_pointer_mask;
         return;
     }
     pi->reg[pi_index(addr)] = value;

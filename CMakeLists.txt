@@ -133,6 +133,10 @@ target_link_libraries(gcn_runtime PRIVATE gcn_runtime_core)
 # ---------------------------------------------------------------------------
 enable_testing()
 
+add_executable(test_broadway_runtime tests/test_broadway.c)
+target_link_libraries(test_broadway_runtime PRIVATE gcn_runtime_core)
+add_test(NAME broadway_spr_runtime COMMAND test_broadway_runtime)
+
 add_executable(test_seed tests/test_seed.c)
 target_link_libraries(test_seed PRIVATE gcn_runtime_core)
 add_test(NAME seed_contract COMMAND test_seed)

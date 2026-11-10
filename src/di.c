@@ -22,7 +22,7 @@ static GcnDi* s_di = NULL;
 static FILE* s_di_journal = NULL;
 static u64 s_di_command_seq = 0;
 
-#define GCN_DI_CORE_CLOCK_HZ          486000000ull
+#define GCN_DI_CORE_CLOCK_HZ          ((u64)(s_di ? s_di->core_clock : 486000000u))
 #define GCN_DI_MIN_COMMAND_LATENCY_US 300ull
 #define GCN_DI_READ_COMMAND_LATENCY_US 600ull
 #define GCN_DI_DVD_SECTOR_SIZE        0x800ull
@@ -605,7 +605,12 @@ void gcn_di_reset_drive_spinup(void) {
 }
 
 void gcn_di_init(GcnDi* di) {
+    gcn_di_init_model(di, false);
+}
+
+void gcn_di_init_model(GcnDi* di, bool is_wii) {
     memset(di, 0, sizeof *di);
+    di->core_clock = is_wii ? 729000000u : 486000000u;
     s_di_command_seq = 0;
     /* DVDInterface::Init:261-302 — ASSERT(!IsDiscInside()) (:263): the console
      * never has a disc mounted yet at this point, ALWAYS. m_DICVR.Hex=1 is set

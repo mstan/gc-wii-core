@@ -103,15 +103,21 @@ typedef void (*GcnPiFifoResetFn)(void);
  * boot.c to di.c's gcn_di_reset_drive_spinup so pi.c never takes a dependency
  * on di.h — same no-arg idiom as GcnPiFifoResetFn/gcn_gp_reset. */
 typedef void (*GcnPiResetDriveFn)(void);
+typedef void (*GcnPiRefreshFn)(void);
 
 typedef struct {
     u32 reg[GCN_PI_SIZE / 4];
     u32 intsr;                  /* live interrupt-cause word (not in reg[]) */
+    u32 fifo_pointer_mask;
+    bool is_wii;
+    GcnPiRefreshFn refresh_hook; /* consumer-owned device synchronization */
     GcnPiFifoResetFn fifo_reset_hook;  /* gather-pipe reset (PI_FIFO_RESET) */
     GcnPiResetDriveFn reset_drive_hook; /* DVD drive re-spin (PI_RESET_CODE) */
 } GcnPi;
 
 void gcn_pi_init(GcnPi* pi);
+void gcn_pi_init_model(GcnPi* pi, bool is_wii);
+void gcn_pi_set_refresh_hook(GcnPi* pi, GcnPiRefreshFn fn);
 /* Register the gather-pipe reset hook fired on a PI_FIFO_RESET write. */
 void gcn_pi_set_fifo_reset_hook(GcnPi* pi, GcnPiFifoResetFn fn);
 /* Register the DVD drive re-spin hook fired on a PI_RESET_CODE write with bit
