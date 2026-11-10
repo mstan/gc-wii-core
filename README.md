@@ -12,7 +12,8 @@ than gcnllr's. The IPL descrambler and trace-format header are included with
 their original provenance. DSP instruction execution comes from the pinned `gc-dsp-core`
 submodule; initialize submodules recursively.
 
-The reusable low-level implementations cover memory/CPU glue, interrupts,
+The reusable low-level implementations cover memory/CPU glue, native REL
+binding/invalidation, portable allocation/write epochs, interrupts,
 GX/FIFO/VI, DSP registers, AI, disc, EXI, SI and persistence. Console composition,
 memory-map extensions, firmware policy and host integration remain consumers'
 responsibility. Wii-specific IOS, NAND, IPC and input integration is pending.

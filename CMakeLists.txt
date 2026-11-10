@@ -95,6 +95,8 @@ add_subdirectory(${GC_WII_IPL_TOOLS_DIR}
 # executable and the unit test link the same objects (and so future generated C
 # links against exactly these symbols).
 add_library(gcn_runtime_core STATIC
+  src/rel_module.c
+  src/write_epoch.c
   src/memory.c
   src/cpu_glue.c
   src/interpreter.c
