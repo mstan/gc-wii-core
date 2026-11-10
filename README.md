@@ -21,3 +21,9 @@ responsibility. Wii-specific IOS, NAND, IPC and input integration is pending.
 The package retains its GPL license and imported file notices. DSP ancestry is
 documented in `dsp_lle/UPSTREAM.md`. Firmware, games, generated guest code and
 native saves must never be committed.
+
+The native Aurora GX service is in `native/gx`, with its consumer memory and
+completion ABI in `include/gcnllr/native_gx.h`. Its donor dependency graph is
+supplied by the consumer. Wii address fields are a separate build selection;
+GameCube defaults and the software GX reference remain available. See the
+service README for the explicit bank callbacks and focused GPU check.
