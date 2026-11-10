@@ -611,6 +611,7 @@ void gcn_di_init(GcnDi* di) {
 void gcn_di_init_model(GcnDi* di, bool is_wii) {
     memset(di, 0, sizeof *di);
     di->core_clock = is_wii ? 729000000u : 486000000u;
+    di->dma_address_mask = is_wii ? ~0x1fu : GCN_DI_MAR_MASK;
     s_di_command_seq = 0;
     /* DVDInterface::Init:261-302 — ASSERT(!IsDiscInside()) (:263): the console
      * never has a disc mounted yet at this point, ALWAYS. m_DICVR.Hex=1 is set
@@ -746,7 +747,7 @@ void gcn_di_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size) {
     case GCN_DI_CMDBUF0: di->cmdbuf[0] = value; return;
     case GCN_DI_CMDBUF1: di->cmdbuf[1] = value; return;
     case GCN_DI_CMDBUF2: di->cmdbuf[2] = value; return;
-    case GCN_DI_MAR:     di->dimar = value & GCN_DI_MAR_MASK; return;
+    case GCN_DI_MAR:     di->dimar = value & di->dma_address_mask; return;
     case GCN_DI_LENGTH:  di->dilength = value & GCN_DI_LENGTH_MASK; return;
 
     case GCN_DI_CR:

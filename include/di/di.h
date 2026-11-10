@@ -204,6 +204,7 @@ typedef void (*GcnDiIrqFn)(void* user, int level);
 
 typedef struct {
     u32 core_clock;
+    u32 dma_address_mask;
     u32 disr;            /* DISR   */
     u32 dicvr;           /* DICVR  */
     u32 cmdbuf[3];       /* DICMDBUF0..2 */
