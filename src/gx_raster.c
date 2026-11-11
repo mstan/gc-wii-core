@@ -17,7 +17,7 @@
 #include <stdint.h>      /* uintptr_t — GCN_GX_CFG_CACHE_VERIFY pointer-field compares */
 #include <stdlib.h>      /* getenv — GCN_GX_STATS cached read, see below; abort() — cfg-cache-verify mismatch */
 #include <string.h>
-#include <direct.h>
+#include "gx/gx_host.h"
 
 static int s_efb_copy_dump_init;
 static char s_efb_copy_dump_dir[512];
@@ -37,7 +37,7 @@ static int efb_copy_dump_on(void) {
         const char* dir = getenv("GCN_GX_EFB_COPY_DUMP");
         if (dir && dir[0]) {
             snprintf(s_efb_copy_dump_dir, sizeof s_efb_copy_dump_dir, "%s", dir);
-            _mkdir(s_efb_copy_dump_dir);
+            gx_host_mkdir(s_efb_copy_dump_dir);
         }
         const char* ev = getenv("GCN_GX_EFB_COPY_DUMP_EVERY");
         if (ev && ev[0]) {
@@ -58,7 +58,7 @@ static int efb_source_dump_on(void) {
         const char* dir = getenv("GCN_GX_EFB_SOURCE_DUMP");
         if (dir && dir[0]) {
             snprintf(s_efb_source_dump_dir, sizeof s_efb_source_dump_dir, "%s", dir);
-            _mkdir(s_efb_source_dump_dir);
+            gx_host_mkdir(s_efb_source_dump_dir);
         }
         const char* ev = getenv("GCN_GX_EFB_SOURCE_DUMP_EVERY");
         if (ev && ev[0]) {
@@ -147,6 +147,9 @@ static void efb_copy_dump_feed(const u8* base, u32 stride, u32 row_bytes, u32 ro
         fclose(mf);
     }
 }
+#include "gx/gx_memory.h"
+#include "gx/gx_host.h"
+#if GCN_GX_X86_SIMD
 #include <x86intrin.h>   /* __rdtsc — GCN_GX_STATS attribution only */
 #include <emmintrin.h>   /* SSE2 — EFB-copy scanline encode (GCN_GX_NO_SIMD knob) */
 #include <immintrin.h>   /* AVX2 — efb_clear_rect / EFB-copy scanline encode 8-wide
@@ -156,11 +159,14 @@ static void efb_copy_dump_feed(const u8* base, u32 stride, u32 row_bytes, u32 ro
                           * __attribute__((target("avx2"))), so no AVX2 instruction
                           * can leak into code that might run on a pre-AVX2 CPU. */
 
+#endif
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>     /* worker pool: CreateThread + WaitOnAddress/WakeByAddressAll
                           * (tile-parallel rasterizer — see the GX-MT block comment
                           * above gx_mt_worker) */
 
+#endif
 /* ============================================================================
  * Tile-parallel rasterizer (GX-MT) — compile-time worker ceiling. The actual
  * count is resolved once per process from GCN_GX_THREADS (see gx_mt_resolve):
@@ -212,12 +218,16 @@ static int s_no_simd = -1;
 static int s_no_avx2 = -1;
 static int s_cpu_avx2 = -1;
 static inline int gx_avx2_available(void) {
+#if GCN_GX_X86_SIMD
     if (s_no_avx2 < 0) s_no_avx2 = getenv("GCN_GX_NO_AVX2") ? 1 : 0;
     if (s_cpu_avx2 < 0) {
         __builtin_cpu_init();
         s_cpu_avx2 = __builtin_cpu_supports("avx2") ? 1 : 0;
     }
     return !s_no_avx2 && s_cpu_avx2;
+#else
+    return 0;
+#endif
 }
 
 /* EFB geometry (VideoCommon/VideoCommon.h:15-16). */
@@ -624,10 +634,10 @@ typedef struct {
     u32 tlutfmt;                /* TX_SETTLUT format: 0 IA8, 1 RGB565, 2 RGB5A3 */
     u32 img_base;               /* (image3_raw & 0xFFFFFF) << 5, UNMASKED (matches
                                   * the original inline trap-log expression) */
-    u32 phys;                   /* img_base & 0x1FFFFFFF (the actual MEM1 offset) */
-    int valid;                  /* s_cpu && s_cpu->ram && phys < ram_size */
-    const u8* src;               /* s_cpu->ram + phys, only meaningful if valid */
-    u32 src_len;                 /* ram_size - phys, only meaningful if valid   */
+    u32 phys;                   /* physical MEM1/MEM2 identity */
+    int valid;                  /* checked main-RAM bank view */
+    const u8* src;               /* bank bytes, only meaningful if valid */
+    u32 src_len;                /* available bytes to the bank boundary */
 } TexUnitCfg;
 
 typedef struct {
@@ -1770,7 +1780,7 @@ static void tex_sample_mip(int wid, u32 texmap, s32 s, s32 t, u32 mip,
     }
 
     if (!tc->valid) {
-        TRAP(texoob, "texture source out of MEM1"); memset(out, 0, 4); return;
+        TRAP(texoob, "texture source out of main RAM"); memset(out, 0, 4); return;
     }
     const u8* src = tc->src;
     u32 src_len = tc->src_len;
@@ -2285,9 +2295,9 @@ static inline void tev_sample_stat(int wid, u32 texmap, s32 texS, s32 texT,
     if (s_pixel_stats) {
         s_ps_tex_calls++;
         if (linear) s_ps_tex_linear++; else s_ps_tex_point++;
-        u64 tex_t0 = __rdtsc();
+        u64 tex_t0 = gx_host_ticks();
         tex_sample(wid, texmap, texS, texT, lod, linear, texel);
-        s_tsc_tex += __rdtsc() - tex_t0;
+        s_tsc_tex += gx_host_ticks() - tex_t0;
     } else {
         tex_sample(wid, texmap, texS, texT, lod, linear, texel);
     }
@@ -2418,7 +2428,7 @@ static void tev_indirect_coord(Tev* t, const TevStageCfg* sc,
 static inline u64 tev_comb_begin(u64* tex_before) {
     if (!s_pixel_stats) { *tex_before = 0; return 0; }
     *tex_before = s_tsc_tex;
-    return __rdtsc();
+    return gx_host_ticks();
 }
 
 /* COMB-bucket-close (pass exit) + blend dispatch (was tev_draw's final
@@ -2429,10 +2439,10 @@ static inline void tev_comb_finish(Tev* t, u8* output, u64 comb_t0, u64 tex_befo
                                     void (*blend_fn)(Tev*, u8*)) {
     apply_fog(t, output);
     if (s_pixel_stats) {
-        s_tsc_comb += (__rdtsc() - comb_t0) - (s_tsc_tex - tex_before);
-        u64 blend_t0 = __rdtsc();
+        s_tsc_comb += (gx_host_ticks() - comb_t0) - (s_tsc_tex - tex_before);
+        u64 blend_t0 = gx_host_ticks();
         blend_fn(t, output);
-        s_tsc_blend += __rdtsc() - blend_t0;
+        s_tsc_blend += gx_host_ticks() - blend_t0;
     } else {
         blend_fn(t, output);
     }
@@ -2575,7 +2585,7 @@ static void tev_draw(Tev* t) {
             s_debug_pending.alpha_rejected++;
         /* COMB bucket boundary (fail exit): stage loop + alpha_test, minus the
          * nested TEX delta accumulated above. */
-        if (s_pixel_stats) s_tsc_comb += (__rdtsc() - comb_t0) - (s_tsc_tex - tex_before);
+        if (s_pixel_stats) s_tsc_comb += (gx_host_ticks() - comb_t0) - (s_tsc_tex - tex_before);
         return;
     }
 
@@ -3908,9 +3918,9 @@ static int raster_pixel_prep(Tev* t, s32 x, s32 y, s32 xi, s32 yi) {
  * technique as draw_triangle over draw_triangle_impl. */
 static void build_block_timed(Tev* t, s32 bx, s32 by) {
     if (!s_pixel_stats) { build_block(t, bx, by); return; }
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     build_block(t, bx, by);
-    s_tsc_block += __rdtsc() - t0;
+    s_tsc_block += gx_host_ticks() - t0;
 }
 
 /* Dispatch to the fused specialized path when build_draw_cfg's selection
@@ -3927,9 +3937,9 @@ static void raster_pixel(Tev* t, s32 x, s32 y, s32 xi, s32 yi) {
         if (raster_pixel_prep(t, x, y, xi, yi)) tev_shade(t);   /* runs the combiner, late-Z, alpha test, then blends */
         return;
     }
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     int ready = raster_pixel_prep(t, x, y, xi, yi);
-    s_tsc_slope += __rdtsc() - t0;
+    s_tsc_slope += gx_host_ticks() - t0;
     if (!ready) { s_ps_earlyz_rejected++; return; }
     tev_shade(t);
 }
@@ -4033,9 +4043,9 @@ static void raster_pixel_fused(Tev* t, s32 x, s32 y, s32 xi, s32 yi) {
         s_cfg.fused(t);
         return;
     }
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     raster_pixel_prep_fused(t, x, y, xi, yi);
-    s_tsc_slope += __rdtsc() - t0;
+    s_tsc_slope += gx_host_ticks() - t0;
     s_cfg.fused(t);
 }
 
@@ -4205,6 +4215,7 @@ static u64 s_mt_fork_tsc;       /* main-thread wall inside the whole fork path
 static u64 s_mt_scan_tsc;       /* ...of which: main's own scan_block_rows */
 static u64 s_mt_join_tsc;       /* ...of which: join spin after own scan done */
 
+#ifdef _WIN32
 static DWORD WINAPI gx_mt_worker(LPVOID arg) {
     const int wid = (int)(intptr_t)arg;
     s32 seen = 0;
@@ -4212,7 +4223,7 @@ static DWORD WINAPI gx_mt_worker(LPVOID arg) {
         s32 e;
         int spins = 0;
         while ((e = __atomic_load_n(&s_mt_epoch, __ATOMIC_ACQUIRE)) == seen) {
-            if (++spins < 16384) { _mm_pause(); continue; }
+            if (++spins < 16384) { gx_host_relax(); continue; }
             s32 cmp = seen;
             WaitOnAddress((volatile VOID*)&s_mt_epoch, &cmp, sizeof cmp, INFINITE);
             spins = 0;
@@ -4222,8 +4233,17 @@ static DWORD WINAPI gx_mt_worker(LPVOID arg) {
     }
     return 0;   /* unreachable — workers live for the whole process */
 }
+#endif
+
+static void gx_mt_wake(void) {
+#ifdef _WIN32
+    WakeByAddressAll((PVOID)&s_mt_epoch);
+#endif
+}
 
 static void gx_mt_resolve(void) {
+#ifdef _WIN32
+
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     const int ncpu = (int)si.dwNumberOfProcessors;
@@ -4247,6 +4267,11 @@ static void gx_mt_resolve(void) {
         }
     }
     if (n > GX_MT_MAX) n = GX_MT_MAX;
+#ifdef GCN_GX_SOFTWARE_ONLY
+    /* The separately selected reference stays serial and never changes the
+     * machine owner's affinity or starts idle-spinning raster workers. */
+    n = 1;
+#endif
     /* The per-pixel stats/census knobs accumulate into SHARED counters from
      * inside the pixel path — exact only single-threaded. They are
      * measurement modes, so they win: force serial rather than race the
@@ -4295,6 +4320,9 @@ static void gx_mt_resolve(void) {
         fprintf(stderr, "gx_raster: GX-MT %d threads (fork at bbox >= %u px; "
                 "GCN_GX_THREADS=1 to disable)\n", n, s_mt_min_area);
     s_mt_threads = n;
+#else
+    s_mt_threads = 1;
+#endif
 }
 
 /* General TEV program (docs/GX_GENERAL_TEV.md) eligibility gate.
@@ -4699,7 +4727,7 @@ static void draw_triangle_impl(Tev* t, const OutVtx* v0, const OutVtx* v1, const
          * differential sink can compare the GPU result after software. */
         if (s_mt_threads > 1 && s_cfg.parallel_ok &&
             (u32)((maxx - minx) * (maxy - miny)) >= s_mt_min_area) {
-            u64 t0 = s_mt_stats == 1 ? __rdtsc() : 0;
+            u64 t0 = s_mt_stats == 1 ? gx_host_ticks() : 0;
             for (int i = 1; i < s_mt_threads; i++) {
                 s_tev_w[i] = s_tev_w[0];
                 s_tev_w[i].wid = i;
@@ -4713,18 +4741,18 @@ static void draw_triangle_impl(Tev* t, const OutVtx* v0, const OutVtx* v1, const
                                    ((u64)(u32)nrows << 16)),
                              __ATOMIC_RELEASE);
             __atomic_add_fetch(&s_mt_epoch, 1, __ATOMIC_RELEASE);
-            WakeByAddressAll((PVOID)&s_mt_epoch);
+            gx_mt_wake();
             if (s_mt_stats != 1) {
                 scan_rows_dynamic(t);
                 while (__atomic_load_n(&s_mt_rows_done, __ATOMIC_ACQUIRE) != nrows)
-                    _mm_pause();
+                    gx_host_relax();
             } else {
-                u64 t1 = __rdtsc();
+                u64 t1 = gx_host_ticks();
                 scan_rows_dynamic(t);
-                u64 t2 = __rdtsc();
+                u64 t2 = gx_host_ticks();
                 while (__atomic_load_n(&s_mt_rows_done, __ATOMIC_ACQUIRE) != nrows)
-                    _mm_pause();
-                u64 t3 = __rdtsc();
+                    gx_host_relax();
+                u64 t3 = gx_host_ticks();
                 s_mt_forks++;
                 s_mt_scan_tsc += t2 - t1;
                 s_mt_join_tsc += t3 - t2;
@@ -4744,7 +4772,7 @@ static void draw_triangle_impl(Tev* t, const OutVtx* v0, const OutVtx* v1, const
      * on worker 0 — the exact old loop. */
     if (s_mt_threads > 1 && s_cfg.parallel_ok &&
         (u32)((maxx - minx) * (maxy - miny)) >= s_mt_min_area) {
-        u64 t0 = s_mt_stats == 1 ? __rdtsc() : 0;
+        u64 t0 = s_mt_stats == 1 ? gx_host_ticks() : 0;
         for (int i = 1; i < s_mt_threads; i++) {
             s_tev_w[i] = s_tev_w[0];   /* per-draw template: Reg/Konst et al. */
             s_tev_w[i].wid = i;
@@ -4757,18 +4785,18 @@ static void draw_triangle_impl(Tev* t, const OutVtx* v0, const OutVtx* v1, const
                          (s64)(((u64)s_mt_fork_id << 32) | ((u64)(u32)nrows << 16)),
                          __ATOMIC_RELEASE);   /* publishes job + rows_done reset */
         __atomic_add_fetch(&s_mt_epoch, 1, __ATOMIC_RELEASE);
-        WakeByAddressAll((PVOID)&s_mt_epoch);
+        gx_mt_wake();
         if (s_mt_stats != 1) {
             scan_rows_dynamic(t);
             while (__atomic_load_n(&s_mt_rows_done, __ATOMIC_ACQUIRE) != nrows)
-                _mm_pause();
+                gx_host_relax();
         } else {
-            u64 t1 = __rdtsc();
+            u64 t1 = gx_host_ticks();
             scan_rows_dynamic(t);
-            u64 t2 = __rdtsc();
+            u64 t2 = gx_host_ticks();
             while (__atomic_load_n(&s_mt_rows_done, __ATOMIC_ACQUIRE) != nrows)
-                _mm_pause();
-            u64 t3 = __rdtsc();
+                gx_host_relax();
+            u64 t3 = gx_host_ticks();
             s_mt_forks++;
             s_mt_scan_tsc += t2 - t1;
             s_mt_join_tsc += t3 - t2;
@@ -4789,9 +4817,9 @@ static void draw_triangle_impl(Tev* t, const OutVtx* v0, const OutVtx* v1, const
 static void draw_triangle(Tev* t, const OutVtx* v0, const OutVtx* v1, const OutVtx* v2) {
     if (!s_draw_stats) { draw_triangle_impl(t, v0, v1, v2); return; }
     u64 px_before = s_pixels_shaded;
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     draw_triangle_impl(t, v0, v1, v2);
-    u64 dt = __rdtsc() - t0;
+    u64 dt = gx_host_ticks() - t0;
     s_tsc_tri += dt;
     /* Area histogram (see s_hist_* comment near the top): bucket by
      * log2(post-scissor bbox area), attributing this triangle's wall and
@@ -5576,8 +5604,7 @@ static const u8* array_ptr(const GxCpState* cp, u32 arr, u32 index, u32 need) {
     u32 stride = cp->array_strides[arr];
     u32 base = cp->array_bases[arr] & 0x1FFFFFFFu;
     u64 addr = (u64)base + (u64)index * stride;
-    if (!s_cpu || !s_cpu->ram || addr + need > (u64)s_cpu->ram_size) return NULL;
-    return s_cpu->ram + addr;
+    return gcn_gx_memory(s_cpu, addr, need, NULL);
 }
 
 /* Position-only loader for the late IPL menu's tiny R/S fans.  Those streams
@@ -5742,7 +5769,7 @@ static int load_vertex(const GxCpState* cp, u32 vat, const u8* v, u32 vstride, I
         u32 esize = posfmt < 2u ? 1u : posfmt < 4u ? 2u : 4u;
         float scale = posfmt < 4u ? 1.0f / (float)(1u << posfrac) : 1.0f;
         const u8* p = array_ptr(cp, 0, idx, n * esize);
-        if (!p) { TRAP(posoob, "position array out of MEM1"); return 0; }
+        if (!p) { TRAP(posoob, "position array out of main RAM"); return 0; }
         u32 poff = 0;
         for (u32 i = 0; i < n; i++)
             out->position[i] = read_direct_elem(p, &poff, posfmt) * scale;
@@ -5773,7 +5800,7 @@ static int load_vertex(const GxCpState* cp, u32 vat, const u8* v, u32 vstride, I
             for (u32 gI = 0; gI < 3u; gI++) {
                 u32 idx = read_index(v, &off, normtype);
                 const u8* p = array_ptr(cp, 1, idx, (gI + 1u) * 3u * esize);
-                if (!p) { TRAP(normoob, "normal array out of MEM1"); return 0; }
+                if (!p) { TRAP(normoob, "normal array out of main RAM"); return 0; }
                 p += gI * 3u * esize;
                 for (u32 c = 0; c < 3; c++) {
                     u32 o = c * esize;
@@ -5783,7 +5810,7 @@ static int load_vertex(const GxCpState* cp, u32 vat, const u8* v, u32 vstride, I
         } else {
             u32 idx = read_index(v, &off, normtype);
             const u8* p = array_ptr(cp, 1, idx, groups * 3u * esize);
-            if (!p) { TRAP(normoob, "normal array out of MEM1"); return 0; }
+            if (!p) { TRAP(normoob, "normal array out of main RAM"); return 0; }
             for (u32 gI = 0; gI < groups; gI++)
                 for (u32 c = 0; c < 3; c++) {
                     u32 o = (gI * 3u + c) * esize;
@@ -5826,7 +5853,7 @@ static int load_vertex(const GxCpState* cp, u32 vat, const u8* v, u32 vstride, I
                 u32 idx = read_index(v, &off, ctype);
                 const u8* p = array_ptr(cp, 2u + (u32)ch, idx, w);   /* CPArray::Color0=2/Color1=3 */
                 if (!p) {
-                    TRAPF(coloroob, "color%d array out of MEM1 (idx %u, fmt %u)", ch, idx, cfmt);
+                    TRAPF(coloroob, "color%d array out of main RAM (idx %u, fmt %u)", ch, idx, cfmt);
                     return 0;
                 }
                 decode_color_by_fmt(cfmt, p, col_attr[ch]);
@@ -5859,7 +5886,7 @@ static int load_vertex(const GxCpState* cp, u32 vat, const u8* v, u32 vstride, I
             u32 idx = read_index(v, &off, tctype);
             u32 esize = fmt < 2u ? 1u : fmt < 4u ? 2u : 4u;
             const u8* p = array_ptr(cp, 4 + tc, idx, n * esize);
-            if (!p) { TRAP(tcoob, "texcoord array out of MEM1"); return 0; }
+            if (!p) { TRAP(tcoob, "texcoord array out of main RAM"); return 0; }
             u32 poff = 0;
             for (u32 i = 0; i < n; i++)
                 out->texCoords[tc][i] = read_direct_elem(p, &poff, fmt) * scale;
@@ -6189,9 +6216,8 @@ static void build_draw_cfg(void) {
         tc->image3_raw = ti3;
         tc->img_base = (ti3 & 0x00ffffffu) << 5;
         tc->phys = tc->img_base & 0x1FFFFFFFu;
-        tc->valid = (s_cpu && s_cpu->ram && tc->phys < s_cpu->ram_size);
-        tc->src     = tc->valid ? s_cpu->ram + tc->phys : NULL;
-        tc->src_len = tc->valid ? s_cpu->ram_size - tc->phys : 0u;
+        tc->src = gcn_gx_memory(s_cpu, tc->phys, 1, &tc->src_len);
+        tc->valid = tc->src != NULL;
 
         /* TX_SETTLUT (BPMemory.h TexTLUT, regs 0x98+unit / 0xB8+(unit-4)):
          * palette location inside modeled TMEM (tmem_offset<<9) + entry
@@ -6427,7 +6453,7 @@ static void build_draw_cfg(void) {
  * no field build_draw_cfg() sets that this comparator must skip.
  *
  * tex[].src/tlut are host pointers, but each is a pure deterministic function
- * of s_cpu->ram (a fixed base for the process lifetime) and phys / the fixed
+ * of the CPU's fixed RAM bank bases and phys / the fixed
  * TMEM base -- comparing the pointer VALUE is exactly as meaningful as
  * comparing phys/tlut_reg, and additionally catches a moved-ram-base class of
  * bug that comparing phys alone would miss. s_cfg.fused is a function pointer
@@ -7649,10 +7675,10 @@ void gx_raster_draw(const GxCpState* cp, u32 prim, u32 vat,
     }
 
     u64 tri_before = s_tsc_tri;
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     gx_raster_draw_impl(cp, prim, vat, verts, nverts, vstride);
     debug_finalize_draw();
-    u64 total = __rdtsc() - t0;
+    u64 total = gx_host_ticks() - t0;
     u64 tri_delta = s_tsc_tri - tri_before;
     s_tsc_vtx += (total > tri_delta) ? (total - tri_delta) : 0;
     s_draw_calls_stat++;
@@ -7973,6 +7999,7 @@ static inline void set_pixel_alpha_only_rgba6_cc(u32 off, const u8* cc) {
  * keeps the untouched SSE2 4-wide pass (which has its own scalar
  * remainder) — see gx_avx2_available's comment.
  * ==========================================================================*/
+#if GCN_GX_X86_SIMD
 __attribute__((target("avx2")))
 static void efb_clear_color_avx2(u32* efb, int left, int xr, int top, int bottom,
                                   u32 rowstride, u32 color_or) {
@@ -7999,6 +8026,8 @@ static void efb_clear_depth_avx2(u32* efb, int left, int xr, int top, int bottom
             _mm256_storeu_si256((__m256i*)&efb[rowoff + (u32)x], vd);
     }
 }
+
+#endif
 
 static void efb_clear_rect(void) {
     /* EfbCopy::ClearEfb (EfbCopy.cpp:16-34). */
@@ -8139,6 +8168,8 @@ static void efb_clear_rect(void) {
     int simd_color_ok = !s_no_simd && fmt_direct &&
                          (clear_px == set_pixel_color_only_direct ||
                           clear_px == set_pixel_alpha_color_direct);
+
+#if GCN_GX_X86_SIMD
     if (simd_color_ok) {
         u32 src; memcpy(&src, cc, 4);
         if (gx_avx2_available()) {
@@ -8165,7 +8196,9 @@ static void efb_clear_rect(void) {
                     clear_px(rowoff + (u32)x, cc);   /* scalar remainder, identical formula */
             }
         }
-    } else if (clear_px) {
+    } else
+#endif
+    if (clear_px) {
         for (int y = top; y <= bottom; y++)
             for (int x = left; x <= right; x++)
                 clear_px((u32)x + (u32)y * EFB_WIDTH, cc);
@@ -8191,6 +8224,7 @@ static void efb_clear_rect(void) {
     if (s_zt_upd) {
         /* SetDepth honors zmode.update_enable (bp 0x40, cached as s_zt_upd). */
         u32 depth_val = clearZ & 0x00ffffffu;
+#if GCN_GX_X86_SIMD
         if (!s_no_simd) {
             if (gx_avx2_available()) {
                 int xr = left; while (xr + 8 <= right + 1) xr += 8;
@@ -8211,7 +8245,9 @@ static void efb_clear_rect(void) {
                         SetPixelDepth(rowoff + (u32)x, clearZ);
                 }
             }
-        } else {
+        } else
+#endif
+        {
             for (int y = top; y <= bottom; y++)
                 for (int x = left; x <= right; x++)
                     SetPixelDepth((u32)x + (u32)y * EFB_WIDTH, clearZ);
@@ -8356,6 +8392,7 @@ static inline void efb_copy_pack(u8* row, int x, int i, const int* scanY, const 
  * ==========================================================================*/
 
 /* Zero/sign-extend the LOW 4 16-bit lanes of `x` to 4x32-bit lanes. */
+#if GCN_GX_X86_SIMD
 static inline __m128i simd_zext16_lo(__m128i x) { return _mm_unpacklo_epi16(x, _mm_setzero_si128()); }
 static inline __m128i simd_sext16_lo(__m128i x) { return _mm_srai_epi32(_mm_unpacklo_epi16(x, x), 16); }
 
@@ -8638,6 +8675,8 @@ static int efb_copy_pack_avx2(u8* row, int x0, int src_w, const int* scanY,
     return x;
 }
 
+#endif
+
 typedef struct {
     u8 r, g, b, a;
 } EfbCopyTexel;
@@ -8916,8 +8955,9 @@ void gx_raster_efb_copy(const GxCpState* cp) {
 
         u32 phys = dest_addr & 0x1FFFFFFFu;
         u64 last = (u64)phys + (u64)(dst_h - 1) * dest_stride + (u64)src_w * 2u;
-        if (dest_stride == 0 || !s_cpu || !s_cpu->ram || last > (u64)s_cpu->ram_size) {
-            TRAP(xfboob, "EFB->XFB destination out of MEM1 / zero stride");
+        u8* destination = gcn_gx_memory(s_cpu, phys, last - phys, NULL);
+        if (dest_stride == 0 || !destination) {
+            TRAP(xfboob, "EFB->XFB destination out of main RAM / zero stride");
         } else {
             /* Build yuv422 per source scanline (vertical 3-tap copy filter +
              * horizontal 1/4+1/2+1/4 chroma downsample), then nearest-neighbor
@@ -8959,6 +8999,7 @@ void gx_raster_efb_copy(const GxCpState* cp) {
                 int ynext = (clamp_bottom ? bottom : (int)EFB_HEIGHT) - 1;
                 if (sy + 1 < ynext) ynext = sy + 1;
                 /* per-pixel filtered YUV (indices 1..src_w) */
+#if GCN_GX_X86_SIMD
                 if (simd_ok) {
                     const u32* rowPrev = &s_efb_color[(u32)yprev * EFB_WIDTH];
                     const u32* rowSy   = &s_efb_color[(u32)sy    * EFB_WIDTH];
@@ -8995,14 +9036,17 @@ void gx_raster_efb_copy(const GxCpState* cp) {
                     for (int i = x - left + 1; x < right; i++, x++)
                         efb_copy_col(x, yprev, sy, ynext, copy_getpx, w0, w1, w2, w3, w4, w5, w6,
                                      scanY, scanU, scanV, i);
-                } else {
+                } else
+#endif
+                {
                     for (int i = 1, x = left; x < right; i++, x++)
                         efb_copy_col(x, yprev, sy, ynext, copy_getpx, w0, w1, w2, w3, w4, w5, w6,
                                      scanY, scanU, scanV, i);
                 }
                 scanY[0] = scanY[1]; scanU[0] = scanU[1]; scanV[0] = scanV[1];
                 scanY[src_w + 1] = scanY[src_w]; scanU[src_w + 1] = scanU[src_w]; scanV[src_w + 1] = scanV[src_w];
-                u8* row = s_cpu->ram + phys + (u64)dy * dest_stride;
+                u8* row = destination + (u64)dy * dest_stride;
+#if GCN_GX_X86_SIMD
                 if (simd_ok) {
                     /* Precompute the smoothed chroma for every column 1..src_w
                      * (padding at 0/src_w+1 already mirrors scanU/scanV
@@ -9055,7 +9099,9 @@ void gx_raster_efb_copy(const GxCpState* cp) {
                     }
                     for (; x < src_w; i += 2, x += 2)
                         efb_copy_pack(row, x, i, scanY, scanU, scanV);
-                } else {
+                } else
+#endif
+                {
                     for (int i = 1, x = 0; x < src_w; i += 2, x += 2)
                         efb_copy_pack(row, x, i, scanY, scanU, scanV);
                 }
@@ -9074,9 +9120,9 @@ void gx_raster_efb_copy(const GxCpState* cp) {
             u64 copy_seq = s_efb_copy_dump_seq;
             efb_copy_source_dump_feed(copy_seq, dest_addr, left, top,
                                       src_w, src_h, 0, 0, copy_getpx);
-            gcn_gx_xfb_hash_feed(s_cpu->ram + phys, dest_stride, (u32)src_w * 2u, (u32)dst_h);
-            gcn_gx_xfb_dump_feed(s_cpu->ram + phys, dest_stride, (u32)src_w * 2u, (u32)dst_h);
-            efb_copy_dump_feed(s_cpu->ram + phys, dest_stride, (u32)src_w * 2u, (u32)dst_h,
+            gcn_gx_xfb_hash_feed(destination, dest_stride, (u32)src_w * 2u, (u32)dst_h);
+            gcn_gx_xfb_dump_feed(destination, dest_stride, (u32)src_w * 2u, (u32)dst_h);
+            efb_copy_dump_feed(destination, dest_stride, (u32)src_w * 2u, (u32)dst_h,
                                (u32)src_w, (u32)dst_h, dest_addr, copy, 15u, 1u,
                                s_cpu ? s_cpu->pc : 0u, gcn_gx_frame_count(),
                                gcn_gx_xfb_pub_count(),
@@ -9085,7 +9131,7 @@ void gx_raster_efb_copy(const GxCpState* cp) {
                                source_flags, (u32)s_pf);
             /* Device write to RAM: dirty the miss-CRC identity over the
              * whole copied span (conservatively including stride padding). */
-            gcn_native_code_content_dirty(phys, (u32)((u64)dst_h * dest_stride));
+            gcn_gx_memory_written(s_cpu, phys, (u32)(last - phys));
             gcn_gx_xfb_write_end();
             gcn_gx_xfb_hash_publish_done();
         }
@@ -9116,10 +9162,11 @@ void gx_raster_efb_copy(const GxCpState* cp) {
         if (fmt > 12u || out_w <= 0 || out_h <= 0) {
             TRAPF(efbtexfmt, "invalid EFB->texture format/dimensions "
                   "(target=%u real=%u %dx%d)", target, fmt, out_w, out_h);
-        } else if (dest_stride == 0 || !s_cpu || !s_cpu->ram ||
-                   last > (u64)s_cpu->ram_size) {
-            TRAP(efbtexoob, "EFB->texture destination out of MEM1 / zero stride");
+        } else if (dest_stride == 0 ||
+                   !gcn_gx_memory(s_cpu, phys, last - phys, NULL)) {
+            TRAP(efbtexoob, "EFB->texture destination out of main RAM / zero stride");
         } else {
+            u8* destination = gcn_gx_memory(s_cpu, phys, last - phys, NULL);
             static u16 seen_formats;
             if (!(seen_formats & (u16)(1u << fmt))) {
                 seen_formats |= (u16)(1u << fmt);
@@ -9133,7 +9180,7 @@ void gx_raster_efb_copy(const GxCpState* cp) {
             int wab = w0 + w1, wcde = w2 + w3 + w4, wfg = w5 + w6;
             for (u32 by = 0; by < tiles_y; by++) {
                 for (u32 bx = 0; bx < tiles_x; bx++) {
-                    u8* dst = s_cpu->ram + phys + (u64)by * dest_stride +
+                    u8* dst = destination + (u64)by * dest_stride +
                               (u64)bx * block_bytes;
                     efb_copy_texture_write_block(
                         dst, fmt, (int)bx, (int)by, out_w, out_h,
@@ -9153,22 +9200,22 @@ void gx_raster_efb_copy(const GxCpState* cp) {
             u64 copy_seq = s_efb_copy_dump_seq;
             efb_copy_source_dump_feed(copy_seq, dest_addr, left, top, out_w, out_h,
                                       half_scale, depth, copy_getpx);
-            efb_copy_dump_feed(s_cpu->ram + phys, dest_stride, tiles_x * block_bytes, tiles_y,
+            efb_copy_dump_feed(destination, dest_stride, tiles_x * block_bytes, tiles_y,
                                (u32)out_w, (u32)out_h, dest_addr, copy, fmt, 0u,
                                s_cpu ? s_cpu->pc : 0u, gcn_gx_frame_count(),
                                gcn_gx_xfb_pub_count(),
                                source_hash, source_mean, (u32)left, (u32)top,
                                (u32)src_w, (u32)src_h, source_flags, (u32)s_pf);
             /* Device write to RAM (see the XFB copy above). */
-            gcn_native_code_content_dirty(phys, (u32)(last - phys));
+            gcn_gx_memory_written(s_cpu, phys, (u32)(last - phys));
         }
     }
 
     if (clear) {
         if (s_draw_stats) {
-            u64 t0 = __rdtsc();
+            u64 t0 = gx_host_ticks();
             efb_clear_rect();
-            s_tsc_efb_clear += __rdtsc() - t0;
+            s_tsc_efb_clear += gx_host_ticks() - t0;
             s_efb_clear_calls++;
         } else {
             efb_clear_rect();
