@@ -111,7 +111,7 @@ struct CopyParameters { weights: vec4<u32>, geometry: vec4<u32> };
 @group(0) @binding(2) var<uniform> parameters: CopyParameters;
 fn rgb(x: i32,y: i32) -> vec3<i32> {
     let size=textureDimensions(src);
-    return vec3<i32>(textureLoad(src,vec2<i32>(x,clamp(y,0,i32(size.y)-1)),0).rgb*255.0+0.5);
+    return vec3<i32>(textureLoad(src,clamp(vec2<i32>(x,y),vec2<i32>(0),vec2<i32>(size)-1),0).rgb*255.0+0.5);
 }
 fn filtered(x: i32,y: i32) -> vec3<i32> {
     let row=y+i32(parameters.weights.w);
@@ -134,8 +134,13 @@ fn yuv(rgb: vec3<i32>) -> vec3<i32> {
     if (id.x>=size.x/2u || id.y>=size.y) { return; }
     let a=yuv(filtered(i32(id.x*2u),i32(id.y)));
     let b=yuv(filtered(i32(id.x*2u+1u),i32(id.y)));
+    let left=yuv(filtered(i32(id.x*2u)-1,i32(id.y)));
     let y0=u32(clamp(a.x,0,255));let y1=u32(clamp(b.x,0,255));
-    let u=u32(clamp((a.y+b.y)/2,0,255));let v=u32(clamp((a.z+b.z)/2,0,255));
+    // Hardware chroma is centered on the even pixel: quarter left, half
+    // even, quarter right. Keeping integer precision also preserves the
+    // signed chroma rounding used by the portable copy engine.
+    let u=u32(clamp((left.y+2*a.y+b.y)>>2u,0,255));
+    let v=u32(clamp((left.z+2*a.z+b.z)>>2u,0,255));
     dst[id.y*(size.x/2u)+id.x]=y0|(u<<8u)|(y1<<16u)|(v<<24u);
 }
 )";
@@ -206,6 +211,43 @@ bool settle_framebuffer() {
     finish();
     return gfx::begin_frame(false);
 }
+static void record_copy_clear(const gxruntime::gxcore::EfbCopyCommand& copy) {
+    if (!copy.clear || (!copy.color_update && !copy.alpha_update && !copy.depth_update)) return;
+    const auto& fb=gpu::g_frameBuffer;
+    const gfx::ClipRect rect{int(copy.src_x*fb.size.width/640),int(copy.src_y*fb.size.height/480),
+        int(copy.width*fb.size.width/640),int(copy.height*fb.size.height/480)};
+    const unsigned key=unsigned(copy.color_update)|unsigned(copy.alpha_update)*2|unsigned(copy.depth_update)*4;
+    auto& pipeline=clear_pipelines[key];
+    if (!pipeline) pipeline=gfx::clear::create_pipeline({.msaaSamples=gpu::g_graphicsConfig.msaaSamples,
+        .clearColor=copy.color_update,.clearAlpha=copy.alpha_update,.clearDepth=copy.depth_update});
+    float z=copy.clear_z/16777215.f;if (aurora::gx::UseReversedZ) z=1-z;
+    gfx::machine_copy_clear(pipeline,rect,{copy.clear_r/255.,copy.clear_g/255.,copy.clear_b/255.,copy.clear_a/255.},z);
+}
+void record_efb_clear(const gxruntime::gxcore::EfbCopyCommand& copy) {
+    // A null resolve target seals the preceding render pass without creating
+    // a texture or a copy. The clear starts the new pass, before its draws.
+    const auto& fb=gpu::g_frameBuffer;
+    gfx::resolve_pass({}, {0,0,int(fb.size.width),int(fb.size.height)},false,false,false,{},0,GX_TF_RGBA8);
+    record_copy_clear(copy);
+}
+void complete_frame(bool physical) {
+    if (!gfx::segment_frame()) throw std::runtime_error("Native frame completion submission failed");
+    recorded_copies=false;
+    if (physical) {
+        struct Completion {bool done{},success{};};
+        auto result=std::make_shared<Completion>();
+        worker::enqueue_work([result] {
+            const auto future=gpu::g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly,
+                [result](wgpu::QueueWorkDoneStatus status,wgpu::StringView) {
+                    result->success=status==wgpu::QueueWorkDoneStatus::Success;result->done=true;
+                });
+            gpu::g_instance.WaitAny(future,5000000000ull);
+        });
+        worker::synchronize();
+        if (!result->done || !result->success) throw std::runtime_error("Native frame GPU completion failed");
+    } else worker::synchronize();
+    validate_submission();
+}
 void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter) {
     if (!copy.width || !copy.height || copy.src_x+copy.width>640 || copy.src_y+copy.height>480)
         throw std::runtime_error("Display copy outside supported EFB");
@@ -229,16 +271,7 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     if (capture_rect.width!=int(copy.width) || capture_rect.height!=int(capture_height))
         throw std::runtime_error("Display-band GPU scaling is unsupported");
     gfx::resolve_pass(band.texture,capture_rect,false,false,false,{},0,GX_TF_RGBA8);
-    if (copy.clear && (copy.color_update || copy.alpha_update || copy.depth_update)) {
-        const gfx::ClipRect clear_rect{int(copy.src_x*fb.size.width/640),int(copy.src_y*fb.size.height/480),
-            int(copy.width*fb.size.width/640),int(copy.height*fb.size.height/480)};
-        const unsigned key=unsigned(copy.color_update)|unsigned(copy.alpha_update)*2|unsigned(copy.depth_update)*4;
-        auto& pipeline=clear_pipelines[key];
-        if (!pipeline) pipeline=gfx::clear::create_pipeline({.msaaSamples=gpu::g_graphicsConfig.msaaSamples,
-            .clearColor=copy.color_update,.clearAlpha=copy.alpha_update,.clearDepth=copy.depth_update});
-        float z=copy.clear_z/16777215.f;if (aurora::gx::UseReversedZ) z=1-z;
-        gfx::machine_copy_clear(pipeline,clear_rect,{copy.clear_r/255.,copy.clear_g/255.,copy.clear_b/255.,copy.clear_a/255.},z);
-    }
+    record_copy_clear(copy);
     // The GPU snapshot and filter metadata are immutable before publication.
     // Encoding may happen later; it never samples the mutable EFB again.
 #if GCNLLR_BATCHED_SUBMISSION
