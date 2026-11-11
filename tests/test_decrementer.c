@@ -13,6 +13,9 @@
 } while (0)
 
 static unsigned observed,changed;
+static bool idle_admitted(CPUState* cpu,u32 address,void* user) {
+    (void)cpu;return address==*(u32*)user;
+}
 static void observe(CPUState* cpu,void* user,bool mutation) {
     (void)user;
     if(mutation)++changed;
@@ -62,6 +65,15 @@ int main(void) {
     ppc_mtspr(&cpu,284,42,cpu.pc);CHECK(cpu.timebase==42 && observed==4 && changed==2);
     ppc_decrementer_reset(&cpu);
     ppc_mftb(&cpu,268,cpu.pc);CHECK(observed==4);
+    u32 idle_address=0x80001000;
+    ppc_idle_set_admission(&cpu,idle_admitted,&idle_address);
+    cpu.exception=0;cpu.msr=0;
+    CHECK(!ppc_idle_can_skip(&cpu,idle_address));
+    cpu.msr=0x8000;CHECK(ppc_idle_can_skip(&cpu,idle_address));
+    CHECK(!ppc_idle_can_skip(&cpu,idle_address+4));
+    cpu.exception=PPC_EXC_DECREMENTER;CHECK(!ppc_idle_can_skip(&cpu,idle_address));
+    ppc_decrementer_reset(&cpu);cpu.exception=0;
+    CHECK(!ppc_idle_can_skip(&cpu,idle_address));
     puts("decrementer timing: PASS");
     return 0;
 }

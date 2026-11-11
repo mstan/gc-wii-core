@@ -29,6 +29,7 @@
 #include "cpu/title_module.h"
 #include "cpu/overlay_module.h"
 #include "debug/rings.h"   /* gcn_ring_psq — [gx-fifoprov] psq value audit */
+#include "debug/cost_ring.h"
 #include "memory/memory.h"
 
 #include <stdio.h>
@@ -149,6 +150,24 @@ static bool s_decrementer_pending;
 static CPUState* s_time_cpu;
 static PpcTimeObserver s_time_observer;
 static void* s_time_user;
+static CPUState* s_idle_cpu;
+static PpcIdleAdmission s_idle_admission;
+static void* s_idle_user;
+
+void ppc_idle_set_admission(CPUState* cpu,PpcIdleAdmission admission,void* user) {
+    s_idle_cpu=cpu;s_idle_admission=admission;s_idle_user=user;
+}
+bool ppc_idle_can_skip(CPUState* cpu,u32 address) {
+    return cpu && cpu==s_idle_cpu && s_idle_admission && !cpu->exception &&
+           (cpu->msr&PPC_MSR_EE) && s_idle_admission(cpu,address,s_idle_user);
+}
+void ppc_idle_note_cycles(u64 cycles) {
+#if GCN_COST_RING_ENABLED
+    gcn_cost_note_idle(cycles);
+#else
+    (void)cycles;
+#endif
+}
 
 void ppc_timing_set_observer(CPUState* cpu,PpcTimeObserver observer,void* user) {
     s_time_cpu=cpu;s_time_observer=observer;s_time_user=user;
@@ -165,6 +184,7 @@ bool ppc_decrementer_pending(void) {return s_decrementer_pending;}
 void ppc_decrementer_reset(CPUState* cpu) {
     s_decrementer_pending = false;
     ppc_timing_set_observer(NULL,NULL,NULL);
+    ppc_idle_set_admission(NULL,NULL,NULL);
     if (cpu)
         cpu->spr[22] = 0xFFFFFFFFu;
 }

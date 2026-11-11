@@ -159,6 +159,8 @@ void gcn_cost_thread_boundary(u64 cycles,u32 thread) {
     turn_cycles=cycles;turn_thread=thread;
 }
 
+void gcn_cost_note_idle(u64 cycles) {current.idle_skipped_cycles+=cycles;}
+
 void gcn_cost_end_turn(u64 cycles) {
     /* One clock per owner turn retains the preceding turn's end even when
      * that turn was not sampled. Nested device scopes remain sampled. */
@@ -220,12 +222,13 @@ void gcn_cost_write_json(FILE* output,u32 limit) {
                 (unsigned long long)row->turns,(unsigned long long)row->sampled_turns);
         for(unsigned i=0;i<GCN_COST_BUCKET_COUNT;++i)
             fprintf(output,"%s\"%s\":%llu",i?",":"",names[i],(unsigned long long)row->sampled_ns[i]);
-        fprintf(output,"},\"measured_exclusive_ns\":{\"host\":%llu,\"execution\":%llu,\"devices\":%llu,\"graphics\":%llu},\"no_thread_cycles\":%llu,\"other_thread_cycles\":%llu,\"threads\":[",
+        fprintf(output,"},\"measured_exclusive_ns\":{\"host\":%llu,\"execution\":%llu,\"devices\":%llu,\"graphics\":%llu},\"no_thread_cycles\":%llu,\"other_thread_cycles\":%llu,\"idle_skipped_cycles\":%llu,\"threads\":[",
                 (unsigned long long)row->measured_ns[GCN_COST_OWNER_HOST],
                 (unsigned long long)row->measured_ns[GCN_COST_OWNER_EXECUTION],
                 (unsigned long long)row->measured_ns[GCN_COST_OWNER_DEVICES],
                 (unsigned long long)row->measured_ns[GCN_COST_OWNER_GRAPHICS],
-                (unsigned long long)row->no_thread_cycles,(unsigned long long)row->other_thread_cycles);
+                (unsigned long long)row->no_thread_cycles,(unsigned long long)row->other_thread_cycles,
+                (unsigned long long)row->idle_skipped_cycles);
         for(u32 i=0;i<row->thread_count;++i)
             fprintf(output,"%s{\"thread\":%u,\"cycles\":%llu}",i?",":"",row->threads[i].thread,(unsigned long long)row->threads[i].cycles);
         fputs("]}",output);

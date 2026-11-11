@@ -50,7 +50,7 @@ typedef struct {
     u64 sampled_ns[GCN_COST_BUCKET_COUNT];
     u64 measured_ns[GCN_COST_OWNER_COUNT];
     GcnCostThread threads[GCN_COST_THREAD_CAPACITY];
-    u64 no_thread_cycles,other_thread_cycles;
+    u64 no_thread_cycles,other_thread_cycles,idle_skipped_cycles;
     u32 thread_count;
 } GcnCostField;
 
@@ -84,6 +84,7 @@ void gcn_cost_end_turn(u64 guest_cycles);
 void gcn_cost_owner_boundary(GcnCostOwner);
 /* Account thread changes inside an event-owner turn without adding clocks. */
 void gcn_cost_thread_boundary(u64 guest_cycles,u32 current_thread);
+void gcn_cost_note_idle(u64 skipped_cycles);
 void gcn_cost_finish_field(u64 field,u64 guest_cycles);
 void gcn_cost_write_json(FILE*,u32 limit);
 
