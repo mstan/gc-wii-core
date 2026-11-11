@@ -1363,6 +1363,12 @@ int draw_native_gui_layers(const GcWiiNativeGuiLayersDraw* job) {
     try {return submit_native_scene(gcnllr::prepare_gui_layers(native_scene,*job));}
     catch(const std::exception& e){fail(e.what());return 0;}
 }
+int draw_native_gui_mask(const GcWiiNativeGuiMaskDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try{return submit_native_scene(gcnllr::prepare_gui_mask(native_scene,*job));}
+    catch(const std::exception& e){fail(e.what());return 0;}
+}
 void native_scene_status(GcWiiNativeRenderStatus* output) {
     if (output) *output=native_scene.status();
 }
@@ -1370,6 +1376,7 @@ const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
     create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
 const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
 const GcWiiNativeGuiLayersApi native_gui_layers_api={GC_WII_NATIVE_GUI_LAYERS_ABI,draw_native_gui_layers};
+const GcWiiNativeGuiMaskApi native_gui_mask_api={GC_WII_NATIVE_GUI_MASK_ABI,draw_native_gui_mask};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
@@ -1379,6 +1386,9 @@ extern "C" GCNLLR_EXPORT const GcWiiNativeGuiApi* gc_wii_native_gui_get_api(uint
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeGuiLayersApi* gc_wii_native_gui_layers_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_GUI_LAYERS_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_layers_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiMaskApi* gc_wii_native_gui_mask_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_MASK_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_mask_api:nullptr;
 }
 
 namespace {

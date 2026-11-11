@@ -63,6 +63,13 @@ class GuiLayersDraw(c.Structure):
 class GuiLayersApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(GuiLayersDraw)))]
 
+class GuiMaskDraw(c.Structure):
+    _fields_=[('draw',Draw),('color',GuiMaterial),('mask',Texture),
+              ('uv',(c.c_float*3)*2),('opacity',c.c_int32),('flags',c.c_uint32)]
+
+class GuiMaskApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(GuiMaskDraw)))]
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -73,6 +80,7 @@ def main():
     parser.add_argument('--write-masks',action='store_true',help='Check independent RGB/alpha writes with a reference RGBA6 EFB configuration')
     parser.add_argument('--owned',action='store_true',help='Supply memory-owner callbacks required by a composed GameCube service')
     parser.add_argument('--layers',action='store_true',help='Check the fixed three-texture GUI background family')
+    parser.add_argument('--mask',action='store_true',help='Check the two-texture GUI coverage family')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -214,6 +222,45 @@ def main():
             colored.color.high[0]=256
             assert not gui.draw(c.byref(colored)), 'Unqualified color endpoint accepted'
             assert native.destroy(gui_handle)
+            native.status(c.byref(status))
+        if args.mask:
+            dll.gc_wii_native_gui_mask_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_gui_mask_get_api.restype=c.POINTER(GuiMaskApi)
+            assert not dll.gc_wii_native_gui_mask_get_api(2)
+            masks=dll.gc_wii_native_gui_mask_get_api(1).contents
+            covered=GuiMaskDraw();covered.draw=Draw.from_buffer_copy(job)
+            covered.draw.material.flags=1;covered.draw.model_view[11]=0
+            covered.draw.material.texture=Texture(0x100,32,1,8,4,0,0,0,0,0,0)
+            covered.mask=Texture(0x400,32,1,8,4,0,0,0,0,0,0)
+            covered.color=GuiMaterial((c.c_int32*4)(50,50,50,0),(c.c_int32*4)(100,100,100,0))
+            covered.uv[0][:]=(1,0,0);covered.uv[1][:]=(0,1,0);covered.opacity=255
+            c.memset(c.addressof(ram)+0x100,128,32);c.memset(c.addressof(ram)+0x400,255,32)
+            assert masks.draw(c.byref(covered))
+            expect('GUI coverage ignores pane tint and primary alpha',320,240,(75,75,75))
+            covered.color=GuiMaterial((c.c_int32*4)(0,0,255,0),(c.c_int32*4)(0,0,255,0))
+            c.memset(c.addressof(ram)+0x400,128,32)
+            assert masks.draw(c.byref(covered))
+            expect('GUI coverage alpha blends without changing RGB',320,240,(37,37,165))
+            covered.opacity=128
+            assert masks.draw(c.byref(covered))
+            expect('GUI coverage multiplies byte opacity',320,240,(28,28,188))
+            covered.draw.material.flags=0;covered.flags=1;covered.opacity=255
+            covered.color=GuiMaterial((c.c_int32*4)(100,100,100,0),(c.c_int32*4)(100,100,100,0))
+            assert masks.draw(c.byref(covered))
+            expect('GUI RGBA mask multiplies color after remap',320,240,(50,50,50))
+            c.memmove(c.addressof(ram)+0x400,bytes([0]*4+[255]*4)*4,32)
+            covered.uv[0][:]=(-1,0,1)
+            assert masks.draw(c.byref(covered))
+            expect('GUI independent coverage coordinates',160,240,(100,100,100))
+            expect('GUI independent coverage coordinates opposite edge',480,240,(0,0,0))
+            covered.mask.size=1
+            assert not masks.draw(c.byref(covered)), 'Truncated coverage image accepted'
+            covered.mask.size=32;covered.opacity=256
+            assert not masks.draw(c.byref(covered)), 'Invalid coverage opacity accepted'
+            covered.opacity=255;covered.flags=2
+            assert not masks.draw(c.byref(covered)), 'Unknown coverage flags accepted'
+            covered.flags=0;covered.uv[0][0]=float('nan')
+            assert not masks.draw(c.byref(covered)), 'Nonfinite coverage coordinates accepted'
             native.status(c.byref(status))
         gx_status=c.create_string_buffer(2048)
         if args.layers:

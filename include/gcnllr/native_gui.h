@@ -43,6 +43,26 @@ typedef struct {
     int (*draw)(const GcWiiNativeGuiLayersDraw*);
 } GcWiiNativeGuiLayersApi;
 typedef const GcWiiNativeGuiLayersApi* (*GcWiiNativeGuiLayersGetApi)(uint32_t);
+
+/* Two-image GUI coverage: primary RGB range remap, with a separately
+ * transformed coverage image. Alpha is mask alpha times byte opacity.
+ * Optional RGB modulation uses the same mask's RGB after the range clamp.
+ * Pane tint and primary texture alpha are not inputs to this family. */
+#define GC_WII_NATIVE_GUI_MASK_ABI 1u
+#define GC_WII_NATIVE_GUI_MASK_RGB 1u
+typedef struct {
+    GcWiiNativeDraw draw;
+    GcWiiNativeGuiMaterial color;
+    GcWiiNativeTexture mask;
+    float uv[2][3];
+    int32_t opacity;
+    uint32_t flags;
+} GcWiiNativeGuiMaskDraw;
+typedef struct {
+    uint32_t abi;
+    int (*draw)(const GcWiiNativeGuiMaskDraw*);
+} GcWiiNativeGuiMaskApi;
+typedef const GcWiiNativeGuiMaskApi* (*GcWiiNativeGuiMaskGetApi)(uint32_t);
 #ifdef __cplusplus
 }
 #endif

@@ -59,6 +59,13 @@ multi-texture cache and bank resolution. GUI1, Render1 and Frame1 layouts remain
 unchanged. Add `--layers` to the component check for independent coordinates,
 texture rewrites, saturation and explicit unsupported-input rejection.
 
+`gc_wii_native_gui_mask_get_api` adds two-image color/coverage materials. It
+recolors a primary image, applies independently transformed mask alpha and byte
+opacity, and optionally multiplies RGB by the mask. Primary alpha and pane tint
+are excluded from this named family. Add `--mask` for actual pixel checks of
+coverage, opacity, RGB masking and independent coordinates. Existing API layouts
+remain unchanged.
+
 `GC_WII_NATIVE_J3D=ON` additionally builds the native BMD/BDL material and mesh
 provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` and
 `include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;

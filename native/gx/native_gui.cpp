@@ -2,6 +2,28 @@
 #include "native_gui.hpp"
 #include <cmath>
 namespace gcnllr {
+namespace {
+void gui_texture(gxruntime::gxcore::DrawPlan& plan,unsigned slot,const GcWiiNativeTexture& texture,const float (*uv)[3]) {
+    auto& binding=plan.textures[slot];binding={};binding.valid=true;
+    binding.address=texture.address;binding.size=texture.size;binding.format=texture.format;
+    binding.width=texture.width;binding.height=texture.height;
+    binding.has_tlut=texture.palette_entries!=0;binding.tlut_address=texture.palette_address;
+    binding.tlut_format=texture.palette_format;binding.tlut_entries=texture.palette_entries;
+    auto& sampler=plan.samplers[slot];sampler={};
+    sampler.wrap_s=uint8_t(texture.wrap_s);sampler.wrap_t=uint8_t(texture.wrap_t);
+    sampler.min_filter=sampler.mag_filter=uint8_t(texture.linear);sampler.mipmap_filter=0;sampler.max_lod=0;
+    plan.pixel_constants.texdims[slot][0]=plan.pixel_constants.texdims[slot][2]=int32_t(texture.width);
+    plan.pixel_constants.texdims[slot][1]=plan.pixel_constants.texdims[slot][3]=int32_t(texture.height);
+    auto& generator=plan.pipeline.shader.tex_gens[slot];generator={};generator.enabled=1;
+    generator.sourcerow=uint8_t(gxruntime::gxcore::TexSourceRow::Tex0);
+    if(uv) {
+        auto* rows=plan.constants.texmatrices+slot*3;
+        for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)rows[r][c]=0;
+        for(unsigned r=0;r<2;++r){rows[r][0]=uv[r][0];rows[r][1]=uv[r][1];rows[r][3]=uv[r][2];}
+        rows[2][2]=1;
+    }
+}
+}
 gxruntime::gxcore::DrawPlan* prepare_gui(NativeScene& scene,const GcWiiNativeGuiDraw& input) {
     for(unsigned i=0;i<4;++i)
         if(input.color.low[i]<0 || input.color.low[i]>255 ||
@@ -52,24 +74,7 @@ gxruntime::gxcore::DrawPlan* prepare_gui_layers(NativeScene& scene,const GcWiiNa
     plan->texmap_mask=7;
     for(unsigned i=0;i<3;++i) {
         const auto& texture=i?input.overlays[i-1]:input.draw.material.texture;
-        auto& binding=plan->textures[i];binding={};binding.valid=true;
-        binding.address=texture.address;binding.size=texture.size;binding.format=texture.format;
-        binding.width=texture.width;binding.height=texture.height;
-        binding.has_tlut=texture.palette_entries!=0;binding.tlut_address=texture.palette_address;
-        binding.tlut_format=texture.palette_format;binding.tlut_entries=texture.palette_entries;
-        auto& sampler=plan->samplers[i];sampler={};
-        sampler.wrap_s=uint8_t(texture.wrap_s);sampler.wrap_t=uint8_t(texture.wrap_t);
-        sampler.min_filter=sampler.mag_filter=uint8_t(texture.linear);sampler.mipmap_filter=0;sampler.max_lod=0;
-        plan->pixel_constants.texdims[i][0]=plan->pixel_constants.texdims[i][2]=int32_t(texture.width);
-        plan->pixel_constants.texdims[i][1]=plan->pixel_constants.texdims[i][3]=int32_t(texture.height);
-        auto& generator=shader.tex_gens[i];generator={};generator.enabled=1;
-        generator.sourcerow=uint8_t(gxruntime::gxcore::TexSourceRow::Tex0);
-        if(i) {
-            auto* rows=plan->constants.texmatrices+i*3;
-            for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)rows[r][c]=0;
-            for(unsigned r=0;r<2;++r){rows[r][0]=input.uv[i-1][r][0];rows[r][1]=input.uv[i-1][r][1];rows[r][3]=input.uv[i-1][r][2];}
-            rows[2][2]=1;
-        }
+        gui_texture(*plan,i,texture,i?input.uv[i-1]:nullptr);
         auto& stage=shader.tev_stages[i];stage={};
         stage.tevorders_enable=1;stage.tevorders_texcoord=stage.tevorders_texmap=uint8_t(i);
         stage.cc_clamp=stage.ac_clamp=1;
@@ -84,6 +89,36 @@ gxruntime::gxcore::DrawPlan* prepare_gui_layers(NativeScene& scene,const GcWiiNa
         plan->pixel_constants.colors[3][c]=input.weights[0][c];
         plan->pixel_constants.kcolors[0][c]=input.weights[1][c];
     }
+    return plan;
+}
+
+gxruntime::gxcore::DrawPlan* prepare_gui_mask(NativeScene& scene,const GcWiiNativeGuiMaskDraw& input) {
+    const auto reject=[&](){scene.rejected();return static_cast<gxruntime::gxcore::DrawPlan*>(nullptr);};
+    if(!input.draw.material.texture.size || !input.mask.size || !valid_native_texture(input.mask) ||
+       input.opacity<0 || input.opacity>255 || (input.flags&~GC_WII_NATIVE_GUI_MASK_RGB))return reject();
+    for(unsigned c=0;c<4;++c)if(input.color.low[c]<0 || input.color.low[c]>255 || input.color.high[c]<0 || input.color.high[c]>255)return reject();
+    for(const auto& row:input.uv)for(float f:row)if(!std::isfinite(f))return reject();
+    auto* plan=scene.prepare(input.draw);if(!plan)return nullptr;
+    auto& shader=plan->pipeline.shader;shader.tev_valid=1;shader.num_tev_stages=2;shader.num_tex_gens=2;
+    plan->texmap_mask=3;
+    gui_texture(*plan,0,input.draw.material.texture,nullptr);gui_texture(*plan,1,input.mask,input.uv);
+    for(unsigned i=0;i<2;++i) {
+        auto& stage=shader.tev_stages[i];stage={};stage.tevorders_enable=1;
+        stage.tevorders_texcoord=stage.tevorders_texmap=uint8_t(i);stage.cc_clamp=stage.ac_clamp=1;
+        for(unsigned c=0;c<4;++c)stage.ras_swap[c]=stage.tex_swap[c]=uint8_t(c);
+    }
+    auto& range=shader.tev_stages[0];range.cc_a=2;range.cc_b=4;range.cc_c=8;range.cc_d=15;
+    range.ac_a=range.ac_b=range.ac_c=7;range.ac_d=1;
+    auto& mask=shader.tev_stages[1];
+    mask.cc_a=15;mask.cc_b=(input.flags&GC_WII_NATIVE_GUI_MASK_RGB)?0:15;
+    mask.cc_c=(input.flags&GC_WII_NATIVE_GUI_MASK_RGB)?8:15;
+    mask.cc_d=(input.flags&GC_WII_NATIVE_GUI_MASK_RGB)?15:0;
+    mask.ac_a=7;mask.ac_b=0;mask.ac_c=4;mask.ac_d=7;
+    for(unsigned c=0;c<4;++c) {
+        plan->pixel_constants.colors[1][c]=input.color.low[c];
+        plan->pixel_constants.colors[2][c]=input.color.high[c];
+    }
+    plan->pixel_constants.colors[1][3]=input.opacity;
     return plan;
 }
 }
