@@ -8,6 +8,7 @@
 #include "gpu_bridge.hpp"
 #include "efb_geometry.hpp"
 #include "native_scene.hpp"
+#include "native_gui.hpp"
 #include "gcnllr/native_frame.h"
 #if GC_WII_NATIVE_J3D
 #include "native_j3d.hpp"
@@ -1298,13 +1299,14 @@ uint64_t create_native_mesh(const GcWiiNativeMesh* mesh) {
     catch (const std::exception& e) { fail(e.what()); return 0; }
 }
 int destroy_native_mesh(uint64_t mesh) { return native_scene.destroy_mesh(mesh); }
-int draw_native_mesh(const GcWiiNativeDraw* job) {
-    if (!initialized || !frame_open || failed.load() || fifo_worker || !job ||
+bool native_scene_ready() {
+    if (!initialized || !frame_open || failed.load() || fifo_worker ||
         !frontend || frontend->pending_fifo_size()) {
-        native_scene.rejected(); return 0;
+        native_scene.rejected(); return false;
     }
-    try {
-        auto* plan=native_scene.prepare(*job);
+    return true;
+}
+int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
         if (!plan) return 0;
         if (plan->has_texture) {
             DolGuestResolvedRange image{};
@@ -1332,16 +1334,31 @@ int draw_native_mesh(const GcWiiNativeDraw* job) {
         }
         native_scene.submitted(); ++state.draws; ++efb_generation;
         return 1;
-    } catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int draw_native_mesh(const GcWiiNativeDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try {return submit_native_scene(native_scene.prepare(*job));}
+    catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int draw_native_gui(const GcWiiNativeGuiDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try {return submit_native_scene(gcnllr::prepare_gui(native_scene,*job));}
+    catch (const std::exception& e) { fail(e.what()); return 0; }
 }
 void native_scene_status(GcWiiNativeRenderStatus* output) {
     if (output) *output=native_scene.status();
 }
 const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
     create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
+const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiApi* gc_wii_native_gui_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_gui_api:nullptr;
 }
 
 namespace {

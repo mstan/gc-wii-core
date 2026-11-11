@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: MIT
+#pragma once
+#include "native_scene.hpp"
+#include <gcnllr/native_gui.h>
+namespace gcnllr {
+gxruntime::gxcore::DrawPlan* prepare_gui(NativeScene&,const GcWiiNativeGuiDraw&);
+}

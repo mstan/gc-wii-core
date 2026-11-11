@@ -45,11 +45,21 @@ class NativeApi(c.Structure):
         ('destroy',c.CFUNCTYPE(c.c_int,c.c_uint64)),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(Draw))),
         ('status',c.CFUNCTYPE(None,c.POINTER(Status)))]
 
+class GuiMaterial(c.Structure):
+    _fields_=[('low',c.c_int32*4),('high',c.c_int32*4)]
+
+class GuiDraw(c.Structure):
+    _fields_=[('draw',Draw),('color',GuiMaterial)]
+
+class GuiApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(GuiDraw)))]
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library',type=Path,required=True)
     parser.add_argument('--work-root',type=Path,required=True)
+    parser.add_argument('--gui',action='store_true',help='Also check the native GUI color-range material')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -136,6 +146,39 @@ def main():
         assert not native.draw(c.byref(bad)), 'Truncated tiled texture silently accepted'
         status=Status();native.status(c.byref(status))
         assert (status.mesh_uploads,status.draws,status.rejected,status.live_meshes)==(1,7,3,1), vars(status)
+        if args.gui:
+            dll.gc_wii_native_gui_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_gui_get_api.restype=c.POINTER(GuiApi)
+            assert not dll.gc_wii_native_gui_get_api(2)
+            gui=dll.gc_wii_native_gui_get_api(1).contents
+            for vertex in vertices:vertex.color[:]=(1,1,1,1)
+            gui_handle=native.create(c.byref(mesh));assert gui_handle
+            colored=GuiDraw();colored.draw=Draw.from_buffer_copy(job)
+            colored.draw.mesh=gui_handle;colored.draw.material.flags=0;colored.draw.model_view[11]=0
+            cases=[('GUI constant blue range',128,(52,190,237,0),(52,190,237,255),(52,190,237)),
+                   ('GUI low endpoint',0,(138,148,153,0),(255,255,255,255),(138,148,153)),
+                   ('GUI interpolated range',128,(138,148,153,0),(255,255,255,255),(197,202,204)),
+                   ('GUI reversed range',255,(255,255,255,0),(50,50,50,255),(50,50,50))]
+            for name,value,low,high,rgb in cases:
+                c.memset(c.addressof(ram)+0x100,value,32)
+                colored.color=GuiMaterial((c.c_int32*4)(*low),(c.c_int32*4)(*high))
+                assert gui.draw(c.byref(colored)),name
+                expect(name,320,240,rgb)
+            colored.draw.material.texture=Texture()
+            assert gui.draw(c.byref(colored))
+            expect('GUI flat high endpoint',320,240,(50,50,50))
+            colored.draw.material.texture=Texture(0x100,32,1,8,4,0,0,0,0,0,0)
+            colored.draw.material.flags=1
+            colored.color=GuiMaterial((c.c_int32*4)(0,255,0,0),(c.c_int32*4)(0,255,0,0))
+            assert gui.draw(c.byref(colored))
+            expect('GUI zero alpha range preserves background',320,240,(50,50,50))
+            c.memset(c.addressof(ram)+0x100,128,32);colored.color.high[3]=255
+            assert gui.draw(c.byref(colored))
+            expect('GUI interpolated alpha blends range color',320,240,(25,153,25))
+            colored.color.high[0]=256
+            assert not gui.draw(c.byref(colored)), 'Unqualified color endpoint accepted'
+            assert native.destroy(gui_handle)
+            native.status(c.byref(status))
         gx_status=c.create_string_buffer(2048)
         c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]

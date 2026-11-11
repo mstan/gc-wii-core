@@ -43,6 +43,14 @@ title bindings, complete model/material families and end-to-end performance
 qualification remain open. Retained geometry is currently staged to the GPU
 through the shared draw backend; permanent GPU mesh residency is not claimed.
 
+`gc_wii_native_gui_get_api` adds a named GUI color-range material while keeping
+RenderAPI1 unchanged. It shares the same mesh handles, texture resources and
+recording owner. One texture is mapped between byte RGBA endpoints, clamped,
+then multiplied by pane color; a flat material uses its high endpoint instead.
+The existing integer shader compiler lowers that complete expression. Wider
+source colors and unsupported inputs reject before submission. Run the same
+component check with `--gui` for range, tint, alpha and rejection coverage.
+
 `GC_WII_NATIVE_J3D=ON` additionally builds the native BMD/BDL material and mesh
 provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` and
 `include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;

@@ -59,7 +59,8 @@ if(NOT GCNLLR_GPU_BACKEND MATCHES "^(auto|d3d12|vulkan)$")
   message(FATAL_ERROR "Unknown native GPU backend: ${GCNLLR_GPU_BACKEND}")
 endif()
 add_library(gcnllr-native-gx SHARED "${CMAKE_CURRENT_LIST_DIR}/gx.cpp" "${CMAKE_CURRENT_LIST_DIR}/gpu_bridge.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/efb_depth.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/efb_depth.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp")
 option(GC_WII_NATIVE_J3D "Build native J3D resource/material renderer (experimental consumer binding)" OFF)
 target_compile_definitions(gcnllr-native-gx PRIVATE GC_WII_NATIVE_J3D=$<BOOL:${GC_WII_NATIVE_J3D}>)
 if(GC_WII_NATIVE_J3D)
