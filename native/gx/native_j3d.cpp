@@ -33,11 +33,17 @@ std::vector<gxc::DrawPlan>* NativeJ3D::prepare(const GcWiiJ3DDraw& input) {
     auto material=r.materials.find(key);
     if(material==r.materials.end())material=r.materials.emplace(key,j3d::compile_material(r.model.materials[input.material],mesh)).first;
     auto c=material->second;const auto& shader=c.pipeline.shader;
-    need((input.material_inputs&~63u)==0,"Unknown native J3D material input");
+    need((input.material_inputs&~1023u)==0,"Unknown native J3D material input");
+    need(!(input.material_inputs&GC_WII_J3D_THREE_REGISTER_COLORS) || (input.material_inputs&GC_WII_J3D_REGISTER_COLORS),"Three-register mask requires register color inputs");
+    need(!(input.material_inputs&(GC_WII_J3D_COLOR_WRITE|GC_WII_J3D_ALPHA_WRITE)) || (input.material_inputs&GC_WII_J3D_WRITE_MASKS),"Write enables require explicit native J3D write masks");
+    if(input.material_inputs&GC_WII_J3D_WRITE_MASKS) {
+        c.pipeline.color_update=bool(input.material_inputs&GC_WII_J3D_COLOR_WRITE);
+        c.pipeline.alpha_update=bool(input.material_inputs&GC_WII_J3D_ALPHA_WRITE);
+    }
     need((input.material_color_mask&~15u)==0,"Invalid native J3D material color mask");
     for(unsigned i=0;i<4;++i)for(unsigned ch=0;ch<4;++ch) {
         if((input.material_inputs&GC_WII_J3D_MATERIAL_COLORS) && (!input.material_color_mask || (input.material_color_mask&(1u<<i)))){auto v=input.material_colors[i][ch];need(v>=0 && v<=255,"Invalid native J3D material color");c.vertex.materials[i][ch]=v;}
-        if(input.material_inputs&GC_WII_J3D_REGISTER_COLORS){auto v=input.register_colors[i][ch];need(v>=-1024 && v<=1023,"Invalid native J3D register color");c.pixel.colors[(i+1)%4][ch]=v;}
+        if((input.material_inputs&GC_WII_J3D_REGISTER_COLORS) && (i<3 || !(input.material_inputs&GC_WII_J3D_THREE_REGISTER_COLORS))){auto v=input.register_colors[i][ch];need(v>=-1024 && v<=1023,"Invalid native J3D register color");c.pixel.colors[(i+1)%4][ch]=v;}
         if(input.material_inputs&GC_WII_J3D_CONSTANT_COLORS){auto v=input.constant_colors[i][ch];need(v>=0 && v<=255,"Invalid native J3D constant color");c.pixel.kcolors[i][ch]=v;}
     }
     if(input.material_inputs&GC_WII_J3D_TEXTURE_INDICES)std::copy_n(input.texture_indices,8,c.textures.begin());

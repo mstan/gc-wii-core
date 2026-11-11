@@ -12,6 +12,16 @@ extern "C" {
 #define GC_WII_J3D_TEXTURE_INDICES 8u
 #define GC_WII_J3D_LIGHTING 16u
 #define GC_WII_J3D_FOG 32u
+/* With REGISTER_COLORS, update C0/C1/C2 only and retain the recipe's PREV.
+ * J3D's material diff writes these three registers, never its unused fourth
+ * storage slot. Older ABI2 services explicitly reject this new input bit. */
+#define GC_WII_J3D_THREE_REGISTER_COLORS 64u
+/* J3D material blend recipes preserve the caller's color/alpha write masks.
+ * With WRITE_MASKS, the two enable bits below replace the experimental
+ * all-enabled default. These are sampled at draw, independently of diff. */
+#define GC_WII_J3D_WRITE_MASKS 128u
+#define GC_WII_J3D_COLOR_WRITE 256u
+#define GC_WII_J3D_ALPHA_WRITE 512u
 typedef struct GcWiiJ3DChannel {
     uint8_t enabled, material_source, ambient_source, diffuse, attenuation, light_mask;
     uint8_t reserved[2];
