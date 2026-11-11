@@ -95,7 +95,7 @@ target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GX_FIFO_WORKER=$<BOOL
   GCNLLR_QUEUED_PRESENT=$<STREQUAL:${GCNLLR_GX_SUBMISSION},queued>)
 set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/texture_readback.cpp" TARGET_DIRECTORY aurora_gx
   APPEND PROPERTY COMPILE_DEFINITIONS GCNLLR_ASYNC_COPIES=$<BOOL:${GCNLLR_ASYNC_COPIES}>)
-target_include_directories(gcnllr-native-gx PRIVATE "${GC_WII_GX_ROOT}/include" "${GXRUNTIME_DIR}/graphics/aurora/lib")
+target_include_directories(gcnllr-native-gx PRIVATE "${CMAKE_BINARY_DIR}/gcnllr-services/adapted" "${GC_WII_GX_ROOT}/include" "${GXRUNTIME_DIR}/graphics/aurora/lib")
 target_link_libraries(gcnllr-native-gx PRIVATE
   aurora::core aurora::gx aurora::vi aurora::pad aurora::si
   absl::flat_hash_map)

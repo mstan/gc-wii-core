@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include "fifo_worker.hpp"
 #include "ordered_effects.hpp"
-#include "gfx/gxcore_draw.hpp"
+#include "gxcore_draw.hpp"
 #if GCNLLR_ASYNC_COPIES
 #include "gfx/texture.hpp"
 #endif
@@ -820,6 +820,7 @@ int start(const GcnllrNativeGxConfig* input) {
     streamed_retired=streamed_polls=streamed_barriers=0;
 #endif
     config=*input;state={};native_frame_state={};failed.store(false);readback_ns.store(0);next_copy_token=0;
+    aurora::gfx::gxcore::reset_resident_geometry_stats();
     resident_textures.store(0);resident_texture_hits.store(0);
     resident_texture_materializations.store(0);resident_texture_incompatible.store(0);
 #if GCNLLR_GX_FIFO_WORKER
@@ -1462,7 +1463,7 @@ int draw_native_j3d(const GcWiiJ3DDraw* input) {
         native_j3d.rejected(reason);return 0;
     }
     try {
-        auto* plans=native_j3d.prepare(*input);
+        auto* prepared=native_j3d.prepare(*input);
         auto image=[&](uint32_t& address,uint32_t size,const void*& data,uint32_t& available,DolGuestResourceKind kind) {
             GcnllrNativeGxMemory range{};
             if(!gcnllr::gx_memory(config,address,size,range) || range.available<size ||
@@ -1473,19 +1474,13 @@ int draw_native_j3d(const GcWiiJ3DDraw* input) {
         // Texture memory may be rewritten by the CPU or owned by an earlier
         // GPU copy. Use the consumer's coherent physical identity and current
         // bytes; a one-time model import must not freeze animated image data.
-        for(auto& plan:*plans)if(plan.has_texture) {
-            if(plan.texmap_mask) {
-                for(unsigned t=0;t<8;++t)if(plan.texmap_mask&(1u<<t)) {
-                    auto& texture=plan.textures[t];image(texture.address,texture.size,texture.data,texture.available,DOL_GUEST_RESOURCE_TEXTURE);
-                    if(texture.has_tlut)image(texture.tlut_address,texture.tlut_entries*2,texture.tlut_data,texture.tlut_available,DOL_GUEST_RESOURCE_TLUT);
-                }
-            }else{
-                image(plan.tex_address,plan.tex_size,plan.tex_data,plan.tex_available,DOL_GUEST_RESOURCE_TEXTURE);
-                if(plan.has_tlut)image(plan.tlut_address,plan.tlut_entries*2,plan.tlut_data,plan.tlut_available,DOL_GUEST_RESOURCE_TLUT);
-            }
+        auto& material=prepared->draw.material;
+        for(unsigned t=0;t<8;++t)if(material.texture_mask&(1u<<t)) {
+            auto& texture=material.textures[t];image(texture.address,texture.size,texture.data,texture.available,DOL_GUEST_RESOURCE_TEXTURE);
+            if(texture.has_tlut)image(texture.tlut_address,texture.tlut_entries*2,texture.tlut_data,texture.tlut_available,DOL_GUEST_RESOURCE_TLUT);
         }
-        for(const auto& plan:*plans) {
-            if(!aurora::gfx::gxcore::submit_draw_plan(plan))throw std::runtime_error("Native J3D GPU submission failed");
+        for(const auto& mesh:prepared->meshes) {
+            if(!aurora::gfx::gxcore::submit_resident_draw(mesh,prepared->draw))throw std::runtime_error("Native resident J3D GPU submission failed");
             ++state.draws;++efb_generation;native_j3d.submitted();
         }
         return 1;

@@ -17,8 +17,10 @@ void finite(const float* p,size_t n){for(size_t i=0;i<n;++i)need(std::isfinite(p
 uint64_t NativeJ3D::create(std::span<const uint8_t> bytes,const j3d::ImportOptions& options) {
     need(next_handle_!=std::numeric_limits<uint64_t>::max(),"Native J3D resource handles exhausted");
     Resource r;r.model=j3d::import_model(bytes,options);r.meshes.resize(r.model.meshes.size());
-    for(size_t m=0;m<r.model.meshes.size();++m)for(const auto& primitive:r.model.meshes[m].primitives)
-        r.meshes[m].push_back(j3d::compile_mesh(r.model.meshes[m],primitive));
+    for(size_t m=0;m<r.model.meshes.size();++m)for(const auto& primitive:r.model.meshes[m].primitives) {
+        const auto compiled=j3d::compile_mesh(r.model.meshes[m],primitive);
+        r.meshes[m].push_back(aurora::gfx::gxcore::create_resident_geometry(compiled.vertices,compiled.indices,compiled.pipeline.primitive_topology));
+    }
     const auto handle=next_handle_++;status_.meshes+=r.meshes.size();resources_.emplace(handle,std::move(r));
     status_.resources=resources_.size();return handle;
 }
@@ -26,7 +28,7 @@ bool NativeJ3D::destroy(uint64_t handle) {
     auto found=resources_.find(handle);if(found==resources_.end())return false;
     status_.meshes-=found->second.meshes.size();resources_.erase(found);status_.resources=resources_.size();return true;
 }
-std::vector<gxc::DrawPlan>* NativeJ3D::prepare(const GcWiiJ3DDraw& input) {
+NativeJ3D::Prepared* NativeJ3D::prepare(const GcWiiJ3DDraw& input) {
     auto found=resources_.find(input.resource);need(found!=resources_.end(),"Unknown native J3D resource");auto& r=found->second;
     need(input.mesh<r.meshes.size() && input.material<r.model.materials.size(),"Invalid native J3D mesh/material");
     const auto& mesh=r.model.meshes[input.mesh];const auto key=std::pair{input.material,input.mesh};
@@ -87,38 +89,40 @@ std::vector<gxc::DrawPlan>* NativeJ3D::prepare(const GcWiiJ3DDraw& input) {
         if(c.light_mask&(1u<<i)){const auto& light=input.lights[i];finite(light.cosatt,4);finite(light.distatt,4);finite(light.position,4);finite(light.direction,4);for(auto value:light.color)need(value>=0 && value<=255,"Invalid native J3D light color");}
     }
     finite(input.cached_normal,3);finite(input.cached_binormal,3);finite(input.cached_tangent,3);
-    auto& plans=r.meshes[input.mesh];
-    for(auto& plan:plans) {
-        j3d::bind_material(c,r.model.textures,plan,input.width);
-        if(c.inherited_cull)plan.pipeline.cull_mode=input.cull_mode==1?2:(input.cull_mode==2?1:input.cull_mode);
-        std::memcpy(plan.constants.projection,input.projection,sizeof(input.projection));
-        std::memcpy(plan.constants.posnormalmatrix,input.positions[0],sizeof(input.positions[0]));
-        for(unsigned row=0;row<3;++row)std::copy_n(input.normals[0]+row*3,3,plan.constants.posnormalmatrix[3+row]);
+    prepared_.meshes=r.meshes[input.mesh];
+    prepared_.draw.material=j3d::bind_native_material(c,r.model.textures,input.width);
+    auto& bound=prepared_.draw.material;auto& vertex=bound.vertex;
+        if(c.inherited_cull)bound.pipeline.cull_mode=input.cull_mode==1?2:(input.cull_mode==2?1:input.cull_mode);
+        std::memcpy(vertex.projection,input.projection,sizeof(input.projection));
+        std::memcpy(vertex.posnormalmatrix,input.positions[0],sizeof(input.positions[0]));
+        for(unsigned row=0;row<3;++row)std::copy_n(input.normals[0]+row*3,3,vertex.posnormalmatrix[3+row]);
         for(unsigned i=0;i<10;++i)if(positions&(1u<<i)) {
-            std::memcpy(plan.constants.transformmatrices+i*3,input.positions[i],sizeof(input.positions[i]));
-            for(unsigned row=0;row<3;++row)std::copy_n(input.normals[i]+row*3,3,plan.constants.normalmatrices[i*3+row]);
+            std::memcpy(vertex.transformmatrices+i*3,input.positions[i],sizeof(input.positions[i]));
+            for(unsigned row=0;row<3;++row)std::copy_n(input.normals[i]+row*3,3,vertex.normalmatrices[i*3+row]);
         }
         for(unsigned i=0;i<8;++i) {
-            if(required_texture&(1u<<i))std::memcpy(plan.constants.transformmatrices+30+i*3,input.texture_matrices[i],sizeof(input.texture_matrices[i]));
-            if(c.texture_matrix_slots[i]!=255)std::memcpy(plan.constants.texmatrices+i*3,input.texture_matrices[c.texture_matrix_slots[i]],sizeof(input.texture_matrices[0]));
+            if(required_texture&(1u<<i))std::memcpy(vertex.transformmatrices+30+i*3,input.texture_matrices[i],sizeof(input.texture_matrices[i]));
+            if(c.texture_matrix_slots[i]!=255)std::memcpy(vertex.texmatrices+i*3,input.texture_matrices[c.texture_matrix_slots[i]],sizeof(input.texture_matrices[0]));
             if(c.light_mask&(1u<<i)) {
-                const auto& src=input.lights[i];auto& dst=plan.constants.lights[i];
+                const auto& src=input.lights[i];auto& dst=vertex.lights[i];
                 std::copy_n(src.color,4,dst.color);std::copy_n(src.cosatt,4,dst.cosatt);std::copy_n(src.distatt,4,dst.distatt);
                 std::copy_n(src.position,4,dst.pos);std::copy_n(src.direction,4,dst.dir);
             }
         }
         // Indexed identity texture matrices name row 60 in this backend's
         // transform bank, rather than a resource-owned animated matrix.
-        for(unsigned row=0;row<3;++row)plan.constants.transformmatrices[60+row][row]=1;
-        std::copy_n(input.cached_normal,3,plan.constants.cached_normal);std::copy_n(input.cached_binormal,3,plan.constants.cached_binormal);std::copy_n(input.cached_tangent,3,plan.constants.cached_tangent);
-        plan.viewport_valid=true;plan.viewport[0]=input.width*.5f;plan.viewport[1]=-input.height*.5f;
-        plan.viewport[2]=(input.far_depth-input.near_depth)*16777215.f;
-        plan.viewport[3]=input.x+342.f+input.width*.5f;plan.viewport[4]=input.y+342.f+input.height*.5f;plan.viewport[5]=input.far_depth*16777215.f;
-        plan.scissor_valid=true;plan.scissor_x=input.clip_x;plan.scissor_y=input.clip_y;plan.scissor_width=input.clip_width;plan.scissor_height=input.clip_height;
-        plan.ok=true;
-    }
-    return &plans;
+        for(unsigned row=0;row<3;++row)vertex.transformmatrices[60+row][row]=1;
+        std::copy_n(input.cached_normal,3,vertex.cached_normal);std::copy_n(input.cached_binormal,3,vertex.cached_binormal);std::copy_n(input.cached_tangent,3,vertex.cached_tangent);
+    auto& draw=prepared_.draw;draw.x=input.x;draw.y=input.y;draw.width=input.width;draw.height=input.height;
+    draw.near_depth=input.near_depth;draw.far_depth=input.far_depth;
+    draw.clip_x=input.clip_x;draw.clip_y=input.clip_y;draw.clip_width=input.clip_width;draw.clip_height=input.clip_height;
+    return &prepared_;
 }
 void NativeJ3D::rejected(const char* reason){++status_.rejected;std::snprintf(status_.error,sizeof(status_.error),"%s",reason);}
-void NativeJ3D::reset(){resources_.clear();status_={};}
+void NativeJ3D::reset(){
+    const auto stats=aurora::gfx::gxcore::resident_geometry_stats();
+    if(stats.uploads)std::fprintf(stderr,"[native-resident-geometry] uploads=%llu vertex-bytes=%llu index-bytes=%llu draws=%llu draw-vertex-staging=0\n",
+        (unsigned long long)stats.uploads,(unsigned long long)stats.vertex_bytes,(unsigned long long)stats.index_bytes,(unsigned long long)stats.draws);
+    prepared_={};resources_.clear();status_={};
+}
 }

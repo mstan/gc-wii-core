@@ -187,27 +187,37 @@ gxc::DrawPlan compile_mesh(const Mesh& mesh,const Primitive& primitive) {
     for(size_t i=primitive.first_index;i<size_t(primitive.first_index)+primitive.index_count;++i){need(mesh.indices[i]<mesh.vertices.size(),"Invalid native J3D vertex index");plan.indices.push_back(uint16_t(mesh.indices[i]));}
     return plan;
 }
-void bind_material(const CompiledMaterial& c,std::span<const Texture> textures,gxc::DrawPlan& plan,float width) {
-    const auto topology=plan.pipeline.primitive_topology;plan.pipeline=c.pipeline;plan.pipeline.primitive_topology=topology;
-    plan.constants=c.vertex;plan.pixel_constants=c.pixel;plan.constants_id=0;
-    plan.has_texture=c.texture_mask!=0;plan.texmap_mask=std::popcount(c.texture_mask)>1?c.texture_mask:0;
-    if(c.pipeline.shader.fog_range){need(std::isfinite(width) && width>0,"Invalid native fog viewport");plan.pixel_constants.fogf[3]=width*2;plan.pixel_constants.fogf[2]=float(c.fog_center)/width-1.f;}
+BoundMaterial bind_native_material(const CompiledMaterial& c,std::span<const Texture> textures,float width) {
+    BoundMaterial out;out.pipeline=c.pipeline;out.vertex=c.vertex;out.pixel=c.pixel;out.texture_mask=c.texture_mask;
+    const bool multiple=std::popcount(c.texture_mask)>1;
+    if(c.pipeline.shader.fog_range){need(std::isfinite(width) && width>0,"Invalid native fog viewport");out.pixel.fogf[3]=width*2;out.pixel.fogf[2]=float(c.fog_center)/width-1.f;}
     for(unsigned t=0;t<8;++t)if(c.texture_mask&(1u<<t)) {
         need(c.textures[t]<textures.size(),"Native J3D texture index is unresolved");const auto& src=textures[c.textures[t]];
         need(!src.image.empty() && src.width && src.height,"Native J3D image is unresolved");
         need(src.palette_entries==0 || src.palette.size()==size_t(src.palette_entries)*2,"Native J3D palette is unresolved");
-        plan.samplers[t]=sampler(src);auto& dst=plan.textures[t];dst={};dst.valid=true;
+        out.samplers[t]=sampler(src);auto& dst=out.textures[t];dst.valid=true;
         dst.address=src.image_address;dst.size=dst.available=uint32_t(src.image.size());dst.format=src.format;
         dst.width=src.width;dst.height=src.height;dst.data=src.image.data();dst.has_tlut=src.palette_entries!=0;
         dst.tlut_address=src.palette_address;dst.tlut_format=src.palette_format;dst.tlut_entries=src.palette_entries;
         dst.tlut_data=src.palette.data();dst.tlut_available=uint32_t(src.palette.size());
-        const auto uniform_slot=plan.texmap_mask?t:0;plan.pixel_constants.texdims[uniform_slot][0]=src.width;plan.pixel_constants.texdims[uniform_slot][1]=src.height;
-        if(!plan.texmap_mask){plan.tex_slot=t;plan.tex_address=dst.address;plan.tex_size=dst.size;plan.tex_format=dst.format;plan.tex_width=dst.width;plan.tex_height=dst.height;plan.tex_data=dst.data;plan.tex_available=dst.available;plan.has_tlut=dst.has_tlut;plan.tlut_address=dst.tlut_address;plan.tlut_format=dst.tlut_format;plan.tlut_entries=dst.tlut_entries;plan.tlut_data=dst.tlut_data;plan.tlut_available=dst.tlut_available;}
+        const auto uniform_slot=multiple?t:0;out.pixel.texdims[uniform_slot][0]=src.width;out.pixel.texdims[uniform_slot][1]=src.height;
     }
     // J3D assigns raster-coordinate scales in material-stage order, followed
     // by indirect orders. Several maps may intentionally share a coordinate.
-    auto scale=[&](uint8_t coord,uint8_t map){const auto& t=textures[c.textures[map]];plan.pixel_constants.texdims[coord][2]=t.width;plan.pixel_constants.texdims[coord][3]=t.height;};
+    auto scale=[&](uint8_t coord,uint8_t map){const auto& t=textures[c.textures[map]];out.pixel.texdims[coord][2]=t.width;out.pixel.texdims[coord][3]=t.height;};
     for(unsigned i=0;i<c.pipeline.shader.num_tev_stages;++i){const auto& s=c.pipeline.shader.tev_stages[i];if(s.tevorders_enable)scale(s.tevorders_texcoord,s.tevorders_texmap);}
     for(unsigned i=0;i<c.pipeline.shader.num_ind_stages;++i){const auto& s=c.pipeline.shader.ind_stages[i];scale(s.texcoord,s.texmap);}
+    return out;
+}
+void bind_material(const CompiledMaterial& c,std::span<const Texture> textures,gxc::DrawPlan& plan,float width) {
+    const auto material=bind_native_material(c,textures,width);
+    const auto topology=plan.pipeline.primitive_topology;plan.pipeline=material.pipeline;plan.pipeline.primitive_topology=topology;
+    plan.constants=material.vertex;plan.pixel_constants=material.pixel;plan.constants_id=0;
+    plan.has_texture=material.texture_mask!=0;plan.texmap_mask=std::popcount(material.texture_mask)>1?material.texture_mask:0;
+    std::copy(material.textures.begin(),material.textures.end(),plan.textures);
+    std::copy(material.samplers.begin(),material.samplers.end(),plan.samplers);
+    for(unsigned t=0;t<8;++t)if(!plan.texmap_mask && (material.texture_mask&(1u<<t))) {
+        const auto& dst=plan.textures[t];plan.tex_slot=t;plan.tex_address=dst.address;plan.tex_size=dst.size;plan.tex_format=dst.format;plan.tex_width=dst.width;plan.tex_height=dst.height;plan.tex_data=dst.data;plan.tex_available=dst.available;plan.has_tlut=dst.has_tlut;plan.tlut_address=dst.tlut_address;plan.tlut_format=dst.tlut_format;plan.tlut_entries=dst.tlut_entries;plan.tlut_data=dst.tlut_data;plan.tlut_available=dst.tlut_available;
+    }
 }
 }

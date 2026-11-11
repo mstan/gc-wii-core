@@ -100,6 +100,7 @@ string(REPLACE "${_gcnllr_hash}"
   "if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {\n    if (priority == PipelinePriority::Normal) priority = PipelinePriority::Blocking;\n  }\n#ifdef AURORA_ENABLE_GXCORE\n  if constexpr (std::is_same_v<PipelineConfig, gxcore::PipelineConfig>) {\n    if (priority == PipelinePriority::Normal && (config.depthOnly == 2u || ubershader_mode() == 0))\n      priority = PipelinePriority::Blocking;\n  }\n#endif\n  ${_gcnllr_hash}"
   _gcnllr_pipeline "${_gcnllr_pipeline}")
 string(PREPEND _gcnllr_pipeline "#include <type_traits>\n")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_pipeline.cmake")
 set(_gcnllr_pipeline_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/pipeline_cache.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_pipeline_path}" CONTENT "${_gcnllr_pipeline}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
@@ -268,6 +269,7 @@ string(REPLACE "${_gcnllr_owned_tail}"
   _gcnllr_draw "${_gcnllr_draw}")
 string(PREPEND _gcnllr_draw "#include \"${CMAKE_CURRENT_LIST_DIR}/owned_texture.hpp\"\n#include <stdexcept>\n")
 string(PREPEND _gcnllr_draw "#include \"${CMAKE_CURRENT_LIST_DIR}/texture_encode.hpp\"\n")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_draw.cmake")
 set(_gcnllr_draw_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gxcore_draw.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_draw_path}" CONTENT "${_gcnllr_draw}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
@@ -426,6 +428,7 @@ endif()
 string(REPLACE "${_gcnllr_encode_anchor}"
   "#include \"${CMAKE_CURRENT_LIST_DIR}/ordered_encode.inc\"\n${_gcnllr_encode_anchor}"
   _gcnllr_common "${_gcnllr_common}")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_frame.cmake")
 file(CONFIGURE OUTPUT "${_gcnllr_common_path}" CONTENT "${_gcnllr_common}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
 list(REMOVE_ITEM _gcnllr_gx_sources lib/gfx/common.cpp)

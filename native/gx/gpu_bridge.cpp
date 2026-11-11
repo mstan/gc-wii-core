@@ -5,7 +5,7 @@
 #include "gfx/common.hpp"
 #include "gfx/texture.hpp"
 #include "gfx/clear.hpp"
-#include "gfx/gxcore_draw.hpp"
+#include "gxcore_draw.hpp"
 #include "gfx/pipeline_cache.hpp"
 #include "gfx/render_worker.hpp"
 #include "gfx/efb_readback.hpp"
