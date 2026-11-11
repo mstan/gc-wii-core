@@ -143,6 +143,10 @@ target_link_libraries(gcn_runtime PRIVATE gcn_runtime_core)
 # Tests
 # ---------------------------------------------------------------------------
 enable_testing()
+option(GC_WII_J3D_ASSETS "Build native J3D resource conversion" OFF)
+if(GC_WII_J3D_ASSETS)
+  add_subdirectory(native/j3d)
+endif()
 
 add_executable(test_broadway_runtime tests/test_broadway.c)
 target_link_libraries(test_broadway_runtime PRIVATE gcn_runtime_core)
