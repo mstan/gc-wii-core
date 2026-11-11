@@ -1557,7 +1557,12 @@ u32 gcn_gx_xf_words(void) { return GX_XF_MEM_WORDS; }
  * thread: call these before gcn_gx_tick/gcn_gx_pipeline_drain are ever
  * invoked again). */
 void gcn_gx_set_bp(const u32* bp) {
-    if (bp) memcpy(s_gx.bp, bp, sizeof s_gx.bp);
+    if (bp) {
+        memcpy(s_gx.bp, bp, sizeof s_gx.bp);
+#ifndef GCNLLR_NATIVE_GX
+        for (u32 cmd = 0; cmd < 256; ++cmd) gx_raster_notify_bp_write(cmd);
+#endif
+    }
 }
 void gcn_gx_set_xf(const u32* xf, u32 words) {
     if (!xf) return;
@@ -1602,9 +1607,10 @@ static void gx_on_bp(GcnGx* gx, u8 cmd, u32 value) {
 
     gx_raster_record_bp_write(cmd, value, gx->cpu ? gx->cpu->pc : 0u, gx->cur_dl_addr);
 
-    if (gx->bp[cmd] != value)
-        gx_raster_notify_bp_write(cmd);
+    const u32 previous = gx->bp[cmd];
     gx->bp[cmd] = value;
+    if (previous != value)
+        gx_raster_notify_bp_write(cmd);
 
     switch (cmd) {
     case GX_BP_SETDRAWDONE:            /* BPStructs.cpp:180-201 */

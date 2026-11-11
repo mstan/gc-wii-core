@@ -51,7 +51,8 @@ extern "C" {
 #endif
 
 #define GCN_SNAPSHOT_MAGIC           0x474E4353u  /* "GCNS" little-endian-in-file */
-#define GCN_SNAPSHOT_FORMAT_VERSION  1u
+/* Version 2 retains both independent BP TEV register/konst banks. */
+#define GCN_SNAPSHOT_FORMAT_VERSION  2u
 #define GCN_SNAPSHOT_COMMIT_LEN      64u
 
 /* Iteration-tier liberties recorded in the header per the spec's "Validation

@@ -71,6 +71,9 @@ void gx_raster_init(CPUState* cpu, const u32* bp, const u32* xf);
  * gx_raster_get_config_cache_stats and the cfg-cache block above
  * gx_raster_draw's cache lookup). */
 void gx_raster_notify_bp_write(u32 cmd);
+/* Snapshot of the two independent eight-word BP TEV/konst banks. */
+const u32* gx_raster_tev_state(void);
+void gx_raster_set_tev_state(const u32* words);
 void gx_raster_record_bp_write(u32 cmd, u32 value, u32 pc, u32 dl);
 void gx_raster_record_xf_write(u32 addr, u32 value, u32 pc, u32 dl);
 
