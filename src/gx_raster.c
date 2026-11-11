@@ -551,6 +551,30 @@ static inline u8 Convert5To8(u8 v) { return (u8)((v << 3) | (v >> 2)); }
  * pre-resolved per-stage StageKonst — can sit ahead of every pixel-path
  * function that reads the cache (GetPixelColor, ZCompare, BlendTev, ...). */
 typedef struct { s16 r, g, b, a; } TColor;
+/* BP register and konst writes share addresses, but select independent banks.
+ * Fragment intermediates must never replace these persistent initial values. */
+static u32 s_tev_bank_words[2][8];
+static TColor s_tev_initial[4], s_konst_initial[4];
+static void tev_record_word(u32 index, u32 value) {
+    u32 bank = (value >> 23) & 1u;
+    s_tev_bank_words[bank][index] = value & 0x7fffffu;
+    TColor* color = bank ? &s_konst_initial[index / 2] : &s_tev_initial[index / 2];
+    if (index & 1u) {
+        color->b = (s16)sext(value & 0x7ffu, 11);
+        color->g = (s16)sext((value >> 12) & 0x7ffu, 11);
+    } else {
+        color->r = (s16)sext(value & 0x7ffu, 11);
+        color->a = (s16)sext((value >> 12) & 0x7ffu, 11);
+    }
+}
+const u32* gx_raster_tev_state(void) { return &s_tev_bank_words[0][0]; }
+void gx_raster_set_tev_state(const u32* words) {
+    if (!words) return;
+    for (u32 bank = 0; bank < 2; ++bank)
+        for (u32 index = 0; index < 8; ++index)
+            tev_record_word(index, (words[bank * 8 + index] & 0x7fffffu) | (bank << 23));
+    gx_raster_notify_bp_write(0);
+}
 
 /* Forward declaration only (full definition lives with the rest of the Tev
  * state, further down) so DrawCfg below can hold a function pointer typed
@@ -824,6 +848,11 @@ static u64 cfg_relevant_hash(void) {
         h ^= (u64)s_bp[i];
         h *= 1099511628211ULL;         /* FNV-1a 64 prime */
     }
+    for (u32 bank = 0; bank < 2; ++bank)
+        for (u32 index = 0; index < 8; ++index) {
+            h ^= s_tev_bank_words[bank][index];
+            h *= 1099511628211ULL;
+        }
     return h;
 }
 
@@ -997,6 +1026,7 @@ void gx_raster_record_xf_write(u32 addr, u32 value, u32 pc, u32 dl) {
 }
 
 void gx_raster_notify_bp_write(u32 cmd) {
+    if (cmd >= 0xe0u && cmd <= 0xe7u) tev_record_word(cmd - 0xe0u, s_bp[cmd]);
     if (++s_bp_generation == 0) {
         s_bp_generation = 1;
         s_cfg_bp_generation = 0;
@@ -1985,20 +2015,8 @@ static void swap_table(u32 id, u32 out[4]) {
 
 /* Load TEV / konst registers from bp 0xE0-0xE7 (BPStructs.cpp:667-703). */
 static void tev_load_registers(Tev* t) {
-    for (int num = 0; num < 4; num++) {
-        u32 ra = s_bp[0xE0 + num * 2];
-        u32 bg = s_bp[0xE1 + num * 2];
-        s16 red = (s16)sext(bits(ra, 0, 11), 11);
-        s16 alp = (s16)sext(bits(ra, 12, 11), 11);
-        s16 blu = (s16)sext(bits(bg, 0, 11), 11);
-        s16 grn = (s16)sext(bits(bg, 12, 11), 11);
-        int ra_const = bits(ra, 23, 1);
-        int bg_const = bits(bg, 23, 1);
-        if (ra_const) { t->Konst[num].r = red; t->Konst[num].a = alp; }
-        else          { t->Reg[num].r   = red; t->Reg[num].a   = alp; }
-        if (bg_const) { t->Konst[num].g = grn; t->Konst[num].b = blu; }
-        else          { t->Reg[num].g   = grn; t->Reg[num].b   = blu; }
-    }
+    memcpy(t->Reg, s_tev_initial, sizeof s_tev_initial);
+    memcpy(t->Konst, s_konst_initial, sizeof s_konst_initial);
 }
 
 /* draw_color_{regular,compare} / draw_alpha_{regular,compare} take the
@@ -2472,6 +2490,9 @@ static inline void tev_comb_finish(Tev* t, u8* output, u64 comb_t0, u64 tex_befo
  * it (CLAUDE.md: "fold only constant decisions", requirement 5: general path
  * stays fully intact). */
 static void tev_draw(Tev* t) {
+    /* Dolphin Tev::Draw restores PixelShaderManager's initial colors for
+     * every fragment, before any stage writes a temporary destination. */
+    memcpy(t->Reg, s_tev_initial, sizeof s_tev_initial);
     tev_stats_enter(0);
 
     u64 tex_before, comb_t0 = tev_comb_begin(&tex_before);
@@ -9251,6 +9272,9 @@ void gx_raster_init(CPUState* cpu, const u32* bp, const u32* xf) {
     memset(s_efb_color, 0, sizeof s_efb_color);
     memset(s_efb_depth, 0, sizeof s_efb_depth);
     memset(s_tev_w, 0, sizeof s_tev_w);
+    memset(s_tev_bank_words, 0, sizeof s_tev_bank_words);
+    memset(s_tev_initial, 0, sizeof s_tev_initial);
+    memset(s_konst_initial, 0, sizeof s_konst_initial);
     for (int i = 0; i < GX_MT_MAX; i++)
         s_tev_w[i].wid = i;   /* indexes s_texel_cache_w/s_rb_w; see Tev.wid */
 }
