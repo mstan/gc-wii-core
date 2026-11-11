@@ -109,6 +109,7 @@ add_library(gcn_runtime_core STATIC
   src/overlay_none.c
   src/rings.c
   src/cost_ring.c
+  src/device_domains.c
   src/seed.c
   src/trace.c
   src/util/crc32.c
@@ -165,6 +166,9 @@ add_test(NAME overlay_pc_namespaces COMMAND test_overlay_module)
 add_executable(test_cost_ring tests/test_cost_ring.c)
 target_link_libraries(test_cost_ring PRIVATE gcn_runtime_core)
 add_test(NAME cost_ring_fields COMMAND test_cost_ring)
+add_executable(test_shared_device_domains tests/test_device_domains.c)
+target_link_libraries(test_shared_device_domains PRIVATE gcn_runtime_core)
+add_test(NAME shared_device_domains COMMAND test_shared_device_domains)
 
 add_executable(test_dsp_registers tests/test_dsp_registers.c)
 target_link_libraries(test_dsp_registers PRIVATE gcn_runtime_core)

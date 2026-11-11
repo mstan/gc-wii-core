@@ -72,6 +72,8 @@ static inline void gcn_cost_leave(unsigned previous) {
 void gcn_cost_init(u64 guest_cycles);
 void gcn_cost_begin_turn(u64 guest_cycles,u32 current_thread);
 void gcn_cost_end_turn(u64 guest_cycles);
+/* Account thread changes inside an event-owner turn without adding clocks. */
+void gcn_cost_thread_boundary(u64 guest_cycles,u32 current_thread);
 void gcn_cost_finish_field(u64 field,u64 guest_cycles);
 void gcn_cost_write_json(FILE*,u32 limit);
 

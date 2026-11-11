@@ -113,10 +113,9 @@ void gcn_cost_begin_turn(u64 cycles,u32 thread) {
     }
 }
 
-void gcn_cost_end_turn(u64 cycles) {
-    if(gcn_cost_sampling)gcn_cost_boundary(GCN_COST_HOST);
-    gcn_cost_sampling=false;
+static void charge_thread(u64 cycles) {
     const u64 elapsed=cycles-turn_cycles;
+    if(!elapsed)return;
     if(!turn_thread) {
         current.no_thread_cycles+=elapsed;
         return;
@@ -135,6 +134,17 @@ void gcn_cost_end_turn(u64 cycles) {
         last_thread_index=index;
     }
     current.threads[last_thread_index].cycles+=elapsed;
+}
+
+void gcn_cost_thread_boundary(u64 cycles,u32 thread) {
+    charge_thread(cycles);
+    turn_cycles=cycles;turn_thread=thread;
+}
+
+void gcn_cost_end_turn(u64 cycles) {
+    if(gcn_cost_sampling)gcn_cost_boundary(GCN_COST_HOST);
+    gcn_cost_sampling=false;
+    charge_thread(cycles);
 }
 
 void gcn_cost_finish_field(u64 field,u64 cycles) {

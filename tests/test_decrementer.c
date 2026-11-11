@@ -12,6 +12,13 @@
     } \
 } while (0)
 
+static unsigned observed,changed;
+static void observe(CPUState* cpu,void* user,bool mutation) {
+    (void)user;
+    if(mutation)++changed;
+    else {++observed;cpu->timebase=cpu->cycles/12;}
+}
+
 int main(void) {
     CPUState cpu;
     memset(&cpu, 0, sizeof cpu);
@@ -46,6 +53,15 @@ int main(void) {
     ppc_mtspr(&cpu, 22u, 123u, cpu.pc);
     CHECK(cpu.spr[22] == 123u);
 
+    ppc_timing_set_observer(&cpu,observe,NULL);
+    cpu.cycles=120;
+    CHECK(ppc_mftb(&cpu,268,cpu.pc)==10 && observed==1);
+    ppc_mfspr(&cpu,8,cpu.pc);CHECK(observed==1);
+    ppc_mfspr(&cpu,22,cpu.pc);CHECK(observed==2);
+    ppc_mtspr(&cpu,22,12,cpu.pc);CHECK(observed==3 && changed==1);
+    ppc_mtspr(&cpu,284,42,cpu.pc);CHECK(cpu.timebase==42 && observed==4 && changed==2);
+    ppc_decrementer_reset(&cpu);
+    ppc_mftb(&cpu,268,cpu.pc);CHECK(observed==4);
     puts("decrementer timing: PASS");
     return 0;
 }

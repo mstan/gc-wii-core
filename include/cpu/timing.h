@@ -16,4 +16,12 @@ void ppc_decrementer_reset(CPUState* cpu);
 void ppc_decrementer_tick(CPUState* cpu, u32 tb_ticks);
 void ppc_deliver_decrementer(CPUState* cpu);
 
+/* Runtime-owned observation seam. CPU helpers may bring TB/DEC to the
+ * published instruction cycle without changing the generated CPU ABI.
+ * Reset clears the observer. One machine owns a runtime instance. */
+typedef void (*PpcTimeObserver)(CPUState*, void* user, bool changed);
+void ppc_timing_set_observer(CPUState*, PpcTimeObserver, void* user);
+void ppc_timing_observe(CPUState*);
+void ppc_timing_changed(CPUState*);
+
 #endif
