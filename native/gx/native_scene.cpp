@@ -33,11 +33,11 @@ bool valid_native_texture(const GcWiiNativeTexture& t) {
     return true;
 }
 
-uint64_t NativeScene::create_mesh(const GcWiiNativeMesh& input) {
+uint64_t NativeScene::create_mesh(const GcWiiNativeMesh& input,const float* extra_uv,uint32_t extra_count) {
     if (!input.vertices || !input.indices || !input.vertex_count ||
         input.vertex_count > 65536u || !input.index_count ||
         input.index_count > 1048576u || input.index_count % 3u ||
-        next_handle_ == std::numeric_limits<uint64_t>::max()) {
+        next_handle_ == std::numeric_limits<uint64_t>::max() || extra_count>=gxc::kMaxRawTexCoords || (extra_count && !extra_uv)) {
         rejected(); return 0;
     }
     for (uint32_t i=0;i<input.index_count;++i)
@@ -47,6 +47,7 @@ uint64_t NativeScene::create_mesh(const GcWiiNativeMesh& input) {
         for (float f:v.position) if (!std::isfinite(f)) { rejected(); return 0; }
         for (float f:v.color) if (!std::isfinite(f) || f<0.f || f>1.f) { rejected(); return 0; }
         for (float f:v.uv) if (!std::isfinite(f)) { rejected(); return 0; }
+        for(uint32_t c=0;c<extra_count*2;++c)if(!std::isfinite(extra_uv[size_t(i)*extra_count*2+c])){rejected();return 0;}
     }
     gxc::DrawPlan plan;
     plan.vertex_count=input.vertex_count;
@@ -58,14 +59,16 @@ uint64_t NativeScene::create_mesh(const GcWiiNativeMesh& input) {
         std::copy_n(source.position,3,out+gxc::kVertexPosOffset/4);
         std::copy_n(source.color,4,out+gxc::kVertexColor0Offset/4);
         std::copy_n(source.uv,2,out+gxc::kVertexUvOffset/4);
+        if(extra_count)std::copy_n(extra_uv+size_t(i)*extra_count*2,extra_count*2,out+gxc::kVertexUvOffset/4+2);
     }
     const auto handle=next_handle_++;
-    meshes_.emplace(handle,std::move(plan));
+    meshes_.emplace(handle,Mesh{std::move(plan),extra_count+1});
     ++status_.mesh_uploads;
     status_.live_meshes=meshes_.size();
-    status_.uploaded_vertex_bytes+=uint64_t(input.vertex_count)*sizeof(GcWiiNativeVertex);
+    status_.uploaded_vertex_bytes+=uint64_t(input.vertex_count)*(sizeof(GcWiiNativeVertex)+extra_count*2*sizeof(float));
     return handle;
 }
+uint32_t NativeScene::uv_count(uint64_t handle) const {const auto found=meshes_.find(handle);return found==meshes_.end()?0:found->second.uv_count;}
 
 bool NativeScene::destroy_mesh(uint64_t handle) {
     if (!meshes_.erase(handle)) { rejected(); return false; }
@@ -94,7 +97,7 @@ gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
     if(!valid_native_texture(texture))return decline("Invalid tiled texture descriptor");
     for (float f:job.model_view) if (!std::isfinite(f))return decline("Nonfinite model-view matrix");
     for (float f:job.projection) if (!std::isfinite(f))return decline("Nonfinite projection matrix");
-    auto& plan=found->second;
+    auto& plan=found->second.plan;
     plan.pipeline={};
     plan.pipeline.shader.has_color0=1;
     plan.pipeline.shader.num_color_chans=1;
@@ -146,6 +149,7 @@ gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
         plan.pixel_constants={};
         plan.pixel_constants.texdims[0][0]=plan.pixel_constants.texdims[0][2]=int32_t(texture.width);
         plan.pixel_constants.texdims[0][1]=plan.pixel_constants.texdims[0][3]=int32_t(texture.height);
+        for(unsigned row=0;row<3;++row)for(float& value:plan.constants.texmatrices[row])value=0;
         plan.constants.texmatrices[0][0]=1.f;
         plan.constants.texmatrices[1][1]=1.f;
         auto& sampler=plan.samplers[0];

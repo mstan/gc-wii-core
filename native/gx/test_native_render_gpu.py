@@ -70,6 +70,19 @@ class GuiMaskDraw(c.Structure):
 class GuiMaskApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(GuiMaskDraw)))]
 
+class GuiMesh(c.Structure):
+    _fields_=[('mesh',Mesh),('extra_uv',c.POINTER(c.c_float)),('extra_uv_count',c.c_uint32)]
+class GuiCutout(c.Structure):
+    _fields_=[('image',GuiDraw),('cutoff',c.c_uint32)]
+class GuiAdd(c.Structure):
+    _fields_=[('image',GuiDraw),('addition',Texture),('weight',c.c_int32*4),('uv',(c.c_float*3)*2)]
+class GuiProduct(c.Structure):
+    _fields_=[('image',GuiMaskDraw),('secondary_uv',c.c_uint32),('primary_uv',(c.c_float*3)*2)]
+class GuiEffectsApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('create',c.CFUNCTYPE(c.c_uint64,c.POINTER(GuiMesh))),
+        ('cutout',c.CFUNCTYPE(c.c_int,c.POINTER(GuiCutout))),('add',c.CFUNCTYPE(c.c_int,c.POINTER(GuiAdd))),
+        ('product',c.CFUNCTYPE(c.c_int,c.POINTER(GuiProduct)))]
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -81,6 +94,7 @@ def main():
     parser.add_argument('--owned',action='store_true',help='Supply memory-owner callbacks required by a composed GameCube service')
     parser.add_argument('--layers',action='store_true',help='Check the fixed three-texture GUI background family')
     parser.add_argument('--mask',action='store_true',help='Check the two-texture GUI coverage family')
+    parser.add_argument('--effects',action='store_true',help='Check cutoff/additive/product GUI effects and retained UV channels')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -302,6 +316,65 @@ def main():
             assert not layers.draw(c.byref(layered)), 'Nonfinite overlay transform accepted'
             layered.uv[1][0][0]=1;layered.weights[1][0]=-1
             assert not layers.draw(c.byref(layered)), 'Unsupported signed overlay accepted'
+            native.status(c.byref(status))
+        if args.effects:
+            if not args.gui:
+                dll.gc_wii_native_gui_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_gui_get_api.restype=c.POINTER(GuiApi)
+                gui=dll.gc_wii_native_gui_get_api(1).contents
+            dll.gc_wii_native_gui_effects_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_gui_effects_get_api.restype=c.POINTER(GuiEffectsApi)
+            assert not dll.gc_wii_native_gui_effects_get_api(2)
+            effects=dll.gc_wii_native_gui_effects_get_api(1).contents
+            def black():
+                clear=Draw.from_buffer_copy(job);clear.material.flags=0;clear.model_view[11]=0
+                clear.material.texture=Texture(0x100,32,1,8,4,0,0,0,0,0,0);c.memset(c.addressof(ram)+0x100,0,32)
+                assert native.draw(c.byref(clear))
+            base=Draw.from_buffer_copy(job);base.material.flags=1;base.model_view[11]=0
+            base.material.texture=Texture(0x100,32,1,8,4,0,0,0,0,0,0)
+            blue=GuiMaterial((c.c_int32*4)(52,190,237,0),(c.c_int32*4)(52,190,237,255))
+            cut=GuiCutout(GuiDraw(base,blue),190);black();c.memset(c.addressof(ram)+0x100,190,32)
+            assert effects.cutout(c.byref(cut));expect('GUI cutoff excludes equality',320,240,(0,0,0))
+            c.memset(c.addressof(ram)+0x100,191,32)
+            assert effects.cutout(c.byref(cut));expect('GUI cutoff keeps greater alpha',320,240,(39,142,178))
+            for vertex in vertices:vertex.color[:]=(1,1,1,128/255)
+            plain=GuiMesh(mesh,c.POINTER(c.c_float)(),0);alpha_handle=effects.create(c.byref(plain));assert alpha_handle
+            black();cut.image.draw.mesh=alpha_handle;c.memset(c.addressof(ram)+0x100,191,32)
+            assert effects.cutout(c.byref(cut));expect('GUI cutoff then pane alpha',320,240,(20,72,89))
+            cut.cutoff=256;assert not effects.cutout(c.byref(cut))
+            added=GuiAdd();added.image=GuiDraw(base,GuiMaterial((c.c_int32*4)(40,40,40,0),(c.c_int32*4)(0,0,0,255)))
+            added.image.draw.material.flags=0;added.addition=Texture(0x500,32,1,8,4,0,0,0,0,0,0)
+            added.weight[:]=(15,15,15,255);added.uv[0][:]=(1,0,0);added.uv[1][:]=(0,1,0)
+            c.memset(c.addressof(ram)+0x100,128,32);c.memset(c.addressof(ram)+0x500,255,32)
+            assert effects.add(c.byref(added));expect('GUI two-image additive range',320,240,(35,35,35))
+            added.weight[0]=-1;assert not effects.add(c.byref(added))
+            # One corner differs: a global affine reconstruction cannot retain
+            # these independent UVs. Creation copies the raw channels once.
+            extra=(c.c_float*8)(.75,.5,0,.5,.75,.5,.75,.5)
+            pair=GuiMesh(mesh,extra,1);pair_handle=effects.create(c.byref(pair));assert pair_handle
+            extra[0]=-1
+            rgba=bytes([180,80])*16+bytes([140,200])*16;c.memmove(c.addressof(ram)+0x600,rgba,64)
+            product=GuiProduct();product.image.draw=Draw.from_buffer_copy(base);product.image.draw.mesh=pair_handle
+            product.image.draw.material.texture=Texture(0x600,64,6,4,4,0,0,0,0,0,0)
+            product.image.color=GuiMaterial((c.c_int32*4)(0,0,0,0),(c.c_int32*4)(255,255,255,255))
+            product.image.mask=Texture(0x500,32,1,8,4,0,0,0,0,0,0);product.image.opacity=255
+            product.image.uv[0][:]=(1,0,0);product.image.uv[1][:]=(0,1,0)
+            product.primary_uv[0][:]=(1,0,0);product.primary_uv[1][:]=(0,1,0);product.secondary_uv=1
+            black();c.memset(c.addressof(ram)+0x500,140,32)
+            assert effects.product(c.byref(product));expect('GUI primary and mask alpha product',320,240,(31,54,78))
+            black();product.image.opacity=128
+            assert effects.product(c.byref(product));expect('GUI alpha product byte opacity',320,240,(16,27,39))
+            black();product.image.opacity=255;c.memmove(c.addressof(ram)+0x500,bytes([0]*4+[255]*4)*4,32)
+            assert effects.product(c.byref(product))
+            expect('GUI retained independent UV ownership',160,120,(56,99,141))
+            expect('GUI non-affine extra UV corner',480,360,(0,0,0))
+            product.image.draw.mesh=handle;assert not effects.product(c.byref(product)), 'Missing retained UV channel accepted'
+            product.image.draw.mesh=pair_handle;product.primary_uv[0][0]=float('nan');assert not effects.product(c.byref(product))
+            product.primary_uv[0][:]=(0,0,.75);product.image.draw.material.flags=0
+            product.image.draw.material.texture=Texture(0x100,32,1,8,4,0,0,0,0,0,0)
+            c.memmove(c.addressof(ram)+0x100,bytes([0]*4+[255]*4)*4,32);c.memset(c.addressof(ram)+0x500,255,32)
+            assert effects.product(c.byref(product));expect('GUI primary UV material transform',160,240,(255,255,255))
+            ordinary=GuiDraw(product.image.draw,product.image.color);assert gui.draw(c.byref(ordinary))
+            expect('GUI ordinary material resets primary transform',160,240,(0,0,0))
+            assert native.destroy(alpha_handle) and native.destroy(pair_handle)
             native.status(c.byref(status))
         c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]

@@ -9,6 +9,7 @@
 #include "efb_geometry.hpp"
 #include "native_scene.hpp"
 #include "native_gui.hpp"
+#include "native_gui_effects.hpp"
 #include "gcnllr/native_frame.h"
 #include "gcnllr/native_output.h"
 #if GC_WII_NATIVE_J3D
@@ -1377,6 +1378,18 @@ const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
 const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
 const GcWiiNativeGuiLayersApi native_gui_layers_api={GC_WII_NATIVE_GUI_LAYERS_ABI,draw_native_gui_layers};
 const GcWiiNativeGuiMaskApi native_gui_mask_api={GC_WII_NATIVE_GUI_MASK_ABI,draw_native_gui_mask};
+template<class Input> int draw_gui_effect(const Input* input,gxruntime::gxcore::DrawPlan* (*prepare)(gcnllr::NativeScene&,const Input&)) {
+    if(!input){native_scene.rejected();return 0;}if(!native_scene_ready())return 0;
+    try{return submit_native_scene(prepare(native_scene,*input));}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int draw_gui_cutout(const GcWiiNativeGuiCutoutDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_cutout);}
+int draw_gui_add(const GcWiiNativeGuiAddDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_add);}
+int draw_gui_product(const GcWiiNativeGuiProductDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_product);}
+uint64_t create_gui_mesh(const GcWiiNativeGuiMesh* input) {
+    if(!initialized || failed.load() || fifo_worker || !input){native_scene.rejected();return 0;}
+    try{return native_scene.create_mesh(input->mesh,input->extra_uv,input->extra_uv_count);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+const GcWiiNativeGuiEffectsApi native_gui_effects_api={GC_WII_NATIVE_GUI_EFFECTS_ABI,create_gui_mesh,draw_gui_cutout,draw_gui_add,draw_gui_product};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
@@ -1389,6 +1402,9 @@ extern "C" GCNLLR_EXPORT const GcWiiNativeGuiLayersApi* gc_wii_native_gui_layers
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeGuiMaskApi* gc_wii_native_gui_mask_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_GUI_MASK_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_mask_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiEffectsApi* gc_wii_native_gui_effects_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_EFFECTS_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_effects_api:nullptr;
 }
 
 namespace {

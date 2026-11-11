@@ -66,6 +66,14 @@ are excluded from this named family. Add `--mask` for actual pixel checks of
 coverage, opacity, RGB masking and independent coordinates. Existing API layouts
 remain unchanged.
 
+`gc_wii_native_gui_effects_get_api` provides complete alpha-cutoff, two-image
+additive and alpha-product materials. It shares the same draw owner, mesh
+handles and texture cache. Its mesh creation method copies additional raw UV
+channels once, preserving independent non-affine coordinates; live product
+texture matrices stay separate from that geometry. Run the component check
+with `--effects` to cover threshold boundaries, composition, UV ownership and
+resetting transforms when a mesh returns to an ordinary material.
+
 `GC_WII_NATIVE_J3D=ON` additionally builds the native BMD/BDL material and mesh
 provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` and
 `include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;

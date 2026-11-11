@@ -2,8 +2,7 @@
 #include "native_gui.hpp"
 #include <cmath>
 namespace gcnllr {
-namespace {
-void gui_texture(gxruntime::gxcore::DrawPlan& plan,unsigned slot,const GcWiiNativeTexture& texture,const float (*uv)[3]) {
+void bind_gui_texture(gxruntime::gxcore::DrawPlan& plan,unsigned slot,const GcWiiNativeTexture& texture,const float (*uv)[3]) {
     auto& binding=plan.textures[slot];binding={};binding.valid=true;
     binding.address=texture.address;binding.size=texture.size;binding.format=texture.format;
     binding.width=texture.width;binding.height=texture.height;
@@ -22,7 +21,6 @@ void gui_texture(gxruntime::gxcore::DrawPlan& plan,unsigned slot,const GcWiiNati
         for(unsigned r=0;r<2;++r){rows[r][0]=uv[r][0];rows[r][1]=uv[r][1];rows[r][3]=uv[r][2];}
         rows[2][2]=1;
     }
-}
 }
 gxruntime::gxcore::DrawPlan* prepare_gui(NativeScene& scene,const GcWiiNativeGuiDraw& input) {
     for(unsigned i=0;i<4;++i)
@@ -74,7 +72,7 @@ gxruntime::gxcore::DrawPlan* prepare_gui_layers(NativeScene& scene,const GcWiiNa
     plan->texmap_mask=7;
     for(unsigned i=0;i<3;++i) {
         const auto& texture=i?input.overlays[i-1]:input.draw.material.texture;
-        gui_texture(*plan,i,texture,i?input.uv[i-1]:nullptr);
+        bind_gui_texture(*plan,i,texture,i?input.uv[i-1]:nullptr);
         auto& stage=shader.tev_stages[i];stage={};
         stage.tevorders_enable=1;stage.tevorders_texcoord=stage.tevorders_texmap=uint8_t(i);
         stage.cc_clamp=stage.ac_clamp=1;
@@ -101,7 +99,7 @@ gxruntime::gxcore::DrawPlan* prepare_gui_mask(NativeScene& scene,const GcWiiNati
     auto* plan=scene.prepare(input.draw);if(!plan)return nullptr;
     auto& shader=plan->pipeline.shader;shader.tev_valid=1;shader.num_tev_stages=2;shader.num_tex_gens=2;
     plan->texmap_mask=3;
-    gui_texture(*plan,0,input.draw.material.texture,nullptr);gui_texture(*plan,1,input.mask,input.uv);
+    bind_gui_texture(*plan,0,input.draw.material.texture,nullptr);bind_gui_texture(*plan,1,input.mask,input.uv);
     for(unsigned i=0;i<2;++i) {
         auto& stage=shader.tev_stages[i];stage={};stage.tevorders_enable=1;
         stage.tevorders_texcoord=stage.tevorders_texmap=uint8_t(i);stage.cc_clamp=stage.ac_clamp=1;
