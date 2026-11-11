@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static int failures;
 #define CHECK(cond, msg) do { \
@@ -30,6 +31,29 @@ int main(void) {
           "conversion truncates an incomplete final stereo frame safely");
     CHECK(gcn_host_audio_convert_be_s16(NULL, be_pcm, sizeof be_pcm) == 0u,
           "conversion rejects a null destination");
+
+#ifdef _WIN32
+    _putenv_s("GCN_AUDIO", "0");
+    _putenv_s("GCN_AUDIO_CAPTURE", "");
+#else
+    setenv("GCN_AUDIO", "0", 1);
+    unsetenv("GCN_AUDIO_CAPTURE");
+#endif
+    gcn_host_audio_start(32000);
+    gcn_host_audio_submit_be_s16(NULL, be_pcm, sizeof be_pcm);
+    GcnHostAudioStats complete;
+    gcn_host_audio_get_stats(&complete);
+    CHECK(complete.emulated_frames == 2 && complete.pcm_hash == 7160345683946154871ull,
+          "PCM fingerprint covers actual ordered samples with host output disabled");
+    gcn_host_audio_stop();
+    gcn_host_audio_start(32000);
+    gcn_host_audio_submit_be_s16(NULL, be_pcm, 4);
+    gcn_host_audio_submit_be_s16(NULL, be_pcm + 4, 4);
+    GcnHostAudioStats split;
+    gcn_host_audio_get_stats(&split);
+    CHECK(split.pcm_hash == complete.pcm_hash && split.emulated_frames == complete.emulated_frames,
+          "PCM fingerprint is independent of submission boundaries");
+    gcn_host_audio_stop();
 
     if (failures) {
         fprintf(stderr, "%d host-audio test(s) failed\n", failures);

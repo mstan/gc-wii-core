@@ -188,6 +188,7 @@ std::atomic<uint64_t> completion_service_ns{};
 uint64_t last_completion_service_ns{};
 std::array<char,4u*1024u*1024u> frame_times_buffer;
 bool profile{};
+bool gpu_trace{};
 // Diagnostic-only, bounded distinct layouts; FIFO translation owns the set.
 // This identifies why actual copied textures still require materialization.
 std::array<std::array<uint32_t,10>,128> incompatible_views{};
@@ -812,6 +813,7 @@ int start(const GcnllrNativeGxConfig* input) {
     ++efb_generation;color_peek_generation=depth_peek_generation=0;
     color_peek.clear();depth_peek.clear();
     profile=std::getenv("GCNLLR_GX_PROFILE")!=nullptr;
+    gpu_trace=std::getenv("GCNLLR_GPU_TRACE")!=nullptr;
     incompatible_view_count=0;
     fifo_cost={};draw_cost={};copy_cost={};present_cost={};status_cost={};owner_effect_cost={};last_profile=Clock::now();
     try {
@@ -964,7 +966,12 @@ int start(const GcnllrNativeGxConfig* input) {
 }
 int fifo(const uint8_t* bytes,uint32_t size) {
     if (!initialized || failed.load() || (!bytes && size)) return 0;
-    if(std::getenv("GCNLLR_GPU_TRACE")) {
+#if GCNLLR_GPU_TRACE_CACHE
+    const bool trace=gpu_trace;
+#else
+    const bool trace=std::getenv("GCNLLR_GPU_TRACE")!=nullptr;
+#endif
+    if(trace) {
         const auto count=std::min<size_t>(size,fifo_tail.size());
         std::memmove(fifo_tail.data(),fifo_tail.data()+count,fifo_tail.size()-count);
         if(count)std::memcpy(fifo_tail.data()+fifo_tail.size()-count,bytes+size-count,count);

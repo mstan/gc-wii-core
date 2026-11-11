@@ -51,6 +51,8 @@ enum {
     GCN_OVERLAY_NONE    = 0xFFFFFFFEu, /* hashed; no variant matches this page */
 };
 
+#define GCN_OVERLAY_INDEX_SLOTS (3u * (GC_MAIN_RAM_SIZE / 4096u))
+
 typedef struct {
     const GcnOverlayPage* pages;
     const GcnOverlayVariant* variants;
@@ -62,7 +64,12 @@ typedef struct {
     u64 hashes;
     u64 invalidations;
     u32 pages_resident;
+    const u32* index; /* optional caller-owned physical/cached/uncached page map */
 } GcnOverlayModule;
+
+/* Initializes a bounded direct page map. Other page shapes retain the search
+ * implementation. Storage must remain alive for the module's lifetime. */
+bool gcn_overlay_module_index(GcnOverlayModule*,u32* storage,u32 capacity);
 
 /* Try to run `address` natively from a content-matched overlay variant.
  * Returns false when the page is unknown, has no variant, or the resident

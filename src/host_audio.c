@@ -386,6 +386,7 @@ static void close_worker_handles(void) {
 bool gcn_host_audio_start(u32 sample_rate) {
     capture_close();
     memset(&s_stats, 0, sizeof s_stats);
+    s_stats.pcm_hash = 14695981039346656037ull;
     const char* audio = getenv("GCN_AUDIO");
     const char* window = getenv("GCN_WINDOW");
     bool requested = audio && *audio ? *audio != '0' :
@@ -511,6 +512,10 @@ void gcn_host_audio_submit_be_s16(void* user, const u8* samples, u32 bytes) {
         return;
     bytes -= bytes % 4u;
     s_stats.emulated_frames += bytes / 4u;
+    for (u32 i = 0; i < bytes; ++i) {
+        s_stats.pcm_hash ^= samples[i];
+        s_stats.pcm_hash *= 1099511628211ull;
+    }
     capture_samples(samples, bytes);
     if (!s_stats.enabled) return;
 

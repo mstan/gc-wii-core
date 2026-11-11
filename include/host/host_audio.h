@@ -32,6 +32,7 @@ typedef struct {
     bool capture_failed;
     bool output_muted; /* actual WASAPI session mute, independent of emulation */
     u64 emulated_frames; /* actual AID PCM delivered, including with host sink off */
+    u64 pcm_hash; /* FNV-1a64 of ordered big-endian R/L PCM before host buffering */
 } GcnHostAudioStats;
 
 /* Default-on with GCN_WINDOW=1; default-off for headless/oracle runs.

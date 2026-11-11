@@ -58,6 +58,8 @@ if(NOT GCNLLR_GPU_BACKEND MATCHES "^(auto|d3d12|vulkan)$")
 endif()
 add_library(gcnllr-native-gx SHARED "${CMAKE_CURRENT_LIST_DIR}/gx.cpp" "${CMAKE_CURRENT_LIST_DIR}/gpu_bridge.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/efb_depth.cpp")
+option(GCNLLR_GPU_TRACE_CACHE "Read the GPU trace setting once at service startup" ON)
+target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GPU_TRACE_CACHE=$<BOOL:${GCNLLR_GPU_TRACE_CACHE}>)
 if(GCNLLR_GPU_BACKEND STREQUAL "vulkan")
   target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GPU_VULKAN=1)
 elseif(GCNLLR_GPU_BACKEND STREQUAL "d3d12")

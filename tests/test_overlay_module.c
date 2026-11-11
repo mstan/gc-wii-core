@@ -11,6 +11,9 @@ int main(void){
     GcnOverlayVariant variant={gcn_aot_fnv1a64(cpu.ram+0x1000,4096),body};
     u32 resident[]={GCN_OVERLAY_UNKNOWN,GCN_OVERLAY_UNKNOWN,GCN_OVERLAY_UNKNOWN};
     GcnOverlayModule module={pages,&variant,resident,3,1};
+    static u32 index[GCN_OVERLAY_INDEX_SLOTS];
+    CHECK(!gcn_overlay_module_index(&module,index,GCN_OVERLAY_INDEX_SLOTS-1));
+    CHECK(gcn_overlay_module_index(&module,index,GCN_OVERLAY_INDEX_SLOTS));
     for(unsigned i=0;i<3;i++){
         cpu.pc=pages[i].start+8;
         CHECK(gcn_overlay_module_call(&module,&cpu,cpu.pc));
@@ -20,6 +23,7 @@ int main(void){
     cpu.ram[0x1000]=1;
     gcn_overlay_module_invalidate(&module,0xc0001000,32);
     CHECK(module.pages_resident==0);
+    CHECK(module.invalidations==3);
     for(unsigned i=0;i<3;i++){
         cpu.pc=pages[i].start+8;
         CHECK(!gcn_overlay_module_call(&module,&cpu,cpu.pc));
@@ -27,6 +31,7 @@ int main(void){
     }
     /* A cached-only table cannot substitute its body for a physical PC. */
     GcnOverlayModule cached={pages+1,&variant,resident+1,1,1};
+    CHECK(gcn_overlay_module_index(&cached,index,GCN_OVERLAY_INDEX_SLOTS));
     resident[1]=GCN_OVERLAY_UNKNOWN;cpu.ram[0x1000]=0;cpu.pc=0x1008;
     CHECK(!gcn_overlay_module_call(&cached,&cpu,cpu.pc));
     CHECK(cpu.pc==0x1008);

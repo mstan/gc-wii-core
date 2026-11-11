@@ -108,12 +108,21 @@ add_library(gcn_runtime_core STATIC
   src/title_module_none.c
   src/overlay_none.c
   src/rings.c
+  src/cost_ring.c
   src/seed.c
   src/trace.c
   src/util/crc32.c
   ${GC_WII_POWERPC_CORE_DIR}/src/frontend/decoder.c
   ${GC_WII_POWERPC_CORE_DIR}/src/backend/ppc_cycles.c
 )
+option(GCN_COST_RING "Record the always-on bounded per-field cost ring" ON)
+target_compile_definitions(gcn_runtime_core PRIVATE GCN_COST_RING_ENABLED=$<BOOL:${GCN_COST_RING}>)
+set(GCN_OVERLAY_LOOKUP "indexed" CACHE STRING "Native overlay lookup: indexed or search")
+set_property(CACHE GCN_OVERLAY_LOOKUP PROPERTY STRINGS indexed search)
+if(NOT GCN_OVERLAY_LOOKUP MATCHES "^(indexed|search)$")
+  message(FATAL_ERROR "Unknown overlay lookup provider")
+endif()
+target_compile_definitions(gcn_runtime_core PRIVATE GCN_OVERLAY_INDEXED=$<STREQUAL:${GCN_OVERLAY_LOOKUP},indexed>)
 target_include_directories(gcn_runtime_core PUBLIC include)
 target_include_directories(gcn_runtime_core PRIVATE
   ${GC_WII_POWERPC_CORE_DIR}/src)
@@ -153,6 +162,9 @@ add_test(NAME aot_module_identity COMMAND test_aot_module)
 add_executable(test_overlay_module tests/test_overlay_module.c)
 target_link_libraries(test_overlay_module PRIVATE gcn_runtime_core)
 add_test(NAME overlay_pc_namespaces COMMAND test_overlay_module)
+add_executable(test_cost_ring tests/test_cost_ring.c)
+target_link_libraries(test_cost_ring PRIVATE gcn_runtime_core)
+add_test(NAME cost_ring_fields COMMAND test_cost_ring)
 
 add_executable(test_dsp_registers tests/test_dsp_registers.c)
 target_link_libraries(test_dsp_registers PRIVATE gcn_runtime_core)
