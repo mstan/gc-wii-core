@@ -116,6 +116,18 @@ def main():
         assert native.draw(c.byref(job)), 'Native transformed draw failed'
         expect('model-view translation moves geometry',160,240,(0,0,0))
         expect('translation preserves uncovered pixels',480,240,(128,0,0))
+        job.model_view[3]=0;job.model_view[11]=.25
+        job.material.flags=2|4 # ordinary LEQUAL with a depth write
+        c.memset(c.addressof(ram)+0x100,128,32)
+        assert native.draw(c.byref(job)), 'Native depth-writing draw failed'
+        expect('nearer depth writes color',320,240,(128,0,0))
+        job.model_view[11]=-.25
+        c.memset(c.addressof(ram)+0x100,0,32)
+        assert native.draw(c.byref(job)), 'Native occluded draw failed'
+        expect('ordinary depth rejects farther geometry',320,240,(128,0,0))
+        job.material.flags|=8 # explicit ALWAYS for menu overlays
+        assert native.draw(c.byref(job)), 'Native ALWAYS depth draw failed'
+        expect('ALWAYS depth accepts farther overlay',320,240,(0,0,0))
         bad=Draw.from_buffer_copy(job);bad.material.flags=0x80000000
         assert not native.draw(c.byref(bad)), 'Unknown material silently accepted'
         bad=Draw.from_buffer_copy(job);bad.material.texture.format=99
@@ -123,7 +135,7 @@ def main():
         bad=Draw.from_buffer_copy(job);bad.material.texture.size=1
         assert not native.draw(c.byref(bad)), 'Truncated tiled texture silently accepted'
         status=Status();native.status(c.byref(status))
-        assert (status.mesh_uploads,status.draws,status.rejected,status.live_meshes)==(1,4,3,1), vars(status)
+        assert (status.mesh_uploads,status.draws,status.rejected,status.live_meshes)==(1,7,3,1), vars(status)
         gx_status=c.create_string_buffer(2048)
         c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]

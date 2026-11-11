@@ -73,7 +73,7 @@ bool NativeScene::destroy_mesh(uint64_t handle) {
 gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
     const auto found=meshes_.find(job.mesh);
     const auto& texture=job.material.texture;
-    if (found==meshes_.end() || (job.material.flags & ~7u) ||
+    if (found==meshes_.end() || (job.material.flags & ~15u) ||
         !std::isfinite(job.x) || !std::isfinite(job.y) ||
         !std::isfinite(job.width) || !std::isfinite(job.height) ||
         !std::isfinite(job.near_depth) || !std::isfinite(job.far_depth) ||
@@ -94,7 +94,8 @@ gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
     plan.pipeline.dst_factor=plan.pipeline.dst_factor_alpha=5;
     plan.pipeline.depth_test=(job.material.flags&GC_WII_NATIVE_DEPTH_TEST)!=0;
     plan.pipeline.depth_update=(job.material.flags&GC_WII_NATIVE_DEPTH_WRITE)!=0;
-    plan.pipeline.depth_func=uint8_t(gxc::CompareMode::LEqual);
+    plan.pipeline.depth_func=uint8_t((job.material.flags&GC_WII_NATIVE_DEPTH_ALWAYS)
+        ? gxc::CompareMode::Always:gxc::CompareMode::LEqual);
     std::memcpy(plan.constants.posnormalmatrix,job.model_view,sizeof(job.model_view));
     std::memcpy(plan.constants.projection,job.projection,sizeof(job.projection));
     plan.constants_id=0;

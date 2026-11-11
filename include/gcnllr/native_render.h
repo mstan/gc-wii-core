@@ -15,6 +15,9 @@ extern "C" {
 #define GC_WII_NATIVE_BLEND 1u
 #define GC_WII_NATIVE_DEPTH_TEST 2u
 #define GC_WII_NATIVE_DEPTH_WRITE 4u
+/* Select ALWAYS instead of the default LEQUAL. Test/write remain independent.
+ * Services built before this flag reject it as an unknown material input. */
+#define GC_WII_NATIVE_DEPTH_ALWAYS 8u
 
 typedef struct {
     float position[3], color[4], uv[2];
