@@ -36,6 +36,10 @@ typedef struct GcWiiJ3DDraw {
     /* Asset recipes that omit culling require an explicit caller value. */
     uint32_t cull_mode;
     uint32_t material_inputs;
+    /* Zero preserves the original all-four-row override. Otherwise bits 0..3
+     * select ambient0/ambient1/material0/material1 independently. A material
+     * diff that updates only material colors supplies mask 0xC. */
+    uint32_t material_color_mask;
     int32_t material_colors[4][4], register_colors[4][4], constant_colors[4][4];
     uint16_t texture_indices[8];
     GcWiiJ3DChannel channels[4]; /* color0, color1, alpha0, alpha1 */
