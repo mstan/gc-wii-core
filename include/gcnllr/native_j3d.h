@@ -5,7 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define GC_WII_NATIVE_J3D_ABI 1u
+#define GC_WII_NATIVE_J3D_ABI 2u
 #define GC_WII_J3D_MATERIAL_COLORS 1u
 #define GC_WII_J3D_REGISTER_COLORS 2u
 #define GC_WII_J3D_CONSTANT_COLORS 4u
