@@ -40,6 +40,9 @@ class FrameApi(c.Structure):
 class OutputApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('submit',c.CFUNCTYPE(c.c_int))]
 
+class VideoApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('idle_dimming',c.CFUNCTYPE(c.c_int,c.c_uint32))]
+
 
 class OwnedCopy(c.Structure):
     _fields_=[('token',c.c_uint64)]+[(name,c.c_uint32) for name in ('address','row_bytes','rows','stride','flags')]
@@ -63,6 +66,7 @@ def main():
     parser.add_argument('--work-root',type=Path,required=True)
     parser.add_argument('--eager',action='store_true',help='Match a consumer without optional copy-ownership callbacks')
     parser.add_argument('--output',action='store_true',help='Qualify owned submission and complete direct/RAM presentation parity')
+    parser.add_argument('--video',action='store_true',help='Qualify idle dimming and restoration on actual scanout')
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
@@ -74,6 +78,13 @@ def main():
     dll.gc_wii_native_frame_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_frame_get_api.restype=c.POINTER(FrameApi)
     assert not dll.gc_wii_native_frame_get_api(2),'Unknown native frame ABI accepted'
     frame=dll.gc_wii_native_frame_get_api(1).contents
+    video=None
+    if args.video:
+        dll.gc_wii_native_video_get_api.argtypes=[c.c_uint32]
+        dll.gc_wii_native_video_get_api.restype=c.POINTER(VideoApi)
+        assert not dll.gc_wii_native_video_get_api(2),'Unknown native video ABI accepted'
+        video=dll.gc_wii_native_video_get_api(1).contents
+        assert not video.idle_dimming(1),'Video effect accepted before renderer startup'
     output=None
     if args.output:
         assert not args.eager,'Owned submission needs the guarded owner double'
@@ -229,6 +240,29 @@ def main():
             memory=[pixel(x,y,2) for y in range(2) for x in range(16)]
             assert direct==memory,('direct output versus materialized YUY2 scanout',direct,memory)
             checks.append('all 32 host scanout pixels match direct and materialized YUY2 presentation exactly')
+
+        if video:
+            normal=[pixel(x,y,2) for y in range(2) for x in range(16)]
+            original_bytes=bytes(mem2[0x10000:0x10040])
+            present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
+            def show():
+                if token:assert gx.present_copy(token,16,2,32)==1
+                else:assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
+                return [pixel(x,y,2) for y in range(2) for x in range(16)]
+            assert video.idle_dimming(1)
+            dimmed=show()
+            for a,b in zip(normal,dimmed):
+                assert b>>24==255
+                for shift in (0,8,16):assert abs(((b>>shift)&255)-((a>>shift)&255)*.25)<=1
+            assert bytes(mem2[0x10000:0x10040])==original_bytes,'Presentation dimming changed guest bytes'
+            if token:
+                assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
+                assert [pixel(x,y,2) for y in range(2) for x in range(16)]==dimmed
+            assert not video.idle_dimming(2),'Unknown dimming mode accepted'
+            assert show()==dimmed,'Rejected video mode changed state'
+            assert video.idle_dimming(0) and show()==normal,'Normal brightness was not restored exactly'
+            checks.append('idle dimming quarters display RGB while preserving guest XFB bytes and alpha')
+            checks.append('owned and materialized dimmed scanouts match and normal output restores exactly')
 
         clear(0,99,16,3,(0,0,0));clear(0,100,16,1,(255,255,255))
         filtered=copy(0x90010200,100,taps=(8,8,10,12,10,8,8),flags=0)

@@ -9,6 +9,7 @@
 namespace gxruntime::gxcore { struct EfbCopyCommand; }
 namespace gcnllr::gpu_bridge {
 void initialize();
+void set_idle_dimming(bool enabled);
 bool settle_framebuffer();
 struct CopiedImage {uint32_t width{},height{};std::vector<uint8_t> yuy2;};
 struct EncodedImage;

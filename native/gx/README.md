@@ -99,3 +99,11 @@ The existing `test_native_frame_gpu.py --output --efb-height 528` exercises the
 new submission contract and compares all pixels of a colored direct scanout
 with its materialized YUY2 presentation. It remains a hidden, silent component
 check; title correctness and throughput require their own replay gates.
+
+Optional NativeVideo ABI1 selects normal output or the Wii SDK's 25% idle-dim
+preset on the machine owner. It changes the host presentation decoder and
+preserves EFB/XFB bytes, immutable copy generations and alpha. Each presentation
+captures the selected immutable brightness uniform, including queued and owned
+scanouts. Unknown ABI versions and modes reject without changing state.
+`test_native_frame_gpu.py --output --video --efb-height 528` verifies dimming,
+exact restoration and direct/materialized presentation parity on the real GPU.

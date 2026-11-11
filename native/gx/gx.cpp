@@ -12,6 +12,7 @@
 #include "native_gui_effects.hpp"
 #include "gcnllr/native_frame.h"
 #include "gcnllr/native_output.h"
+#include "gcnllr/native_video.h"
 #if GC_WII_NATIVE_J3D
 #include "native_j3d.hpp"
 #endif
@@ -1292,6 +1293,16 @@ extern "C" bool gcnllr_aurora_retail_bp(uint32_t reg,uint32_t value) {
 #endif
 extern "C" GCNLLR_EXPORT const GcnllrNativeGxApi* gcnllr_native_gx_get_api(uint32_t abi) {
     return abi==GCNLLR_NATIVE_GX_ABI ? &api : nullptr;
+}
+namespace {
+int native_idle_dimming(uint32_t enabled) {
+    if(!initialized || failed.load() || enabled>1)return 0;
+    gcnllr::gpu_bridge::set_idle_dimming(enabled!=0);return 1;
+}
+const GcWiiNativeVideoApi native_video_api={GC_WII_NATIVE_VIDEO_ABI,native_idle_dimming};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeVideoApi* gc_wii_native_video_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_VIDEO_ABI?&native_video_api:nullptr;
 }
 
 namespace {

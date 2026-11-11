@@ -64,6 +64,9 @@ static wgpu::ComputePipeline display_encoder;
 static wgpu::Buffer scanout_input;
 static uint64_t scanout_input_capacity{};
 static wgpu::ComputePipeline scanout_decoder;
+static std::array<wgpu::Buffer,2> scanout_levels;
+static bool idle_dimming{}; // machine-owner state, captured by each presentation
+void set_idle_dimming(bool enabled){idle_dimming=enabled;}
 struct DisplayBand {
     gfx::TextureHandle texture;
     uint32_t width{},height{},first_row{};
@@ -148,6 +151,7 @@ fn yuv(rgb: vec3<i32>) -> vec3<i32> {
 static constexpr char scanout_decode_shader[]=R"(
 @group(0) @binding(0) var<storage, read> src: array<u32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> display: vec4<f32>;
 @compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size=textureDimensions(dst);
     if (id.x>=size.x/2u || id.y>=size.y) { return; }
@@ -157,7 +161,7 @@ static constexpr char scanout_decode_shader[]=R"(
     for (var n=0u;n<2u;n++) {
         let c=298*(i32((pair>>(n*16u))&255u)-16);
         let rgb=clamp((vec3<i32>(c)+chroma)>>vec3<u32>(8u),vec3<i32>(0),vec3<i32>(255));
-        textureStore(dst,vec2<i32>(i32(id.x*2u+n),i32(id.y)),vec4<f32>(vec3<f32>(rgb)/255.0,1.0));
+        textureStore(dst,vec2<i32>(i32(id.x*2u+n),i32(id.y)),vec4<f32>(vec3<f32>(rgb)/255.0*display.x,1.0));
     }
 }
 )";
@@ -166,6 +170,7 @@ static HANDLE main_schedule{},render_schedule{};
 #endif
 
 void initialize() {
+    idle_dimming=false;
     recorded_copies=false;recorded_encodes=observation_submissions=publication_joins=0;
     scanout_frames=scanout_joins=0;
     {std::lock_guard lock(submission_mutex);submission_error={};}
@@ -180,6 +185,13 @@ void initialize() {
     const wgpu::ComputePipelineDescriptor decode_descriptor{.label="GameCube exact VI decode",
         .compute={.module=decode_module,.entryPoint="main"}};
     scanout_decoder=gpu::g_device.CreateComputePipeline(&decode_descriptor);
+    for(unsigned n=0;n<2;n++) {
+        const std::array<float,4> values{n?0.25f:1.f,0,0,0};
+        const wgpu::BufferDescriptor descriptor{.label="Immutable VI presentation brightness",
+            .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof values};
+        scanout_levels[n]=gpu::g_device.CreateBuffer(&descriptor);
+        gpu::g_queue.WriteBuffer(scanout_levels[n],0,values.data(),sizeof values);
+    }
 #ifdef _WIN32
     // Real-time media work must not compete as a background batch job.
     // MMCSS scopes the scheduling request to the two deadline-bearing threads
@@ -579,10 +591,11 @@ static void prepare_scanout(uint32_t width,uint32_t height) {
     }
 }
 static void decode_scanout(wgpu::CommandEncoder& encoder,const wgpu::Buffer& buffer,
-        const gpu::TextureWithSampler& target,uint32_t width,uint32_t height) {
+        const gpu::TextureWithSampler& target,uint32_t width,uint32_t height,bool dimmed) {
     const uint64_t bytes=uint64_t(width)*height*2;
     const std::array entries{wgpu::BindGroupEntry{.binding=0,.buffer=buffer,.size=bytes},
-        wgpu::BindGroupEntry{.binding=1,.textureView=target.view}};
+        wgpu::BindGroupEntry{.binding=1,.textureView=target.view},
+        wgpu::BindGroupEntry{.binding=2,.buffer=scanout_levels[dimmed],.size=16}};
     const wgpu::BindGroupDescriptor descriptor{.layout=scanout_decoder.GetBindGroupLayout(0),
         .entryCount=entries.size(),.entries=entries.data()};
     auto pass=encoder.BeginComputePass();
@@ -595,7 +608,8 @@ static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t hei
     // The override API borrows a pointer. Retain the exact texture generation
     // through the queued clear, even if the caller changes geometry meanwhile.
     const auto target=queued_scanout;++scanout_frames;
-    gfx::machine_encode_tail([buffer,target,width,height,spans=std::move(spans),cpu=std::move(cpu)]
+    const bool dimmed=idle_dimming;
+    gfx::machine_encode_tail([buffer,target,width,height,dimmed,spans=std::move(spans),cpu=std::move(cpu)]
             (wgpu::CommandEncoder& encoder) {
         try {
             // Upload on this same FIFO worker. A later caller must not update a
@@ -603,7 +617,7 @@ static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t hei
             if(!cpu.empty())gpu::g_queue.WriteBuffer(buffer,0,cpu.data(),cpu.size());
             for(const auto& span:spans)if(span.image)
                 encoder.CopyBufferToBuffer(span.image->buffer,span.source,buffer,span.destination,span.size);
-            decode_scanout(encoder,buffer,*target,width,height);
+            decode_scanout(encoder,buffer,*target,width,height,dimmed);
         }catch(...) {
             std::lock_guard lock(submission_mutex);
             if(!submission_error)submission_error=std::current_exception();
@@ -625,7 +639,7 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
 #else
     ++scanout_frames;
     auto encoder=gpu::g_device.CreateCommandEncoder();
-    decode_scanout(encoder,buffer,scanout,width,height);
+    decode_scanout(encoder,buffer,scanout,width,height,idle_dimming);
     const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
     worker::enqueue_work([] {gpu::set_present_source_override(&scanout);});
     aurora_end_frame();
@@ -736,7 +750,7 @@ void release() {
     queued_scanout.reset();
 #endif
     display_encoded={};display_encoded_capacity=0;display_encoder={};
-    scanout_input={};scanout_input_capacity=0;scanout_decoder={};
+    scanout_input={};scanout_input_capacity=0;scanout_decoder={};scanout_levels={};idle_dimming=false;
     display_bands.clear();pending_displays=0;
 #ifdef _WIN32
     worker::enqueue_work([] {if (render_schedule) {AvRevertMmThreadCharacteristics(render_schedule);render_schedule=nullptr;}});
