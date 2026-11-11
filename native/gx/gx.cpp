@@ -6,6 +6,7 @@
 #include "raster_viewport.hpp"
 #include "pointer.hpp"
 #include "gpu_bridge.hpp"
+#include "efb_geometry.hpp"
 #include "native_scene.hpp"
 #include "gcnllr/native_frame.h"
 #if GC_WII_NATIVE_J3D
@@ -879,7 +880,7 @@ int start(const GcnllrNativeGxConfig* input) {
         mode.fbWidth=mode.viWidth=640;mode.efbHeight=mode.xfbHeight=mode.viHeight=480;
         VIConfigure(&mode);
         aurora_set_frame_buffer_scale(1.0f);
-        /* The machine owns a 640x480 EFB; resizing the presentation window
+        /* The machine owns a fixed physical EFB; resizing the presentation window
          * must not expand its raster grid to the host window's aspect. */
         aurora::window::set_frame_buffer_aspect_fit(true);
         aurora_set_frame_interpolation(false);
@@ -1081,26 +1082,27 @@ int peek(uint32_t depth,uint16_t x,uint16_t y,uint32_t* value) {
         try {return gcnllr::gpu_bridge::peek_scanout(x,y,value);}
         catch(const std::exception& e) {fail(e.what());return 0;}
     }
-    // This renderer's raster grid is 640x480. Reads must observe the current
+    // Reads address the physical EFB independently of VI's scanout height.
+    // They must observe the current
     // ordered EFB, including before the first VI presentation. Reuse a CPU
     // download only until an accepted draw, clearing copy or new frame.
-    if (x>=640 || y>=480 || depth>1) return 0;
+    if (x>=gcnllr::efb_width || y>=gcnllr::efb_height || depth>1) return 0;
     try {
         if (depth) {
             if (depth_peek_generation!=efb_generation) {
                 depth_peek=gcnllr::gpu_bridge::read_depth(depth_peek_width,depth_peek_height);
                 depth_peek_generation=efb_generation;
             }
-            const auto sx=std::min(depth_peek_width-1,uint32_t((uint64_t(x)*2+1)*depth_peek_width/1280));
-            const auto sy=std::min(depth_peek_height-1,uint32_t((uint64_t(y)*2+1)*depth_peek_height/960));
+            const auto sx=std::min(depth_peek_width-1,uint32_t((uint64_t(x)*2+1)*depth_peek_width/(2*gcnllr::efb_width)));
+            const auto sy=std::min(depth_peek_height-1,uint32_t((uint64_t(y)*2+1)*depth_peek_height/(2*gcnllr::efb_height)));
             *value=depth_peek[size_t(sy)*depth_peek_width+sx];
         } else {
             if (color_peek_generation!=efb_generation) {
                 color_peek=gcnllr::gpu_bridge::read_efb(color_peek_width,color_peek_height);
                 color_peek_generation=efb_generation;
             }
-            const auto sx=std::min(color_peek_width-1,uint32_t((uint64_t(x)*2+1)*color_peek_width/1280));
-            const auto sy=std::min(color_peek_height-1,uint32_t((uint64_t(y)*2+1)*color_peek_height/960));
+            const auto sx=std::min(color_peek_width-1,uint32_t((uint64_t(x)*2+1)*color_peek_width/(2*gcnllr::efb_width)));
+            const auto sy=std::min(color_peek_height-1,uint32_t((uint64_t(y)*2+1)*color_peek_height/(2*gcnllr::efb_height)));
             const auto* p=color_peek.data()+(size_t(sy)*color_peek_width+sx)*4;
             *value=(uint32_t(p[3])<<24)|(uint32_t(p[0])<<16)|(uint32_t(p[1])<<8)|p[2];
 #if GCNLLR_RETAIL_PIPELINE
@@ -1358,7 +1360,8 @@ bool native_clear_value(const GcWiiNativeClear& value) {
         value.depth<=0xffffff && !(value.flags&~7u);
 }
 bool native_frame_rect(uint32_t x,uint32_t y,uint32_t width,uint32_t height) {
-    return x<640 && y<480 && width && height && width<=640-x && height<=480-y;
+    return x<gcnllr::efb_width && y<gcnllr::efb_height && width && height &&
+        width<=gcnllr::efb_width-x && height<=gcnllr::efb_height-y;
 }
 gxruntime::gxcore::EfbCopyCommand native_clear_command(const GcWiiNativeClear& value) {
     return {.src_x=value.x,.src_y=value.y,.width=value.width,.height=value.height,.clear=true,

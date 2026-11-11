@@ -20,6 +20,7 @@ if(GCNLLR_ASYNC_COPIES AND (NOT GCNLLR_RESIDENT_XFB OR NOT GCNLLR_GX_COOPERATIVE
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_window.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_retail.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_efb.cmake")
 set(GCNLLR_GPU_BACKEND "auto" CACHE STRING "Native GPU backend: auto, d3d12 or vulkan")
 option(GCNLLR_GX_FIFO_WORKER "Translate native FIFO on a cooperating worker" OFF)
 if(GCNLLR_NATIVE_PIPELINE AND GCNLLR_GX_FIFO_WORKER)

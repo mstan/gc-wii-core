@@ -30,7 +30,8 @@ typedef struct {
 /* The supported destination is packed YUY2 at the actual physical/cached
  * guest address, never a synthetic resource address. This version requires
  * tightly packed rows and 32-byte destination/stride alignment. Source is the logical
- * 640x480 EFB, with even x/width. Scale is the copy engine's Q8.8 factor;
+ * physical EFB (640x528 in the Wii build; 640x480 in the GameCube profile),
+ * with even x/width. Scale is the copy engine's Q8.8 factor;
  * invert_y_scale selects its reciprocal. Gamma 0 is identity; other gamma
  * modes currently reject. All seven six-bit filter taps are explicit,
  * including an all-zero (black) filter. Multisample filtering is unsupported.

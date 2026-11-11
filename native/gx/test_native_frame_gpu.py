@@ -59,6 +59,7 @@ def main():
     parser.add_argument('--library',type=Path,required=True)
     parser.add_argument('--work-root',type=Path,required=True)
     parser.add_argument('--eager',action='store_true',help='Match a consumer without optional copy-ownership callbacks')
+    parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
     os.environ.update(SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0',SDL_AUDIODRIVER='dummy',GCN_AUDIO='0')
@@ -218,6 +219,16 @@ def main():
         assert bytes(mem2[0x10400:0x10404])==bytes((235,128,235,128))
         assert bytes(mem2[0x10600:0x10604])==bytes((16,128,16,128))
         checks.append('seven filter taps, external row halo, clamp and zero filter preserved')
+        if args.efb_height==528:
+            clear(0,480,16,48,(0,255,0))
+            expect_color('physical EFB row 511 survives VI height 480',0,511,(0,255,0))
+            expect_color('physical EFB last row is addressable',0,527,(0,255,0))
+            extra=copy(0x90010800,510,4)
+            assert frame.complete(0,0),status().error.decode()
+            if extra:assert retire(None,extra)
+            assert bytes(mem2[0x10800:0x10804])==bytes((144,54,144,34))
+            assert bytes(mem2[0x10860:0x10864])==bytes((144,54,144,34))
+            checks.append('display copy reads physical rows beyond VI height')
         bad=DisplayCopy(0x900ffff0,32,0,0,16,2,256,0,0,3)
         assert not frame.copy(c.byref(bad)),'Unaligned/out-of-bank destination accepted'
         bad.destination=0x900ffff0+16
@@ -227,9 +238,10 @@ def main():
         assert not frame.clear(c.byref(clear_bad)),'Out-of-EFB clear accepted'
         gx_status=c.create_string_buffer(2048);c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo=struct.unpack_from('Q',gx_status.raw)[0];assert fifo==0,'Native frame emitted commands'
-        fs=status();assert fs.display_copies==4 and fs.rejected==4, (fs.display_copies,fs.rejected,fs.error)
+        fs=status();assert fs.display_copies==4+(args.efb_height==528) and fs.rejected==4, (fs.display_copies,fs.rejected,fs.error)
         result={'component_only':True,'game_qualified':False,'performance_qualified':False,'native_frame_abi':1,
             'library_sha256':hashlib.sha256(args.library.read_bytes()).hexdigest(),'fifo_bytes':fifo,'eager':args.eager,
+            'efb_height':args.efb_height,
             'clears':fs.clears,'display_copies':fs.display_copies,'completions':fs.completions,
             'rejected':fs.rejected,'first_yuy2_bytes':actual.hex(),'checks':checks,'events':events}
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))

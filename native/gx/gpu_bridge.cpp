@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "gpu_bridge.hpp"
+#include "efb_geometry.hpp"
 #include <gxruntime/gxcore/shader.hpp>
 #include <aurora/aurora.h>
 #include "gfx/common.hpp"
@@ -214,8 +215,8 @@ bool settle_framebuffer() {
 static void record_copy_clear(const gxruntime::gxcore::EfbCopyCommand& copy) {
     if (!copy.clear || (!copy.color_update && !copy.alpha_update && !copy.depth_update)) return;
     const auto& fb=gpu::g_frameBuffer;
-    const gfx::ClipRect rect{int(copy.src_x*fb.size.width/640),int(copy.src_y*fb.size.height/480),
-        int(copy.width*fb.size.width/640),int(copy.height*fb.size.height/480)};
+    const gfx::ClipRect rect{int(copy.src_x*fb.size.width/efb_width),int(copy.src_y*fb.size.height/efb_height),
+        int(copy.width*fb.size.width/efb_width),int(copy.height*fb.size.height/efb_height)};
     const unsigned key=unsigned(copy.color_update)|unsigned(copy.alpha_update)*2|unsigned(copy.depth_update)*4;
     auto& pipeline=clear_pipelines[key];
     if (!pipeline) pipeline=gfx::clear::create_pipeline({.msaaSamples=gpu::g_graphicsConfig.msaaSamples,
@@ -249,7 +250,7 @@ void complete_frame(bool physical) {
     validate_submission();
 }
 void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter) {
-    if (!copy.width || !copy.height || copy.src_x+copy.width>640 || copy.src_y+copy.height>480)
+    if (!copy.width || !copy.height || copy.src_x+copy.width>efb_width || copy.src_y+copy.height>efb_height)
         throw std::runtime_error("Display copy outside supported EFB");
     const auto tap=[](uint32_t word,unsigned index){return (word>>(index*6u))&63u;};
     const std::array<uint32_t,3> weights{tap(filter.low,0)+tap(filter.low,1),
@@ -258,7 +259,7 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     // Cropped boundaries clamp to the crop only when the corresponding BP
     // bit requests it; physical EFB boundaries always clamp to the last row.
     const uint32_t above=weights[0] && !filter.clamp_top && copy.src_y ? 1u:0u;
-    const uint32_t below=weights[2] && !filter.clamp_bottom && copy.src_y+copy.height<480 ? 1u:0u;
+    const uint32_t below=weights[2] && !filter.clamp_bottom && copy.src_y+copy.height<efb_height ? 1u:0u;
     const uint32_t capture_y=copy.src_y-above,capture_height=copy.height+above+below;
     if (pending_displays==display_bands.size()) display_bands.emplace_back();
     auto& band=display_bands[pending_displays++];
@@ -266,8 +267,8 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     if (!band.texture || band.texture->size.width!=copy.width || band.texture->size.height!=capture_height)
         band.texture=gfx::new_render_texture(copy.width,capture_height,GX_TF_RGBA8,"GameCube display band and filter halo");
     const auto& fb=gpu::g_frameBuffer;
-    const gfx::ClipRect capture_rect{int(copy.src_x*fb.size.width/640),int(capture_y*fb.size.height/480),
-        int(copy.width*fb.size.width/640),int(capture_height*fb.size.height/480)};
+    const gfx::ClipRect capture_rect{int(copy.src_x*fb.size.width/efb_width),int(capture_y*fb.size.height/efb_height),
+        int(copy.width*fb.size.width/efb_width),int(capture_height*fb.size.height/efb_height)};
     if (capture_rect.width!=int(copy.width) || capture_rect.height!=int(capture_height))
         throw std::runtime_error("Display-band GPU scaling is unsupported");
     gfx::resolve_pass(band.texture,capture_rect,false,false,false,{},0,GX_TF_RGBA8);
@@ -542,10 +543,10 @@ void clear_efb(const gxruntime::gxcore::EfbCopyCommand& copy) {
         pass.SetBlendConstant(&clear);
         float z=copy.clear_z/16777215.f;if (aurora::gx::UseReversedZ) z=1-z;
         pass.SetViewport(0,0,float(fb.size.width),float(fb.size.height),z,z);
-        const uint32_t left=std::min(fb.size.width,uint32_t(uint64_t(copy.src_x)*fb.size.width/640));
-        const uint32_t top=std::min(fb.size.height,uint32_t(uint64_t(copy.src_y)*fb.size.height/480));
-        const uint32_t right=std::min(fb.size.width,uint32_t(uint64_t(copy.src_x+copy.width)*fb.size.width/640));
-        const uint32_t bottom=std::min(fb.size.height,uint32_t(uint64_t(copy.src_y+copy.height)*fb.size.height/480));
+        const uint32_t left=std::min(fb.size.width,uint32_t(uint64_t(copy.src_x)*fb.size.width/efb_width));
+        const uint32_t top=std::min(fb.size.height,uint32_t(uint64_t(copy.src_y)*fb.size.height/efb_height));
+        const uint32_t right=std::min(fb.size.width,uint32_t(uint64_t(copy.src_x+copy.width)*fb.size.width/efb_width));
+        const uint32_t bottom=std::min(fb.size.height,uint32_t(uint64_t(copy.src_y+copy.height)*fb.size.height/efb_height));
         if (right>left && bottom>top) {pass.SetScissorRect(left,top,right-left,bottom-top);pass.Draw(3);}
         pass.End();const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
     });
