@@ -48,3 +48,9 @@ provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` an
 `include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;
 missing poses, texture matrices or referenced lights reject the draw. These
 experimental APIs do not enable a title replacement automatically.
+
+Color-source texture generators consume the computed XF color, including its
+material registers and lighting. The selected Aurora renderer applies scoped
+source adaptations for this dependency and COLOR0/COLOR1 selection without
+editing the donor checkout. `test_color_texgen_gpu.py` checks actual GPU pixels
+for missing/contrasting raw vertex colors, register changes and light masks.
