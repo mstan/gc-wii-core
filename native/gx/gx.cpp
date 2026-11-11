@@ -1360,7 +1360,11 @@ uint64_t create_native_j3d(uint32_t address) {
 int destroy_native_j3d(uint64_t handle){return native_j3d.destroy(handle);}
 int draw_native_j3d(const GcWiiJ3DDraw* input) {
     if(!initialized || !frame_open || failed.load() || fifo_worker || !input || !frontend || frontend->pending_fifo_size()) {
-        native_j3d.rejected("Native J3D draw requires an open frame and drained command ingress");return 0;
+        char reason[192];
+        std::snprintf(reason,sizeof(reason),"Native J3D boundary unavailable: initialized=%u frame=%u failed=%u worker=%u input=%u frontend=%u pending=%zu",
+            unsigned(initialized),unsigned(frame_open),unsigned(failed.load()),unsigned(bool(fifo_worker)),unsigned(input!=nullptr),unsigned(bool(frontend)),
+            frontend?size_t(frontend->pending_fifo_size()):size_t(0));
+        native_j3d.rejected(reason);return 0;
     }
     try {
         auto* plans=native_j3d.prepare(*input);
