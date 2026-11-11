@@ -75,4 +75,30 @@ if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
     set_source_files_properties("${_shader_derived}" TARGET_DIRECTORY aurora_gx
       PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/gx")
   endforeach()
+  # Typed GxCore draws use group 2 for pixel uniforms. An untextured retail
+  # draw must restore its own texture layout rather than inherit that binding.
+  # Preserve the donor source and fail if its audited binding site changes.
+  set(_retail_pipeline_origin "${GXRUNTIME_DIR}/graphics/aurora/lib/gx/pipeline.cpp")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_retail_pipeline_origin}")
+  file(READ "${_retail_pipeline_origin}" _retail_pipeline_source)
+  set(_retail_binding "  if (data.bindGroups.textureBindGroup) {\n    pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));\n  }")
+  string(FIND "${_retail_pipeline_source}" "${_retail_binding}" _retail_binding_index)
+  if(_retail_binding_index EQUAL -1)
+    message(FATAL_ERROR "Pinned retail texture-group binding differs")
+  endif()
+  string(REPLACE "${_retail_binding}"
+    "  pass.SetBindGroup(2, data.bindGroups.textureBindGroup\n      ? gfx::find_bind_group(data.bindGroups.textureBindGroup) : g_emptyTextureBindGroup);"
+    _retail_pipeline_source "${_retail_pipeline_source}")
+  set(_retail_pipeline_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/retail_pipeline.cpp")
+  file(CONFIGURE OUTPUT "${_retail_pipeline_path}" CONTENT "${_retail_pipeline_source}" @ONLY)
+  get_target_property(_retail_pipeline_sources aurora_gx SOURCES)
+  list(FIND _retail_pipeline_sources lib/gx/pipeline.cpp _retail_pipeline_index)
+  if(_retail_pipeline_index EQUAL -1)
+    message(FATAL_ERROR "Pinned retail pipeline target source differs")
+  endif()
+  list(REMOVE_ITEM _retail_pipeline_sources lib/gx/pipeline.cpp)
+  list(APPEND _retail_pipeline_sources "${_retail_pipeline_path}")
+  set_property(TARGET aurora_gx PROPERTY SOURCES "${_retail_pipeline_sources}")
+  set_source_files_properties("${_retail_pipeline_path}" TARGET_DIRECTORY aurora_gx
+    PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/gx")
 endif()
