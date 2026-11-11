@@ -11,6 +11,8 @@ extern "C" {
 #define GCNLLR_NATIVE_GX_STREAMED_COPY 4u
 #define GCNLLR_NATIVE_GX_COMPOSED_SCANOUT 8u
 #define GCNLLR_NATIVE_GX_DEFERRED_RETIREMENT 16u
+/* Guest RAM is written only during calls made by the machine owner. */
+#define GCNLLR_NATIVE_GX_SERIAL_RAM_WRITES 32u
 #define GCNLLR_NATIVE_GX_COPY_DISPLAY 1u
 #define GCNLLR_NATIVE_GX_COPY_MATERIALIZING 2u
 
