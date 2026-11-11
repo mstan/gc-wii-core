@@ -56,6 +56,13 @@ class GuiDraw(c.Structure):
 class GuiApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(GuiDraw)))]
 
+class GuiLayersDraw(c.Structure):
+    _fields_=[('draw',Draw),('color',GuiMaterial),('overlays',Texture*2),
+              ('weights',(c.c_int32*4)*2),('uv',((c.c_float*3)*2)*2)]
+
+class GuiLayersApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(GuiLayersDraw)))]
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -65,6 +72,7 @@ def main():
     parser.add_argument('--raster-interop',action='store_true',help='Check native to original draws with different raster state')
     parser.add_argument('--write-masks',action='store_true',help='Check independent RGB/alpha writes with a reference RGBA6 EFB configuration')
     parser.add_argument('--owned',action='store_true',help='Supply memory-owner callbacks required by a composed GameCube service')
+    parser.add_argument('--layers',action='store_true',help='Check the fixed three-texture GUI background family')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -208,6 +216,46 @@ def main():
             assert native.destroy(gui_handle)
             native.status(c.byref(status))
         gx_status=c.create_string_buffer(2048)
+        if args.layers:
+            dll.gc_wii_native_gui_layers_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_gui_layers_get_api.restype=c.POINTER(GuiLayersApi)
+            assert not dll.gc_wii_native_gui_layers_get_api(2)
+            layers=dll.gc_wii_native_gui_layers_get_api(1).contents
+            layered=GuiLayersDraw();layered.draw=Draw.from_buffer_copy(job)
+            layered.draw.material.flags=0;layered.draw.model_view[11]=0
+            layered.draw.material.texture=Texture(0x100,32,1,8,4,0,0,0,0,0,0)
+            layered.color=GuiMaterial((c.c_int32*4)(50,50,50,0),(c.c_int32*4)(100,100,100,255))
+            for i,address in enumerate((0x200,0x300)):
+                layered.overlays[i]=Texture(address,32,1,8,4,0,0,0,0,0,0)
+                layered.uv[i][0][:]=(1,0,0);layered.uv[i][1][:]=(0,1,0)
+                c.memset(c.addressof(ram)+address,255,32)
+            layered.weights[0][:]=(20,0,0,255);layered.weights[1][:]=(0,40,0,255)
+            c.memset(c.addressof(ram)+0x100,128,32)
+            assert layers.draw(c.byref(layered))
+            expect('GUI three-texture background ignores pane tint',320,240,(95,115,75))
+            c.memset(c.addressof(ram)+0x200,0,32)
+            assert layers.draw(c.byref(layered))
+            expect('GUI overlay CPU rewrite is observed',320,240,(75,115,75))
+            c.memmove(c.addressof(ram)+0x200,bytes([0]*4+[255]*4)*4,32)
+            layered.uv[0][0][:]=(-1,0,1)
+            assert layers.draw(c.byref(layered))
+            expect('GUI independent overlay U transform',160,240,(95,115,75))
+            expect('GUI independent overlay U transform opposite edge',480,240,(75,115,75))
+            c.memmove(c.addressof(ram)+0x300,bytes([0]*16+[255]*16),32)
+            layered.uv[1][1][2]=.5
+            assert layers.draw(c.byref(layered))
+            expect('GUI independent overlay V transform',480,120,(75,115,75))
+            c.memset(c.addressof(ram)+0x100,255,32);c.memset(c.addressof(ram)+0x200,255,32)
+            layered.color.high[:]=(250,250,250,255)
+            assert layers.draw(c.byref(layered))
+            expect('GUI weighted additions saturate',320,240,(255,255,250))
+            layered.overlays[1].size=1
+            assert not layers.draw(c.byref(layered)), 'Truncated overlay accepted'
+            layered.overlays[1].size=32;layered.uv[1][0][0]=float('nan')
+            assert not layers.draw(c.byref(layered)), 'Nonfinite overlay transform accepted'
+            layered.uv[1][0][0]=1;layered.weights[1][0]=-1
+            assert not layers.draw(c.byref(layered)), 'Unsupported signed overlay accepted'
+            native.status(c.byref(status))
         c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]
         assert fifo_bytes==0, 'Native renderer encoded or replayed FIFO bytes'

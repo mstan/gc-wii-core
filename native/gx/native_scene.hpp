@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 namespace gcnllr {
+bool valid_native_texture(const GcWiiNativeTexture&);
 // Owns converted native geometry, not a shadow CP/XF/BP state machine.
 // The GPU backend consumes DrawPlan directly: no FIFO or register decoder.
 class NativeScene {

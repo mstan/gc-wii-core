@@ -9,7 +9,7 @@
 namespace gcnllr {
 namespace gxc = gxruntime::gxcore;
 
-static bool valid_texture(const GcWiiNativeTexture& t) {
+bool valid_native_texture(const GcWiiNativeTexture& t) {
     if (!t.size) return true;
     if (!t.width || !t.height || t.width>1024 || t.height>1024 ||
         t.wrap_s>2 || t.wrap_t>2 || t.linear>1) return false;
@@ -91,7 +91,7 @@ gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
         !std::isfinite(job.near_depth) || !std::isfinite(job.far_depth) ||
         job.width<=0 || job.height<=0 || job.clip_width<=0 || job.clip_height<=0 ||
         job.near_depth<0 || job.far_depth>1 || job.near_depth>job.far_depth)return decline("Invalid logical raster");
-    if(!valid_texture(texture))return decline("Invalid tiled texture descriptor");
+    if(!valid_native_texture(texture))return decline("Invalid tiled texture descriptor");
     for (float f:job.model_view) if (!std::isfinite(f))return decline("Nonfinite model-view matrix");
     for (float f:job.projection) if (!std::isfinite(f))return decline("Nonfinite projection matrix");
     auto& plan=found->second;

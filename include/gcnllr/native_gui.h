@@ -24,6 +24,25 @@ typedef struct {
     int (*draw)(const GcWiiNativeGuiDraw*);
 } GcWiiNativeGuiApi;
 typedef const GcWiiNativeGuiApi* (*GcWiiNativeGuiGetApi)(uint32_t);
+
+/* Three-image GUI background: clamp the primary RGB range remap, then add
+ * each weighted overlay in order with byte saturation after each addition.
+ * Alpha is color.high[3]. Pane tint is not part of this material family.
+ * Overlay coordinates are affine transforms of the retained primary UV.
+ * Existing GUI/Render/Frame API1 layouts are independent and unchanged. */
+#define GC_WII_NATIVE_GUI_LAYERS_ABI 1u
+typedef struct {
+    GcWiiNativeDraw draw;
+    GcWiiNativeGuiMaterial color;
+    GcWiiNativeTexture overlays[2];
+    int32_t weights[2][4];
+    float uv[2][2][3];
+} GcWiiNativeGuiLayersDraw;
+typedef struct {
+    uint32_t abi;
+    int (*draw)(const GcWiiNativeGuiLayersDraw*);
+} GcWiiNativeGuiLayersApi;
+typedef const GcWiiNativeGuiLayersApi* (*GcWiiNativeGuiLayersGetApi)(uint32_t);
 #ifdef __cplusplus
 }
 #endif

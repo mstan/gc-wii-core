@@ -51,6 +51,14 @@ The existing integer shader compiler lowers that complete expression. Wider
 source colors and unsupported inputs reject before submission. Run the same
 component check with `--gui` for range, tint, alpha and rejection coverage.
 
+`gc_wii_native_gui_layers_get_api` accepts a fixed three-image GUI background:
+remap the primary RGB range, then add two weighted overlays with saturation
+after each operation. Opacity uses the high endpoint. Each overlay has its own
+affine transform of the retained primary UVs. Resources share the existing
+multi-texture cache and bank resolution. GUI1, Render1 and Frame1 layouts remain
+unchanged. Add `--layers` to the component check for independent coordinates,
+texture rewrites, saturation and explicit unsupported-input rejection.
+
 `GC_WII_NATIVE_J3D=ON` additionally builds the native BMD/BDL material and mesh
 provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` and
 `include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;

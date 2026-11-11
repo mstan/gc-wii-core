@@ -1314,25 +1314,27 @@ bool native_scene_ready() {
 }
 int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
         if (!plan) return 0;
+        const auto image=[](uint32_t address,uint32_t bytes,const void*& data,uint32_t& available,DolGuestResourceKind kind) {
+            DolGuestResolvedRange range{};
+            if(!resolve(nullptr,address,bytes,DOL_GUEST_ADDRESS_AUTO,kind,&range)){std::fprintf(stderr,"[native-scene-rejected] Unreadable resource address=%08x size=%u\n",address,bytes);return false;}
+            data=range.data;available=range.available;return true;
+        };
         if (plan->has_texture) {
-            DolGuestResolvedRange image{};
-            if (!resolve(nullptr,plan->tex_address,plan->tex_size,DOL_GUEST_ADDRESS_AUTO,
-                         DOL_GUEST_RESOURCE_TEXTURE,&image)) {
-                std::fprintf(stderr,"[native-scene-rejected] Unreadable texture address=%08x size=%u\n",plan->tex_address,plan->tex_size);
-                native_scene.rejected(); return 0;
-            }
-            plan->tex_data=image.data; plan->tex_available=image.available;
-            if (plan->has_tlut) {
-                if (plan->tlut_entries>16384 || plan->tlut_format>2) {
-                    native_scene.rejected(); return 0;
+            if(plan->texmap_mask) {
+                for(unsigned i=0;i<8;++i)if(plan->texmap_mask&(1u<<i)) {
+                    auto& t=plan->textures[i];
+                    if(!t.valid || !image(t.address,t.size,t.data,t.available,DOL_GUEST_RESOURCE_TEXTURE) ||
+                       (t.has_tlut && (t.tlut_entries>16384 || t.tlut_format>2 ||
+                        !image(t.tlut_address,t.tlut_entries*2,t.tlut_data,t.tlut_available,DOL_GUEST_RESOURCE_TLUT)))) {
+                        native_scene.rejected();return 0;
+                    }
                 }
-                DolGuestResolvedRange palette{};
-                if (!resolve(nullptr,plan->tlut_address,plan->tlut_entries*2,DOL_GUEST_ADDRESS_AUTO,
-                             DOL_GUEST_RESOURCE_TLUT,&palette)) {
-                    std::fprintf(stderr,"[native-scene-rejected] Unreadable palette address=%08x entries=%u\n",plan->tlut_address,plan->tlut_entries);
-                    native_scene.rejected(); return 0;
+            } else {
+                if(!image(plan->tex_address,plan->tex_size,plan->tex_data,plan->tex_available,DOL_GUEST_RESOURCE_TEXTURE) ||
+                   (plan->has_tlut && (plan->tlut_entries>16384 || plan->tlut_format>2 ||
+                    !image(plan->tlut_address,plan->tlut_entries*2,plan->tlut_data,plan->tlut_available,DOL_GUEST_RESOURCE_TLUT)))) {
+                    native_scene.rejected();return 0;
                 }
-                plan->tlut_data=palette.data; plan->tlut_available=palette.available;
             }
         }
         // Direct typed submission. No command construction, FIFO append,
@@ -1355,18 +1357,28 @@ int draw_native_gui(const GcWiiNativeGuiDraw* job) {
     try {return submit_native_scene(gcnllr::prepare_gui(native_scene,*job));}
     catch (const std::exception& e) { fail(e.what()); return 0; }
 }
+int draw_native_gui_layers(const GcWiiNativeGuiLayersDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try {return submit_native_scene(gcnllr::prepare_gui_layers(native_scene,*job));}
+    catch(const std::exception& e){fail(e.what());return 0;}
+}
 void native_scene_status(GcWiiNativeRenderStatus* output) {
     if (output) *output=native_scene.status();
 }
 const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
     create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
 const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
+const GcWiiNativeGuiLayersApi native_gui_layers_api={GC_WII_NATIVE_GUI_LAYERS_ABI,draw_native_gui_layers};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeGuiApi* gc_wii_native_gui_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_GUI_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_gui_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiLayersApi* gc_wii_native_gui_layers_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_LAYERS_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_layers_api:nullptr;
 }
 
 namespace {
