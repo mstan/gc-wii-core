@@ -37,9 +37,18 @@ typedef struct {
     u64 cycles;
 } GcnCostThread;
 
+/* Measured coarse partitions cover the complete simulation-thread interval.
+ * Execution includes demand-driven device observations inside native code.
+ * The finer sampled buckets below are a separate, non-additive breakdown. */
+typedef enum {
+    GCN_COST_OWNER_HOST,GCN_COST_OWNER_EXECUTION,GCN_COST_OWNER_DEVICES,
+    GCN_COST_OWNER_GRAPHICS,GCN_COST_OWNER_COUNT
+} GcnCostOwner;
+
 typedef struct {
     u64 field,guest_cycles,wall_ns,turns,sampled_turns;
     u64 sampled_ns[GCN_COST_BUCKET_COUNT];
+    u64 measured_ns[GCN_COST_OWNER_COUNT];
     GcnCostThread threads[GCN_COST_THREAD_CAPACITY];
     u64 no_thread_cycles,other_thread_cycles;
     u32 thread_count;
@@ -72,6 +81,7 @@ static inline void gcn_cost_leave(unsigned previous) {
 void gcn_cost_init(u64 guest_cycles);
 void gcn_cost_begin_turn(u64 guest_cycles,u32 current_thread);
 void gcn_cost_end_turn(u64 guest_cycles);
+void gcn_cost_owner_boundary(GcnCostOwner);
 /* Account thread changes inside an event-owner turn without adding clocks. */
 void gcn_cost_thread_boundary(u64 guest_cycles,u32 current_thread);
 void gcn_cost_finish_field(u64 field,u64 guest_cycles);
