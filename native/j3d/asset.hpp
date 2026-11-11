@@ -22,7 +22,7 @@ struct Primitive {
 };
 struct Mesh {
     uint16_t shape{}, group{};
-    uint8_t matrix_type{};
+    uint8_t matrix_type{}, normal_components{}; // 0 absent, 3 normal, 9 N/B/T
     std::vector<uint16_t> matrix_palette;
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
@@ -58,6 +58,7 @@ struct Texture {
     bool external{};
     uint32_t image_address{}, palette_address{};
     uint8_t format{}, alpha{}, wrap_s{}, wrap_t{}, min_filter{}, mag_filter{}, mip_count{};
+    uint8_t edge_lod{}, bias_clamp{}, anisotropy{};
     uint16_t width{}, height{}, palette_format{}, palette_entries{};
     int16_t lod_bias{};
     int8_t min_lod{}, max_lod{};

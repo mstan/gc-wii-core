@@ -184,6 +184,7 @@ void geometry(Model& out,Bytes vtx,Bytes shp) {
         for(uint16_t group=0;group<groups;++group) {
             if(out.meshes.size()>=65536)throw std::runtime_error("Unbounded J3D mesh count");
             Mesh mesh;mesh.shape=shape;mesh.group=group;mesh.matrix_type=shp.u8(record);mesh.attribute_mask=mask;
+            if(mask&(1u<<10))mesh.normal_components=formats[10].count?9:3;
             if(mesh.matrix_type>3)throw std::runtime_error("Unsupported J3D shape matrix type");
             const auto mi=size_t(matrices)+(size_t(shp.u16(record+6))+group)*8;
             if(mesh.matrix_type==3) {
@@ -376,6 +377,7 @@ void textures(Model& out,Bytes b,const ImportOptions& options) {
         const auto at=size_t(records)+i*32;const auto r=b.sub(at,32);Texture t;
         t.format=r.u8(0);t.alpha=r.u8(1);t.width=r.u16(2);t.height=r.u16(4);
         t.wrap_s=r.u8(6);t.wrap_t=r.u8(7);t.palette_format=r.u8(9);t.palette_entries=r.u16(10);
+        t.edge_lod=r.u8(17);t.bias_clamp=r.u8(18);t.anisotropy=r.u8(19);
         t.min_filter=r.u8(20);t.mag_filter=r.u8(21);t.min_lod=static_cast<int8_t>(r.u8(22));
         t.max_lod=static_cast<int8_t>(r.u8(23));t.mip_count=std::max<uint8_t>(1,r.u8(24));
         t.lod_bias=static_cast<int16_t>(r.u16(26));

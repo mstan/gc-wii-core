@@ -42,3 +42,9 @@ It uses a hidden window and muted output. This is an experimental component:
 title bindings, complete model/material families and end-to-end performance
 qualification remain open. Retained geometry is currently staged to the GPU
 through the shared draw backend; permanent GPU mesh residency is not claimed.
+
+`GC_WII_NATIVE_J3D=ON` additionally builds the native BMD/BDL material and mesh
+provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` and
+`include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;
+missing poses, texture matrices or referenced lights reject the draw. These
+experimental APIs do not enable a title replacement automatically.

@@ -21,8 +21,21 @@ the base LLE build's compiler requirements. The importer requires C++20.
 check loaded models in a private MEM1 fixture with external resource resolution.
 Original content and generated comparison output stay outside source control.
 
-This is the asset conversion portion of the native renderer. Material recipes
-still require host shader compilation and runtime animation inputs; it does not
-establish a working game binding or a speedup. Unavailable material recipes
-remain explicit. Consumers must reject unsupported rendering rather than
-silently substituting a different picture or a legacy GX route.
+`material.cpp` lowers imported equations directly to the existing specialized
+host shader backend, with texture bindings, lighting, fog and indirect
+texturing. Geometry conversion produces reusable native draw plans. Supply
+`GC_WII_J3D_GXCORE_INCLUDE_DIR` when building the standalone material library
+and its focused tests. No command stream or emulated register owner is used.
+
+The experimental GPU service API is `include/gcnllr/native_j3d.h`, built with
+`GC_WII_NATIVE_J3D=ON`. Consumers supply current pose/normal palettes, animated
+texture matrices, lights and per-instance material values. Texture memory keeps
+the consumer's coherent physical identity, including CPU rewrites and GPU
+copies. Resource handles and material/mesh pairs are cached, with explicit
+destruction on asset unload or state restore. GPU geometry is currently staged
+by the shared backend, rather than retained in dedicated permanent buffers.
+
+This does not establish a working game binding or a speedup. Unavailable
+recipes and unsupported logic operations, sampler LOD policies and vertex
+layouts fail explicitly. Consumers must reject unsupported rendering rather
+than silently substituting a different picture or a legacy GX route.

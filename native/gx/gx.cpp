@@ -7,6 +7,9 @@
 #include "pointer.hpp"
 #include "gpu_bridge.hpp"
 #include "native_scene.hpp"
+#if GC_WII_NATIVE_J3D
+#include "native_j3d.hpp"
+#endif
 #include <unordered_map>
 #include "fifo_worker.hpp"
 #include "ordered_effects.hpp"
@@ -181,6 +184,9 @@ bool texture_epoch(uint32_t address,uint32_t size,uint64_t* epoch) {
 }
 bool initialized{}, frame_open{};
 gcnllr::NativeScene native_scene;
+#if GC_WII_NATIVE_J3D
+gcnllr::NativeJ3D native_j3d;
+#endif
 std::array<uint8_t,64> fifo_tail{};
 std::vector<uint8_t> xfb;
 Clock::time_point last_events{};
@@ -783,6 +789,9 @@ void stop() {
     }
     aurora::gfx::gxcore::set_owned_texture_lookup(nullptr);
     native_scene.reset();
+#if GC_WII_NATIVE_J3D
+    native_j3d.reset();
+#endif
     frontend.reset(); sink.reset();
 #if GCNLLR_RETAIL_PIPELINE
     std::fprintf(stderr,"[native-retail-textures] queries=%llu reused=%llu\n",
@@ -1327,3 +1336,66 @@ const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
 }
+
+#if GC_WII_NATIVE_J3D
+namespace {
+std::span<const uint8_t> native_j3d_resolve(void*,uint32_t address,size_t length) {
+    if(length>UINT32_MAX)return {};
+    DolGuestResolvedRange range{};
+    if(!resolve(nullptr,address,uint32_t(length),DOL_GUEST_ADDRESS_AUTO,DOL_GUEST_RESOURCE_TEXTURE,&range) || range.available<length)return {};
+    return {static_cast<const uint8_t*>(range.data),length};
+}
+uint64_t create_native_j3d(uint32_t address) {
+    if(!initialized || failed.load() || fifo_worker){native_j3d.rejected("Native J3D service is unavailable");return 0;}
+    try {
+        auto header=native_j3d_resolve(nullptr,address,32);
+        if(header.empty())throw std::runtime_error("Native J3D resource header is unreadable");
+        const auto size=uint32_t(header[8])<<24|uint32_t(header[9])<<16|uint32_t(header[10])<<8|header[11];
+        if(size<32 || size>64u*1024u*1024u)throw std::runtime_error("Native J3D resource size is invalid");
+        auto bytes=native_j3d_resolve(nullptr,address,size);
+        if(bytes.empty())throw std::runtime_error("Native J3D resource is incomplete");
+        return native_j3d.create(bytes,{address,nullptr,native_j3d_resolve});
+    }catch(const std::exception& e){native_j3d.rejected(e.what());return 0;}
+}
+int destroy_native_j3d(uint64_t handle){return native_j3d.destroy(handle);}
+int draw_native_j3d(const GcWiiJ3DDraw* input) {
+    if(!initialized || !frame_open || failed.load() || fifo_worker || !input || !frontend || frontend->pending_fifo_size()) {
+        native_j3d.rejected("Native J3D draw requires an open frame and drained command ingress");return 0;
+    }
+    try {
+        auto* plans=native_j3d.prepare(*input);
+        auto image=[&](uint32_t& address,uint32_t size,const void*& data,uint32_t& available,DolGuestResourceKind kind) {
+            GcnllrNativeGxMemory range{};
+            if(!gcnllr::gx_memory(config,address,size,range) || range.available<size ||
+               (kind==DOL_GUEST_RESOURCE_TLUT && !observe_pending_memory(range.physical_address,size)))
+                throw std::runtime_error("Native J3D texture memory is unreadable");
+            address=range.physical_address;data=range.bytes;available=range.available;
+        };
+        // Texture memory may be rewritten by the CPU or owned by an earlier
+        // GPU copy. Use the consumer's coherent physical identity and current
+        // bytes; a one-time model import must not freeze animated image data.
+        for(auto& plan:*plans)if(plan.has_texture) {
+            if(plan.texmap_mask) {
+                for(unsigned t=0;t<8;++t)if(plan.texmap_mask&(1u<<t)) {
+                    auto& texture=plan.textures[t];image(texture.address,texture.size,texture.data,texture.available,DOL_GUEST_RESOURCE_TEXTURE);
+                    if(texture.has_tlut)image(texture.tlut_address,texture.tlut_entries*2,texture.tlut_data,texture.tlut_available,DOL_GUEST_RESOURCE_TLUT);
+                }
+            }else{
+                image(plan.tex_address,plan.tex_size,plan.tex_data,plan.tex_available,DOL_GUEST_RESOURCE_TEXTURE);
+                if(plan.has_tlut)image(plan.tlut_address,plan.tlut_entries*2,plan.tlut_data,plan.tlut_available,DOL_GUEST_RESOURCE_TLUT);
+            }
+        }
+        for(const auto& plan:*plans) {
+            if(!aurora::gfx::gxcore::submit_draw_plan(plan))throw std::runtime_error("Native J3D GPU submission failed");
+            ++state.draws;++efb_generation;native_j3d.submitted();
+        }
+        return 1;
+    }catch(const std::exception& e){native_j3d.rejected(e.what());return 0;}
+}
+void native_j3d_status(GcWiiJ3DStatus* output){if(output)*output=native_j3d.status();}
+const GcWiiNativeJ3DApi native_j3d_api={GC_WII_NATIVE_J3D_ABI,create_native_j3d,destroy_native_j3d,draw_native_j3d,native_j3d_status};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeJ3DApi* gc_wii_native_j3d_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_J3D_ABI?&native_j3d_api:nullptr;
+}
+#endif
