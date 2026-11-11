@@ -6,6 +6,7 @@
 #include "raster_viewport.hpp"
 #include "pointer.hpp"
 #include "gpu_bridge.hpp"
+#include "native_scene.hpp"
 #include <unordered_map>
 #include "fifo_worker.hpp"
 #include "ordered_effects.hpp"
@@ -179,6 +180,7 @@ bool texture_epoch(uint32_t address,uint32_t size,uint64_t* epoch) {
     return config.texture_epoch(config.user,address,size,epoch)!=0;
 }
 bool initialized{}, frame_open{};
+gcnllr::NativeScene native_scene;
 std::array<uint8_t,64> fifo_tail{};
 std::vector<uint8_t> xfb;
 Clock::time_point last_events{};
@@ -780,6 +782,7 @@ void stop() {
         texture_producers.clear();retained_copies.clear();
     }
     aurora::gfx::gxcore::set_owned_texture_lookup(nullptr);
+    native_scene.reset();
     frontend.reset(); sink.reset();
 #if GCNLLR_RETAIL_PIPELINE
     std::fprintf(stderr,"[native-retail-textures] queries=%llu reused=%llu\n",
@@ -1268,4 +1271,59 @@ extern "C" bool gcnllr_aurora_retail_bp(uint32_t reg,uint32_t value) {
 #endif
 extern "C" GCNLLR_EXPORT const GcnllrNativeGxApi* gcnllr_native_gx_get_api(uint32_t abi) {
     return abi==GCNLLR_NATIVE_GX_ABI ? &api : nullptr;
+}
+
+namespace {
+uint64_t create_native_mesh(const GcWiiNativeMesh* mesh) {
+    if (!initialized || failed.load() || fifo_worker || !mesh) {
+        native_scene.rejected(); return 0;
+    }
+    try { return native_scene.create_mesh(*mesh); }
+    catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int destroy_native_mesh(uint64_t mesh) { return native_scene.destroy_mesh(mesh); }
+int draw_native_mesh(const GcWiiNativeDraw* job) {
+    if (!initialized || !frame_open || failed.load() || fifo_worker || !job ||
+        !frontend || frontend->pending_fifo_size()) {
+        native_scene.rejected(); return 0;
+    }
+    try {
+        auto* plan=native_scene.prepare(*job);
+        if (!plan) return 0;
+        if (plan->has_texture) {
+            DolGuestResolvedRange image{};
+            if (!resolve(nullptr,plan->tex_address,plan->tex_size,DOL_GUEST_ADDRESS_AUTO,
+                         DOL_GUEST_RESOURCE_TEXTURE,&image)) {
+                native_scene.rejected(); return 0;
+            }
+            plan->tex_data=image.data; plan->tex_available=image.available;
+            if (plan->has_tlut) {
+                if (plan->tlut_entries>16384 || plan->tlut_format>2) {
+                    native_scene.rejected(); return 0;
+                }
+                DolGuestResolvedRange palette{};
+                if (!resolve(nullptr,plan->tlut_address,plan->tlut_entries*2,DOL_GUEST_ADDRESS_AUTO,
+                             DOL_GUEST_RESOURCE_TLUT,&palette)) {
+                    native_scene.rejected(); return 0;
+                }
+                plan->tlut_data=palette.data; plan->tlut_available=palette.available;
+            }
+        }
+        // Direct typed submission. No command construction, FIFO append,
+        // register decoding or original guest renderer executes here.
+        if (!aurora::gfx::gxcore::submit_draw_plan(*plan)) {
+            native_scene.rejected(); fail("Native scene draw submission failed"); return 0;
+        }
+        native_scene.submitted(); ++state.draws; ++efb_generation;
+        return 1;
+    } catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+void native_scene_status(GcWiiNativeRenderStatus* output) {
+    if (output) *output=native_scene.status();
+}
+const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
+    create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
 }

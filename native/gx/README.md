@@ -26,3 +26,19 @@ isolation against that build. It requires `--library` and `--work-root` paths.
 
 Extraction and multi-bank support require consumer build/runtime qualification;
 the service test does not establish a working Wii machine or menu rendering.
+
+The optional `gc_wii_native_render_get_api` export in
+`include/gcnllr/native_render.h` accepts native meshes and material draws without
+constructing or decoding FIFO commands. Geometry is copied and converted once;
+draws reuse it with explicit transforms, clipping and material inputs. The
+current material family is unlit vertex color with one optional texture and one
+mip level. The existing host GPU service still owns lifecycle, memory coherence,
+copies and scanout. Calls run on its recording owner after earlier FIFO work has
+been drained. Consumers select the rendering provider when building.
+
+`test_native_render_gpu.py` checks actual GPU pixels, mesh ownership/reuse,
+texture rewrites, ordering, clipping, transforms and zero submitted FIFO bytes.
+It uses a hidden window and muted output. This is an experimental component:
+title bindings, complete model/material families and end-to-end performance
+qualification remain open. Retained geometry is currently staged to the GPU
+through the shared draw backend; permanent GPU mesh residency is not claimed.
