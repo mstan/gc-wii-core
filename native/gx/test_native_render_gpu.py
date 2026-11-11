@@ -190,6 +190,19 @@ def main():
             c.memset(c.addressof(ram)+0x100,128,32);colored.color.high[3]=255
             assert gui.draw(c.byref(colored))
             expect('GUI interpolated alpha blends range color',320,240,(25,153,25))
+            c.memset(c.addressof(ram)+0x100,95,32)
+            ram[0x200+95*2]=0;ram[0x201+95*2]=31
+            colored.draw.material.flags=0
+            colored.draw.material.texture=Texture(0x100,32,9,8,4,0x200,96,1,0,0,0)
+            colored.color=GuiMaterial((c.c_int32*4)(0,0,0,0),(c.c_int32*4)(255,255,255,255))
+            assert gui.draw(c.byref(colored)), 'Actual 96-entry CI8 palette rejected'
+            expect('CI8 uses its actual shorter palette span',320,240,(0,0,255))
+            ram[0x200+95*2]=7;ram[0x201+95*2]=224
+            assert gui.draw(c.byref(colored)), 'Short palette rewrite rejected'
+            expect('Short CI8 palette rewrite remains coherent',320,240,(0,255,0))
+            colored.draw.material.texture.palette_entries=0
+            assert not gui.draw(c.byref(colored)), 'Empty indexed palette accepted'
+            colored.draw.material.texture.palette_entries=96
             colored.color.high[0]=256
             assert not gui.draw(c.byref(colored)), 'Unqualified color endpoint accepted'
             assert native.destroy(gui_handle)

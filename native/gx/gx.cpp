@@ -1305,6 +1305,9 @@ int destroy_native_mesh(uint64_t mesh) { return native_scene.destroy_mesh(mesh);
 bool native_scene_ready() {
     if (!initialized || !frame_open || failed.load() || fifo_worker ||
         !frontend || frontend->pending_fifo_size()) {
+        std::fprintf(stderr,"[native-scene-boundary] initialized=%u frame=%u failed=%u worker=%u frontend=%u pending=%zu\n",
+            unsigned(initialized),unsigned(frame_open),unsigned(failed.load()),unsigned(bool(fifo_worker)),
+            unsigned(bool(frontend)),frontend?size_t(frontend->pending_fifo_size()):size_t(0));
         native_scene.rejected(); return false;
     }
     return true;
@@ -1315,6 +1318,7 @@ int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
             DolGuestResolvedRange image{};
             if (!resolve(nullptr,plan->tex_address,plan->tex_size,DOL_GUEST_ADDRESS_AUTO,
                          DOL_GUEST_RESOURCE_TEXTURE,&image)) {
+                std::fprintf(stderr,"[native-scene-rejected] Unreadable texture address=%08x size=%u\n",plan->tex_address,plan->tex_size);
                 native_scene.rejected(); return 0;
             }
             plan->tex_data=image.data; plan->tex_available=image.available;
@@ -1325,6 +1329,7 @@ int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
                 DolGuestResolvedRange palette{};
                 if (!resolve(nullptr,plan->tlut_address,plan->tlut_entries*2,DOL_GUEST_ADDRESS_AUTO,
                              DOL_GUEST_RESOURCE_TLUT,&palette)) {
+                    std::fprintf(stderr,"[native-scene-rejected] Unreadable palette address=%08x entries=%u\n",plan->tlut_address,plan->tlut_entries);
                     native_scene.rejected(); return 0;
                 }
                 plan->tlut_data=palette.data; plan->tlut_available=palette.available;

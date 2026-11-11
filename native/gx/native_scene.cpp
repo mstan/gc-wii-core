@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <limits>
 
 namespace gcnllr {
@@ -24,8 +25,10 @@ static bool valid_texture(const GcWiiNativeTexture& t) {
         ((t.height+block_height-1)/block_height)*block_bytes;
     if (t.size!=bytes) return false; // this material has one mip level
     if (t.format>=8 && t.format<=10) {
-        const uint32_t entries=t.format==8 ? 16u:(t.format==9 ? 256u:16384u);
-        if (t.palette_entries<entries || t.palette_entries>16384 || t.palette_format>2) return false;
+        // A loaded palette describes its actual span, not the format's
+        // maximum index capacity. CI8 images can legitimately use 96 entries.
+        // The shared decoder bounds each index against that supplied span.
+        if (!t.palette_entries || t.palette_entries>16384 || t.palette_format>2) return false;
     } else if (t.palette_entries) return false;
     return true;
 }
@@ -73,19 +76,24 @@ bool NativeScene::destroy_mesh(uint64_t handle) {
 gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
     const auto found=meshes_.find(job.mesh);
     const auto& texture=job.material.texture;
-    if (found==meshes_.end() || (job.material.flags & ~127u) ||
+    const auto decline=[&](const char* reason)->gxc::DrawPlan* {
+        std::fprintf(stderr,"[native-scene-rejected] %s mesh=%llu flags=%x texture=%08x/%u/%u/%ux%u palette=%u/%u depth=%.9g,%.9g\n",
+            reason,(unsigned long long)job.mesh,job.material.flags,texture.address,texture.size,texture.format,
+            texture.width,texture.height,texture.palette_entries,texture.palette_format,job.near_depth,job.far_depth);
+        rejected();return nullptr;
+    };
+    if(found==meshes_.end())return decline("Unknown retained mesh");
+    if ((job.material.flags & ~127u) ||
         ((job.material.flags&(GC_WII_NATIVE_COLOR_WRITE|GC_WII_NATIVE_ALPHA_WRITE)) &&
-         !(job.material.flags&GC_WII_NATIVE_WRITE_MASKS)) ||
-        !std::isfinite(job.x) || !std::isfinite(job.y) ||
+         !(job.material.flags&GC_WII_NATIVE_WRITE_MASKS)))return decline("Invalid material flags");
+    if (!std::isfinite(job.x) || !std::isfinite(job.y) ||
         !std::isfinite(job.width) || !std::isfinite(job.height) ||
         !std::isfinite(job.near_depth) || !std::isfinite(job.far_depth) ||
         job.width<=0 || job.height<=0 || job.clip_width<=0 || job.clip_height<=0 ||
-        job.near_depth<0 || job.far_depth>1 || job.near_depth>job.far_depth ||
-        !valid_texture(texture)) {
-        rejected(); return nullptr;
-    }
-    for (float f:job.model_view) if (!std::isfinite(f)) { rejected(); return nullptr; }
-    for (float f:job.projection) if (!std::isfinite(f)) { rejected(); return nullptr; }
+        job.near_depth<0 || job.far_depth>1 || job.near_depth>job.far_depth)return decline("Invalid logical raster");
+    if(!valid_texture(texture))return decline("Invalid tiled texture descriptor");
+    for (float f:job.model_view) if (!std::isfinite(f))return decline("Nonfinite model-view matrix");
+    for (float f:job.projection) if (!std::isfinite(f))return decline("Nonfinite projection matrix");
     auto& plan=found->second;
     plan.pipeline={};
     plan.pipeline.shader.has_color0=1;
