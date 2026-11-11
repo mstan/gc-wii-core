@@ -33,8 +33,27 @@ NativeJ3D::Prepared* NativeJ3D::prepare(const GcWiiJ3DDraw& input) {
     need(input.mesh<r.meshes.size() && input.material<r.model.materials.size(),"Invalid native J3D mesh/material");
     const auto& mesh=r.model.meshes[input.mesh];const auto key=std::pair{input.material,input.mesh};
     auto material=r.materials.find(key);
-    if(material==r.materials.end())material=r.materials.emplace(key,j3d::compile_material(r.model.materials[input.material],mesh)).first;
-    auto c=material->second;const auto& shader=c.pipeline.shader;
+    if(material==r.materials.end()) {
+        Resource::Material prepared;prepared.compiled=j3d::compile_material(r.model.materials[input.material],mesh);
+        const auto& shader=prepared.compiled.pipeline.shader;
+        // Matrix selectors belong to the immutable mesh. Resolve and validate
+        // them once; a draw only supplies the selected pose and matrix values.
+        if(shader.has_pos_mtx_idx) {
+            prepared.position_mask=0;
+            for(const auto& v:mesh.vertices) {
+                need(v.position_matrix<30 && v.position_matrix%3==0,"Invalid J3D position matrix row");
+                prepared.position_mask|=1u<<(v.position_matrix/3);
+            }
+        }
+        prepared.texture_matrix_mask=prepared.compiled.texture_matrix_mask;
+        for(unsigned i=0;i<8;++i)if(shader.tex_mtx_idx_mask&(1u<<i))for(const auto& v:mesh.vertices) {
+            const auto row=v.texture_matrices[i];if(row==60)continue;
+            need(row>=30 && row<=51 && (row-30)%3==0,"Unsupported indexed J3D texture matrix row");
+            prepared.texture_matrix_mask|=1u<<((row-30)/3);
+        }
+        material=r.materials.emplace(key,std::move(prepared)).first;
+    }
+    auto c=material->second.compiled;const auto& shader=c.pipeline.shader;
     need((input.material_inputs&~1023u)==0,"Unknown native J3D material input");
     need(!(input.material_inputs&GC_WII_J3D_THREE_REGISTER_COLORS) || (input.material_inputs&GC_WII_J3D_REGISTER_COLORS),"Three-register mask requires register color inputs");
     need(!(input.material_inputs&(GC_WII_J3D_COLOR_WRITE|GC_WII_J3D_ALPHA_WRITE)) || (input.material_inputs&GC_WII_J3D_WRITE_MASKS),"Write enables require explicit native J3D write masks");
@@ -64,20 +83,13 @@ NativeJ3D::Prepared* NativeJ3D::prepare(const GcWiiJ3DDraw& input) {
     if(input.material_inputs&GC_WII_J3D_FOG){std::array<uint8_t,44> recipe;std::copy_n(input.fog_recipe,44,recipe.begin());j3d::set_fog(c,recipe);}
     need((input.position_mask&~1023u)==0 && (input.normal_mask&~1023u)==0 &&
         (input.texture_matrix_mask&~255u)==0 && (input.light_mask&~255u)==0,"Invalid native J3D dynamic input mask");
-    uint32_t positions=1;
-    if(shader.has_pos_mtx_idx) {
-        positions=0;for(const auto& v:mesh.vertices){need(v.position_matrix<30 && v.position_matrix%3==0,"Invalid J3D position matrix row");positions|=1u<<(v.position_matrix/3);}
-    }
+    const auto positions=material->second.position_mask;
     need((input.position_mask&positions)==positions,"Missing native J3D pose matrix");
     bool normal_used=false;for(unsigned i=0;i<4;++i)if((i&1)<shader.num_color_chans)normal_used|=shader.litchan[i].enablelighting!=0;
     for(unsigned i=0;i<shader.num_tex_gens;++i)normal_used|=shader.tex_gens[i].texgentype==1 || shader.tex_gens[i].sourcerow==1 || shader.tex_gens[i].sourcerow==3 || shader.tex_gens[i].sourcerow==4;
     if(normal_used)need((input.normal_mask&positions)==positions,"Missing native J3D normal matrix");
     need((input.light_mask&c.light_mask)==c.light_mask,"Missing native J3D light");
-    uint32_t required_texture=c.texture_matrix_mask;
-    for(unsigned i=0;i<8;++i)if(shader.tex_mtx_idx_mask&(1u<<i))for(const auto& v:mesh.vertices) {
-        const auto row=v.texture_matrices[i];if(row==60)continue;
-        need(row>=30 && row<=51 && (row-30)%3==0,"Unsupported indexed J3D texture matrix row");required_texture|=1u<<((row-30)/3);
-    }
+    const auto required_texture=material->second.texture_matrix_mask;
     need((input.texture_matrix_mask&required_texture)==required_texture,"Missing native J3D animated texture matrix");
     finite(input.projection,16);
     const float view[]{input.x,input.y,input.width,input.height,input.near_depth,input.far_depth};finite(view,6);

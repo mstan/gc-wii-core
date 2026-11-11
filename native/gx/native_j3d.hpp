@@ -25,9 +25,13 @@ public:
     void reset();
 private:
     struct Resource {
+        struct Material {
+            gc_wii::j3d::CompiledMaterial compiled;
+            uint32_t position_mask{1},texture_matrix_mask{};
+        };
         gc_wii::j3d::Model model;
         std::vector<std::vector<aurora::gfx::gxcore::ResidentMesh>> meshes;
-        std::map<std::pair<uint32_t,uint32_t>,gc_wii::j3d::CompiledMaterial> materials;
+        std::map<std::pair<uint32_t,uint32_t>,Material> materials;
     };
     std::unordered_map<uint64_t,Resource> resources_;
     uint64_t next_handle_{1};
