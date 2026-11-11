@@ -62,3 +62,17 @@ material registers and lighting. The selected Aurora renderer applies scoped
 source adaptations for this dependency and COLOR0/COLOR1 selection without
 editing the donor checkout. `test_color_texgen_gpu.py` checks actual GPU pixels
 for missing/contrasting raw vertex colors, register changes and light masks.
+
+`gc_wii_native_output_get_api(1)` supplies an optional owned-output submission
+boundary, separate from NativeFrame1. It requires the serial owner profile and
+all three memory-ownership callbacks. The caller must guard every actual memory
+observer, including raw compiled pointers. Submission acknowledges host encoding
+and immutable resource capture without waiting for GPU execution or copying
+bytes into RAM. It emits no PE notification. NativeFrame1 completion retains
+its existing physical/owned policy. Retained display generations use the same
+YUY2 presentation shader as ordinary CPU-backed scanout.
+
+The existing `test_native_frame_gpu.py --output --efb-height 528` exercises the
+new submission contract and compares all pixels of a colored direct scanout
+with its materialized YUY2 presentation. It remains a hidden, silent component
+check; title correctness and throughput require their own replay gates.

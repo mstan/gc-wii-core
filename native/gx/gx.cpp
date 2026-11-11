@@ -10,6 +10,7 @@
 #include "native_scene.hpp"
 #include "native_gui.hpp"
 #include "gcnllr/native_frame.h"
+#include "gcnllr/native_output.h"
 #if GC_WII_NATIVE_J3D
 #include "native_j3d.hpp"
 #endif
@@ -1453,6 +1454,28 @@ const GcWiiNativeFrameApi native_frame_api={GC_WII_NATIVE_FRAME_ABI,native_frame
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeFrameApi* gc_wii_native_frame_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_FRAME_ABI && !GCNLLR_GX_FIFO_WORKER?&native_frame_api:nullptr;
+}
+
+namespace {
+int native_output_submit() {
+    // This extension deliberately retains the serial machine-owner profile.
+    // Only immutable GPU resources are deferred, never guest-memory stores.
+    if(!config.own_copy || !config.pending_read || !config.prepare_read ||
+       GCNLLR_GX_FIFO_WORKER || GCNLLR_ASYNC_COPIES || GCNLLR_COMPOSED_SCANOUT ||
+       GCNLLR_GX_COOPERATIVE_VI || GCNLLR_RESIDENT_XFB)
+        return reject_native_frame("Native output requires guarded serial ownership");
+    if(!native_frame_ready())return 0;
+    try {
+        flush_geometry();flush_display_copies();
+        gcnllr::gpu_bridge::complete_frame(false);
+        ++native_frame_state.completions;return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
+const GcWiiNativeOutputApi native_output_api={GC_WII_NATIVE_OUTPUT_ABI,native_output_submit};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeOutputApi* gc_wii_native_output_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_OUTPUT_ABI && !GCNLLR_GX_FIFO_WORKER && !GCNLLR_ASYNC_COPIES &&
+        !GCNLLR_COMPOSED_SCANOUT && !GCNLLR_GX_COOPERATIVE_VI && !GCNLLR_RESIDENT_XFB?&native_output_api:nullptr;
 }
 
 #if GC_WII_NATIVE_J3D

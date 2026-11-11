@@ -37,6 +37,9 @@ class FrameApi(c.Structure):
               ('complete',c.CFUNCTYPE(c.c_int,c.c_uint32,c.c_uint32)),
               ('status',c.CFUNCTYPE(None,c.POINTER(FrameStatus)))]
 
+class OutputApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('submit',c.CFUNCTYPE(c.c_int))]
+
 
 class OwnedCopy(c.Structure):
     _fields_=[('token',c.c_uint64)]+[(name,c.c_uint32) for name in ('address','row_bytes','rows','stride','flags')]
@@ -59,6 +62,7 @@ def main():
     parser.add_argument('--library',type=Path,required=True)
     parser.add_argument('--work-root',type=Path,required=True)
     parser.add_argument('--eager',action='store_true',help='Match a consumer without optional copy-ownership callbacks')
+    parser.add_argument('--output',action='store_true',help='Qualify owned submission and complete direct/RAM presentation parity')
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
@@ -70,6 +74,13 @@ def main():
     dll.gc_wii_native_frame_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_frame_get_api.restype=c.POINTER(FrameApi)
     assert not dll.gc_wii_native_frame_get_api(2),'Unknown native frame ABI accepted'
     frame=dll.gc_wii_native_frame_get_api(1).contents
+    output=None
+    if args.output:
+        assert not args.eager,'Owned submission needs the guarded owner double'
+        dll.gc_wii_native_output_get_api.argtypes=[c.c_uint32]
+        dll.gc_wii_native_output_get_api.restype=c.POINTER(OutputApi)
+        assert not dll.gc_wii_native_output_get_api(2),'Unknown native output ABI accepted'
+        output=dll.gc_wii_native_output_get_api(1).contents
     dll.gc_wii_native_render_get_api.argtypes=[c.c_uint32]
     dll.gc_wii_native_render_get_api.restype=c.POINTER(NativeApi)
     render=dll.gc_wii_native_render_get_api(1).contents
@@ -185,6 +196,10 @@ def main():
         c.memset(c.addressof(mem1)+0x10000,0xa5,64)
         token=copy(0x90010000,10,2,flags=3|4)
         if token:assert owned[token].address==0x10010000,'MEM2 cached alias lost physical bank identity'
+        if output:
+            assert output.submit(),status().error.decode()
+            assert not any(mem2[0x10000:0x10040]),'Owned submission unexpectedly wrote guest RAM'
+            checks.append('owned submission retains immutable bytes without a RAM write')
         assert frame.complete(1|4,0xbeef),status().error.decode()
         assert events[-2:]==[['pe',0x48,0xbeef],['pe',0x45,2]],events
         assert any(e[0]==('write' if args.eager else 'own') for e in events[:-2]),'Completion overtook copy publication'
@@ -207,6 +222,13 @@ def main():
         assert all(abs(a-b)<=1 for a,b in zip(scanout,decoded)),('generation scanout',scanout,decoded)
         checks.append('materialized scanout matches copied bytes' if args.eager else
                       'immutable generation survives clear and presents without RAM recopy')
+        if output:
+            direct=[pixel(x,y,2) for y in range(2) for x in range(16)]
+            present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
+            assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
+            memory=[pixel(x,y,2) for y in range(2) for x in range(16)]
+            assert direct==memory,('direct output versus materialized YUY2 scanout',direct,memory)
+            checks.append('all 32 host scanout pixels match direct and materialized YUY2 presentation exactly')
 
         clear(0,99,16,3,(0,0,0));clear(0,100,16,1,(255,255,255))
         filtered=copy(0x90010200,100,taps=(8,8,10,12,10,8,8),flags=0)
