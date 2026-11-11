@@ -3,6 +3,8 @@
 
 This is a rendering-component check, not title or performance qualification.
 Reuse the existing hidden, silent GPU service and its actual EFB readback.
+The optional mixed-raster case adds original reference commands after the
+zero-FIFO native checks; it never routes native materials through them.
 """
 import argparse
 import ctypes as c
@@ -60,6 +62,7 @@ def main():
     parser.add_argument('--library',type=Path,required=True)
     parser.add_argument('--work-root',type=Path,required=True)
     parser.add_argument('--gui',action='store_true',help='Also check the native GUI color-range material')
+    parser.add_argument('--raster-interop',action='store_true',help='Check native to original draws with different raster state')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -183,6 +186,49 @@ def main():
         c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]
         assert fifo_bytes==0, 'Native renderer encoded or replayed FIFO bytes'
+        reference_fifo_bytes=0
+        if args.raster_interop:
+            # The original renderer caches a 640x480 raster. A native widget
+            # uses a smaller viewport/scissor, then the original caller draws
+            # again without rewriting its unchanged XF/BP raster inputs.
+            def bp_regs(values):return b''.join(b'\x61'+struct.pack('>I',reg<<24|value) for reg,value in values)
+            def cp(reg,value):return b'\x08'+bytes([reg])+struct.pack('>I',value)
+            def floats(values):return struct.pack('>'+len(values)*'f',*values)
+            def xf(reg,values):return b'\x10'+struct.pack('>I',((len(values)//4-1)<<16)|reg)+values
+            def send(raw):
+                raw+=bytes((-len(raw))%32)
+                data=(c.c_uint8*len(raw)).from_buffer_copy(raw)
+                assert gx.fifo(data,len(raw)) and gx.drain(), 'Original raster reference failed'
+            def quad(color):return b'\x80\0\4'+b''.join(floats([x,y,.5])+bytes(color)
+                for x,y in ((-1,-1),(1,-1),(1,1),(-1,1)))
+            setup=cp(0x50,(1<<9)|(1<<13))+cp(0x60,0)+cp(0x70,1|(4<<1)|(5<<14))
+            setup+=xf(0,floats([1,0,0,0,0,1,0,0,0,0,1,0]))
+            setup+=xf(0x101a,floats([320,-240,16777215,662,582,16777215]))
+            setup+=xf(0x1020,floats([1,0,1,0,-1,0])+struct.pack('>I',1))
+            setup+=xf(0x1009,struct.pack('>I',1))+xf(0x100e,struct.pack('>I',1))+xf(0x1010,struct.pack('>I',1))
+            setup+=xf(0x103f,struct.pack('>I',0))+bp_regs([(0,0x10),(0x20,(342<<12)|342),
+                (0x21,(981<<12)|821),(0x59,171|(171<<10)),(0x28,0),(0x40,0),(0x41,0x18),(0x43,0),
+                (0xf3,0x3f0000),(0xf6,4),(0xf7,14),
+                (0xc0,10|(15<<4)|(15<<8)|(15<<12)|(1<<19)),
+                (0xc1,(5<<4)|(7<<7)|(7<<10)|(7<<13)|(1<<19))])
+            send(setup+quad((0,255,0,255)))
+            expect('original full raster before native widget',320,400,(0,255,0))
+            widget=Draw.from_buffer_copy(job);widget.material=Material();widget.model_view[11]=0
+            widget.height=240;widget.clip_width=320;widget.clip_height=240
+            assert native.draw(c.byref(widget))
+            send(quad((0,0,255,255)))
+            expect('original viewport restored after NativeRender',320,400,(0,0,255))
+            expect('original scissor restored after NativeRender',480,100,(0,0,255))
+            if args.gui:
+                remapped=GuiDraw(widget,GuiMaterial((c.c_int32*4)(0,0,0,0),(c.c_int32*4)(255,255,255,255)))
+                assert gui.draw(c.byref(remapped))
+                send(quad((0,255,0,255)))
+                expect('original viewport restored after GUI',320,400,(0,255,0))
+                expect('original scissor restored after GUI',480,100,(0,255,0))
+            c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
+            reference_fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]
+            assert reference_fifo_bytes>0
+            native.status(c.byref(status))
         assert native.destroy(handle), 'Mesh release failed'
         assert not native.draw(c.byref(job)), 'Destroyed mesh silently reused'
         from PIL import Image
@@ -192,6 +238,7 @@ def main():
         result={'schema':1,'component_only':True,'title_qualified':False,'performance_qualified':False,
             'library':str(args.library.resolve()),'sha256':hashlib.sha256(args.library.read_bytes()).hexdigest(),
             'fifo_bytes':fifo_bytes,'mesh_uploads':status.mesh_uploads,'native_draws':status.draws,
+            'original_reference_fifo_bytes':reference_fifo_bytes,
             'checks':observations,'image':'native-render.png'}
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
         print(json.dumps(result))
