@@ -63,6 +63,8 @@ def main():
     parser.add_argument('--work-root',type=Path,required=True)
     parser.add_argument('--gui',action='store_true',help='Also check the native GUI color-range material')
     parser.add_argument('--raster-interop',action='store_true',help='Check native to original draws with different raster state')
+    parser.add_argument('--write-masks',action='store_true',help='Check independent RGB/alpha writes with a reference RGBA6 EFB configuration')
+    parser.add_argument('--owned',action='store_true',help='Supply memory-owner callbacks required by a composed GameCube service')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -83,6 +85,16 @@ def main():
     bp=BP(lambda *args:None)
     config=Config(abi,b'Native renderer component check',str(work).encode(),str(work/'cache').encode(),
         1,c.addressof(ram),len(ram),None,bp,write,EPOCH(),EPOCH(),None,None,None,None,RESOLVE(),LOCATE())
+    if args.owned:
+        # This component submits no copies. Keep the composed service's
+        # required ownership callbacks present without relaxing its contract.
+        own_type=c.CFUNCTYPE(c.c_int,c.c_void_p,c.c_void_p)
+        range_type=c.CFUNCTYPE(c.c_int,c.c_void_p,c.c_uint32,c.c_uint32)
+        retire_type=c.CFUNCTYPE(c.c_int,c.c_void_p,c.c_uint64)
+        own=own_type(lambda *args:1);pending=range_type(lambda *args:0)
+        prepare=range_type(lambda *args:1);retire=retire_type(lambda *args:1)
+        config.own=c.cast(own,c.c_void_p);config.pending=c.cast(pending,c.c_void_p)
+        config.prepare=c.cast(prepare,c.c_void_p);config.retire=c.cast(retire,c.c_void_p)
     assert gx.start(c.byref(config)), 'GPU startup failed'
     observations=[]
     try:
@@ -187,6 +199,41 @@ def main():
         fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]
         assert fifo_bytes==0, 'Native renderer encoded or replayed FIFO bytes'
         reference_fifo_bytes=0
+        if args.write_masks:
+            # Only the reference setup selects the observable RGBA6 EFB mode.
+            # All geometry and independent plane writes below remain typed.
+            raw=b'\x61\x43\x00\x00\x01'+bytes(27)
+            data=(c.c_uint8*len(raw)).from_buffer_copy(raw)
+            assert gx.fifo(data,len(raw)) and gx.drain()
+            for vertex in vertices:vertex.color[:]=(0,1,0,85/255)
+            mask_handle=native.create(c.byref(mesh));assert mask_handle
+            masked=Draw.from_buffer_copy(job);masked.mesh=mask_handle
+            masked.material=Material();masked.model_view[11]=0
+            assert native.draw(c.byref(masked))
+            expect('default write masks retain existing RGB behavior',320,240,(0,255,0))
+            def alpha():
+                value=c.c_uint32();assert gx.peek(0,320,240,c.byref(value));return value.value>>24
+            assert alpha()==85,('default alpha write',alpha())
+            masked.mesh=handle;masked.material.flags=16|32
+            assert native.draw(c.byref(masked))
+            expect('RGB-only native draw updates RGB',320,240,(255,0,0))
+            assert alpha()==85,('RGB-only draw overwrote alpha',alpha())
+            masked.mesh=mask_handle;masked.material.flags=16
+            assert native.draw(c.byref(masked))
+            expect('disabled native planes preserve RGB',320,240,(255,0,0))
+            assert alpha()==85,('disabled planes overwrote alpha',alpha())
+            masked.mesh=handle;masked.material.flags=16|64
+            assert native.draw(c.byref(masked))
+            expect('alpha-only native draw preserves RGB',320,240,(255,0,0))
+            assert alpha()==255,('alpha-only native draw',alpha())
+            masked.material.flags=32
+            assert not native.draw(c.byref(masked)), 'Write enable without explicit masks accepted'
+            c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
+            reference_fifo_bytes=struct.unpack_from('Q',gx_status.raw)[0]
+            assert reference_fifo_bytes==len(raw),'Native plane writes emitted commands'
+            observations.append({'check':'independent RGB/alpha masks and default compatibility','native_fifo_bytes':0})
+            assert native.destroy(mask_handle)
+            native.status(c.byref(status))
         if args.raster_interop:
             # The original renderer caches a 640x480 raster. A native widget
             # uses a smaller viewport/scissor, then the original caller draws

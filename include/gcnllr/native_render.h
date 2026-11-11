@@ -18,6 +18,11 @@ extern "C" {
 /* Select ALWAYS instead of the default LEQUAL. Test/write remain independent.
  * Services built before this flag reject it as an unknown material input. */
 #define GC_WII_NATIVE_DEPTH_ALWAYS 8u
+/* Optional independent output planes. Without WRITE_MASKS both are enabled,
+ * preserving existing callers. Old services reject these new flag bits. */
+#define GC_WII_NATIVE_WRITE_MASKS 16u
+#define GC_WII_NATIVE_COLOR_WRITE 32u
+#define GC_WII_NATIVE_ALPHA_WRITE 64u
 
 typedef struct {
     float position[3], color[4], uv[2];

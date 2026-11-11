@@ -73,7 +73,9 @@ bool NativeScene::destroy_mesh(uint64_t handle) {
 gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
     const auto found=meshes_.find(job.mesh);
     const auto& texture=job.material.texture;
-    if (found==meshes_.end() || (job.material.flags & ~15u) ||
+    if (found==meshes_.end() || (job.material.flags & ~127u) ||
+        ((job.material.flags&(GC_WII_NATIVE_COLOR_WRITE|GC_WII_NATIVE_ALPHA_WRITE)) &&
+         !(job.material.flags&GC_WII_NATIVE_WRITE_MASKS)) ||
         !std::isfinite(job.x) || !std::isfinite(job.y) ||
         !std::isfinite(job.width) || !std::isfinite(job.height) ||
         !std::isfinite(job.near_depth) || !std::isfinite(job.far_depth) ||
@@ -88,7 +90,9 @@ gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
     plan.pipeline={};
     plan.pipeline.shader.has_color0=1;
     plan.pipeline.shader.num_color_chans=1;
-    plan.pipeline.color_update=1; plan.pipeline.alpha_update=1;
+    const bool explicit_masks=(job.material.flags&GC_WII_NATIVE_WRITE_MASKS)!=0;
+    plan.pipeline.color_update=!explicit_masks || (job.material.flags&GC_WII_NATIVE_COLOR_WRITE);
+    plan.pipeline.alpha_update=!explicit_masks || (job.material.flags&GC_WII_NATIVE_ALPHA_WRITE);
     plan.pipeline.blend_enable=(job.material.flags&GC_WII_NATIVE_BLEND)!=0;
     plan.pipeline.src_factor=plan.pipeline.src_factor_alpha=4;
     plan.pipeline.dst_factor=plan.pipeline.dst_factor_alpha=5;
