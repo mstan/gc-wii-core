@@ -267,11 +267,26 @@ def main():
             assert masks.draw(c.byref(covered))
             expect('GUI independent coverage coordinates',160,240,(100,100,100))
             expect('GUI independent coverage coordinates opposite edge',480,240,(0,0,0))
+            covered.uv[0][:]=(1,0,0);covered.flags=0
+            covered.color=GuiMaterial((c.c_int32*4)(0,0,200,0),(c.c_int32*4)(0,0,200,0))
+            c.memset(c.addressof(ram)+0x400,255,32)
+            assert masks.draw(c.byref(covered))
+            expect('GUI pane coverage background',320,240,(0,0,200))
+            for vertex in vertices:vertex.color[:]=(.25,.5,.75,.125)
+            tint_handle=native.create(c.byref(mesh));assert tint_handle
+            covered.draw.mesh=tint_handle;covered.draw.material.flags=1;covered.flags=2
+            covered.color=GuiMaterial((c.c_int32*4)(100,100,100,0),(c.c_int32*4)(100,100,100,0))
+            c.memset(c.addressof(ram)+0x400,128,32)
+            assert masks.draw(c.byref(covered))
+            expect('GUI pane RGB modulates range while pane alpha is ignored',320,240,(13,25,137))
+            assert native.destroy(tint_handle);covered.draw.mesh=job.mesh
+            covered.flags=3
+            assert not masks.draw(c.byref(covered)), 'Conflicting coverage color modes accepted'
             covered.mask.size=1
             assert not masks.draw(c.byref(covered)), 'Truncated coverage image accepted'
             covered.mask.size=32;covered.opacity=256
             assert not masks.draw(c.byref(covered)), 'Invalid coverage opacity accepted'
-            covered.opacity=255;covered.flags=2
+            covered.opacity=255;covered.flags=4
             assert not masks.draw(c.byref(covered)), 'Unknown coverage flags accepted'
             covered.flags=0;covered.uv[0][0]=float('nan')
             assert not masks.draw(c.byref(covered)), 'Nonfinite coverage coordinates accepted'

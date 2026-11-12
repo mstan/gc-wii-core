@@ -46,10 +46,13 @@ typedef const GcWiiNativeGuiLayersApi* (*GcWiiNativeGuiLayersGetApi)(uint32_t);
 
 /* Two-image GUI coverage: primary RGB range remap, with a separately
  * transformed coverage image. Alpha is mask alpha times byte opacity.
- * Optional RGB modulation uses the same mask's RGB after the range clamp.
- * Pane tint and primary texture alpha are not inputs to this family. */
+ * Optional RGB modulation uses either the mask's RGB or the pane's RGB after
+ * the range clamp. Pane alpha and primary texture alpha are never inputs. */
 #define GC_WII_NATIVE_GUI_MASK_ABI 1u
 #define GC_WII_NATIVE_GUI_MASK_RGB 1u
+/* Multiply the remapped primary RGB by the interpolated pane RGB instead.
+ * Pane alpha remains ignored. Mutually exclusive with MASK_RGB. */
+#define GC_WII_NATIVE_GUI_MASK_PANE_RGB 2u
 typedef struct {
     GcWiiNativeDraw draw;
     GcWiiNativeGuiMaterial color;

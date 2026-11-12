@@ -93,7 +93,7 @@ gxruntime::gxcore::DrawPlan* prepare_gui_layers(NativeScene& scene,const GcWiiNa
 gxruntime::gxcore::DrawPlan* prepare_gui_mask(NativeScene& scene,const GcWiiNativeGuiMaskDraw& input) {
     const auto reject=[&](){scene.rejected();return static_cast<gxruntime::gxcore::DrawPlan*>(nullptr);};
     if(!input.draw.material.texture.size || !input.mask.size || !valid_native_texture(input.mask) ||
-       input.opacity<0 || input.opacity>255 || (input.flags&~GC_WII_NATIVE_GUI_MASK_RGB))return reject();
+       input.opacity<0 || input.opacity>255 || input.flags>GC_WII_NATIVE_GUI_MASK_PANE_RGB)return reject();
     for(unsigned c=0;c<4;++c)if(input.color.low[c]<0 || input.color.low[c]>255 || input.color.high[c]<0 || input.color.high[c]>255)return reject();
     for(const auto& row:input.uv)for(float f:row)if(!std::isfinite(f))return reject();
     auto* plan=scene.prepare(input.draw);if(!plan)return nullptr;
@@ -108,9 +108,10 @@ gxruntime::gxcore::DrawPlan* prepare_gui_mask(NativeScene& scene,const GcWiiNati
     auto& range=shader.tev_stages[0];range.cc_a=2;range.cc_b=4;range.cc_c=8;range.cc_d=15;
     range.ac_a=range.ac_b=range.ac_c=7;range.ac_d=1;
     auto& mask=shader.tev_stages[1];
-    mask.cc_a=15;mask.cc_b=(input.flags&GC_WII_NATIVE_GUI_MASK_RGB)?0:15;
-    mask.cc_c=(input.flags&GC_WII_NATIVE_GUI_MASK_RGB)?8:15;
-    mask.cc_d=(input.flags&GC_WII_NATIVE_GUI_MASK_RGB)?15:0;
+    const bool pane_rgb=input.flags==GC_WII_NATIVE_GUI_MASK_PANE_RGB;
+    mask.cc_a=15;mask.cc_b=pane_rgb?10:(input.flags?0:15);
+    mask.cc_c=pane_rgb?0:(input.flags?8:15);
+    mask.cc_d=input.flags?15:0;
     mask.ac_a=7;mask.ac_b=0;mask.ac_c=4;mask.ac_d=7;
     for(unsigned c=0;c<4;++c) {
         plan->pixel_constants.colors[1][c]=input.color.low[c];
