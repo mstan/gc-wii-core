@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <gcnllr/native_presentation.h>
 #if GCNLLR_ASYNC_COPIES
 #include "async_readback.hpp"
 #endif
@@ -10,6 +11,10 @@ namespace gxruntime::gxcore { struct EfbCopyCommand; }
 namespace gcnllr::gpu_bridge {
 void initialize();
 void set_idle_dimming(bool enabled);
+bool set_presentation_frame(uint32_t,const GcWiiNativePresentationFrame*);
+void select_presentation_source(uint32_t);
+bool presentation_matches_copy(uint32_t);
+bool read_presentation(uint8_t*,uint32_t,uint32_t*,uint32_t*);
 bool settle_framebuffer();
 struct CopiedImage {uint32_t width{},height{};std::vector<uint8_t> yuy2;};
 struct EncodedImage;

@@ -43,6 +43,17 @@ class OutputApi(c.Structure):
 class VideoApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('idle_dimming',c.CFUNCTYPE(c.c_int,c.c_uint32))]
 
+class PresentationFrame(c.Structure):
+    _fields_=[('rgba',c.POINTER(c.c_uint8))]+[(n,c.c_uint32) for n in ('width','height','stock_width','bytes')]
+
+class PresentationApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),
+        ('set_frame',c.CFUNCTYPE(c.c_int,c.c_uint32,c.POINTER(PresentationFrame))),
+        ('source',c.CFUNCTYPE(c.c_int,c.c_uint32)),
+        ('window',c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint32),c.POINTER(c.c_uint32))),
+        ('resize',c.CFUNCTYPE(c.c_int,c.c_uint32,c.c_uint32)),
+        ('read',c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.POINTER(c.c_uint32),c.POINTER(c.c_uint32)))]
+
 
 class OwnedCopy(c.Structure):
     _fields_=[('token',c.c_uint64)]+[(name,c.c_uint32) for name in ('address','row_bytes','rows','stride','flags')]
@@ -67,6 +78,7 @@ def main():
     parser.add_argument('--eager',action='store_true',help='Match a consumer without optional copy-ownership callbacks')
     parser.add_argument('--output',action='store_true',help='Qualify owned submission and complete direct/RAM presentation parity')
     parser.add_argument('--video',action='store_true',help='Qualify idle dimming and restoration on actual scanout')
+    parser.add_argument('--presentation',action='store_true',help='Qualify immutable title margins and unchanged physical copies')
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
@@ -182,6 +194,7 @@ def main():
         assert frame.copy(c.byref(value)),status().error.decode()
         return max(owned) if owned else None
     mesh_handle=0
+    presentation_copies=0
     try:
         vertices=(Vertex*4)(*[Vertex((c.c_float*3)(x,y,.5),(c.c_float*4)(1,0,0,1),(c.c_float*2)(0,0))
             for x,y in ((-1,-1),(1,-1),(1,1),(-1,1))])
@@ -233,6 +246,50 @@ def main():
         assert all(abs(a-b)<=1 for a,b in zip(scanout,decoded)),('generation scanout',scanout,decoded)
         checks.append('materialized scanout matches copied bytes' if args.eager else
                       'immutable generation survives clear and presents without RAM recopy')
+        if args.presentation:
+            dll.gc_wii_native_presentation_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_presentation_get_api.restype=c.POINTER(PresentationApi)
+            assert not dll.gc_wii_native_presentation_get_api(2)
+            presentation=dll.gc_wii_native_presentation_get_api(1).contents
+            ww=c.c_uint32();hh=c.c_uint32();assert presentation.window(c.byref(ww),c.byref(hh))
+            assert presentation.resize(1280,720) and not presentation.resize(0,720)
+            records=[]
+            for address,color in ((0x90011000,(0,0,255)),(0x90011200,(0,255,0))):
+                rgba=(c.c_uint8*(20*2*4))(*((*color,255)*40))
+                view=PresentationFrame(rgba,20,2,16,len(rgba))
+                bad=PresentationFrame(rgba,20,2,16,len(rgba)-1)
+                assert not presentation.set_frame(address,c.byref(bad))
+                assert presentation.set_frame(address,c.byref(view))
+                if not records:
+                    wrong=DisplayCopy(address+0x100,32,0,10,16,2,256,0,0,3)
+                    assert not frame.copy(c.byref(wrong)),'Wrong XFB identity accepted'
+                clear(0,10,16,2,(255,0,0))
+                saved=copy(address,10,2)
+                assert frame.complete(0,0)
+                records.append((address,saved,color));presentation_copies+=1
+            present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
+            for address,saved,color in records:
+                assert presentation.source(address)
+                if saved:assert gx.present_copy(saved,16,2,32)
+                else:assert present(c.cast(c.addressof(mem2)+(address&0x0fffffff),c.POINTER(c.c_uint8)),16,2,32)
+                assert presentation.read(None,0,c.byref(ww),c.byref(hh)) and (ww.value,hh.value)==(20,2)
+                rgba=(c.c_uint8*(20*2*4))();assert presentation.read(rgba,len(rgba),c.byref(ww),c.byref(hh))
+                center=pixel(0,0,2);expected_center=bytes(((center>>16)&255,(center>>8)&255,center&255,center>>24))
+                for y in range(2):
+                    for x in range(20):
+                        expected=expected_center if 2<=x<18 else bytes((*color,255))
+                        assert bytes(rgba[(y*20+x)*4:(y*20+x+1)*4])==expected,('presentation generation',address,x,y)
+            for address,saved,_ in records:
+                if saved:assert retire(None,saved)
+            assert bytes(mem2[0x11000:0x11040])==bytes(mem2[0x11200:0x11240]),'View changed physical XFB bytes'
+            assert presentation.set_frame(0x90010200,None)
+            # Return to the original generation before the existing output /
+            # dimming checks below. Those compare its original color pattern.
+            assert presentation.source(0x90010000)
+            if token:assert gx.present_copy(token,16,2,32)
+            else:assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
+            assert not presentation.read(None,0,c.byref(ww),c.byref(hh))
+            checks.append('title margins stay with their own address/generation; center and physical XFB unchanged')
         if output:
             direct=[pixel(x,y,2) for y in range(2) for x in range(16)]
             present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
@@ -294,7 +351,7 @@ def main():
         assert not frame.clear(c.byref(clear_bad)),'Out-of-EFB clear accepted'
         gx_status=c.create_string_buffer(2048);c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo=struct.unpack_from('Q',gx_status.raw)[0];assert fifo==0,'Native frame emitted commands'
-        fs=status();assert fs.display_copies==4+(args.efb_height==528) and fs.rejected==4, (fs.display_copies,fs.rejected,fs.error)
+        fs=status();assert fs.display_copies==4+presentation_copies+(args.efb_height==528) and fs.rejected==4+int(args.presentation), (fs.display_copies,fs.rejected,fs.error)
         result={'component_only':True,'game_qualified':False,'performance_qualified':False,'native_frame_abi':1,
             'library_sha256':hashlib.sha256(args.library.read_bytes()).hexdigest(),'fifo_bytes':fifo,'eager':args.eager,
             'efb_height':args.efb_height,

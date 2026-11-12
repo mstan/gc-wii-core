@@ -43,11 +43,37 @@ namespace gcnllr::gpu_bridge {
 namespace gfx=aurora::gfx;
 namespace gpu=aurora::webgpu;
 namespace worker=aurora::gfx::render_worker;
+struct PresentationFrame {uint32_t source{},width{},height{},stock_width{};std::vector<uint8_t> rgba;};
+static std::shared_ptr<const PresentationFrame> pending_presentation;
 struct EncodedImage {
     uint32_t width{},height{};
     wgpu::Buffer buffer;
+    std::shared_ptr<const PresentationFrame> presentation;
 };
 static gpu::TextureWithSampler scanout;
+static gpu::TextureWithSampler presentation_output;
+static wgpu::Buffer presentation_pixels;
+static uint64_t presentation_capacity{};
+static wgpu::ComputePipeline presentation_pipeline;
+static bool presentation_shown;
+static std::shared_ptr<const PresentationFrame> frame_presentation;
+struct CpuPresentation {std::vector<uint8_t> yuy2;std::shared_ptr<const PresentationFrame> frame;};
+static std::vector<CpuPresentation> cpu_presentations;
+static uint32_t presentation_source_address;
+static bool presentation_source_selected;
+void select_presentation_source(uint32_t address){presentation_source_address=address&0x1fffffffu;presentation_source_selected=true;}
+bool presentation_matches_copy(uint32_t address){return !pending_presentation || pending_presentation->source==(address&0x1fffffffu);}
+bool set_presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* input) {
+    if(address&31u)return false;
+    auto frame=std::make_shared<PresentationFrame>();frame->source=address&0x1fffffffu;
+    if(!input){pending_presentation=std::move(frame);return true;}
+    if(!input->rgba || !input->stock_width || input->width<=input->stock_width ||
+       input->width>864 || uint64_t(input->width)>uint64_t(input->stock_width)*4 || input->height>576 || !input->height ||
+       ((input->width-input->stock_width)&1) ||
+       uint64_t(input->width)*input->height*4!=input->bytes)return false;
+    frame->width=input->width;frame->height=input->height;frame->stock_width=input->stock_width;
+    frame->rgba.assign(input->rgba,input->rgba+input->bytes);pending_presentation=std::move(frame);return true;
+}
 #if GCNLLR_QUEUED_PRESENT
 // Aurora also borrows the override on the caller while preparing a viewport.
 // Keep one stable object per geometry until a resize/shutdown drain, rather
@@ -72,6 +98,7 @@ struct DisplayBand {
     uint32_t width{},height{},first_row{};
     std::array<uint32_t,3> weights{};
     EncodedImageHandle encoded;
+    std::shared_ptr<const PresentationFrame> presentation;
 };
 static std::vector<DisplayBand> display_bands;
 static bool recorded_copies{};
@@ -275,6 +302,7 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     const uint32_t capture_y=copy.src_y-above,capture_height=copy.height+above+below;
     if (pending_displays==display_bands.size()) display_bands.emplace_back();
     auto& band=display_bands[pending_displays++];
+    band.presentation=std::move(pending_presentation);
     band.width=copy.width;band.height=copy.height;band.first_row=above;band.weights=weights;
     if (!band.texture || band.texture->size.width!=copy.width || band.texture->size.height!=capture_height)
         band.texture=gfx::new_render_texture(copy.width,capture_height,GX_TF_RGBA8,"GameCube display band and filter halo");
@@ -289,7 +317,7 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     // Encoding may happen later; it never samples the mutable EFB again.
 #if GCNLLR_BATCHED_SUBMISSION
     auto image=std::make_shared<EncodedImage>();
-    image->width=band.width;image->height=band.height;
+    image->width=band.width;image->height=band.height;image->presentation=band.presentation;
     const uint64_t bytes=uint64_t(image->width)*image->height*2;
     const wgpu::BufferDescriptor descriptor{.label="Immutable GameCube XFB generation",
         .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopySrc,.size=bytes};
@@ -371,6 +399,10 @@ std::vector<CopiedImage> take_display_copies() {
                     const auto& band=bands[i];const auto w=band.width,h=band.height;
                     CopiedImage image{w,h,std::vector<uint8_t>(size_t(w)*h*2)};
                     std::memcpy(image.yuy2.data(),mapped+offsets[i],image.yuy2.size());
+                    if(band.presentation || !cpu_presentations.empty()) {
+                        cpu_presentations.push_back({image.yuy2,band.presentation});
+                        if(cpu_presentations.size()>8)cpu_presentations.erase(cpu_presentations.begin());
+                    }
                     result->images.push_back(std::move(image));
                 }
                 buffer.Unmap();
@@ -400,7 +432,7 @@ std::vector<EncodedImageHandle> retain_display_copies() {
         auto pass=encoder.BeginComputePass();pass.SetPipeline(display_encoder);
         for(const auto& band:bands) {
             auto image=std::make_shared<EncodedImage>();
-            image->width=band.width;image->height=band.height;
+            image->width=band.width;image->height=band.height;image->presentation=band.presentation;
             const uint64_t bytes=uint64_t(image->width)*image->height*2;
             const wgpu::BufferDescriptor descriptor{.label="Immutable GameCube XFB generation",
                 .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopySrc,.size=bytes};
@@ -480,6 +512,10 @@ CopiedImage materialize_display_copy(const EncodedImageHandle& image) {
     if(result->error)std::rethrow_exception(result->error);
     if(!result->done || result->image.yuy2.size()!=size_t(image->width)*image->height*2)
         throw std::runtime_error("Resident XFB materialization failed");
+    if(image->presentation || !cpu_presentations.empty()) {
+        cpu_presentations.push_back({result->image.yuy2,image->presentation});
+        if(cpu_presentations.size()>8)cpu_presentations.erase(cpu_presentations.begin());
+    }
     return std::move(result->image);
 }
 
@@ -633,6 +669,83 @@ static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t hei
     return gfx::begin_frame(true);
 }
 #endif
+static constexpr char presentation_shader[]=R"(
+@group(0) @binding(0) var<storage,read> view:array<u32>;
+@group(0) @binding(1) var stock:texture_2d<f32>;
+@group(0) @binding(2) var output:texture_storage_2d<rgba8unorm,write>;
+@group(0) @binding(3) var<uniform> info:vec4<u32>;
+@compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) p:vec3<u32>) {
+    let size=textureDimensions(output);let base=textureDimensions(stock);
+    if(p.x>=size.x || p.y>=size.y){return;}
+    let left=(size.x-base.x)/2u;let margin=(info.x-info.z)/2u;
+    var color:vec4<f32>;
+    if(p.x>=left && p.x<left+base.x) {
+        color=textureLoad(stock,vec2<i32>(i32(p.x-left),i32(p.y)),0);
+    }else {
+        var x:u32;
+        if(p.x<left){x=p.x*margin/left;}
+        else{x=margin+info.z+(p.x-left-base.x)*margin/(size.x-left-base.x);}
+        let y=min(p.y*info.y/size.y,info.y-1u);
+        let word=view[y*info.x+min(x,info.x-1u)];
+        let level=select(1.0,0.25,info.w!=0u);
+        color=vec4<f32>(vec3<f32>(f32(word&255u),f32((word>>8u)&255u),f32((word>>16u)&255u))*level/255.0,1.0);
+    }
+    textureStore(output,vec2<i32>(p.xy),color);
+})";
+static gpu::TextureWithSampler* compose_presentation(const gpu::TextureWithSampler& stock) {
+    presentation_shown=false;
+    if(!frame_presentation || frame_presentation->rgba.empty())return const_cast<gpu::TextureWithSampler*>(&stock);
+    const auto& frame=*frame_presentation;
+    const uint32_t width=(uint32_t(uint64_t(stock.size.width)*frame.width/frame.stock_width)+1u)&~1u;
+    const uint32_t height=stock.size.height;
+    if(width<=stock.size.width)return const_cast<gpu::TextureWithSampler*>(&stock);
+    if(!presentation_pipeline) {
+        wgpu::ShaderSourceWGSL source{};source.code=presentation_shader;
+        const wgpu::ShaderModuleDescriptor module{.nextInChain=&source,.label="Native title presentation"};
+        const wgpu::ComputePipelineDescriptor desc{.label="Native title margins",
+            .compute={.module=gpu::g_device.CreateShaderModule(&module),.entryPoint="main"}};
+        presentation_pipeline=gpu::g_device.CreateComputePipeline(&desc);
+    }
+    if(!presentation_output.texture || presentation_output.size.width!=width || presentation_output.size.height!=height) {
+        presentation_output.size={width,height,1};presentation_output.format=wgpu::TextureFormat::RGBA8Unorm;
+        const wgpu::TextureDescriptor desc{.label="Native title presentation target",
+            .usage=wgpu::TextureUsage::StorageBinding|wgpu::TextureUsage::TextureBinding|wgpu::TextureUsage::CopySrc,
+            .size=presentation_output.size,.format=presentation_output.format};
+        presentation_output.texture=gpu::g_device.CreateTexture(&desc);
+        presentation_output.view=presentation_output.texture.CreateView();presentation_output.sampler=stock.sampler;
+    }
+    if(!presentation_pixels || presentation_capacity<frame.rgba.size()) {
+        const wgpu::BufferDescriptor desc{.label="Native title view pixels",
+            .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopyDst,.size=frame.rgba.size()};
+        presentation_pixels=gpu::g_device.CreateBuffer(&desc);presentation_capacity=frame.rgba.size();
+    }
+    gpu::g_queue.WriteBuffer(presentation_pixels,0,frame.rgba.data(),frame.rgba.size());
+    const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(idle_dimming)};
+    const wgpu::BufferDescriptor uniform_desc{.label="Native title view geometry",
+        .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof words};
+    auto uniform=gpu::g_device.CreateBuffer(&uniform_desc);gpu::g_queue.WriteBuffer(uniform,0,words,sizeof words);
+    const std::array entries{wgpu::BindGroupEntry{.binding=0,.buffer=presentation_pixels,.size=frame.rgba.size()},
+        wgpu::BindGroupEntry{.binding=1,.textureView=stock.view},
+        wgpu::BindGroupEntry{.binding=2,.textureView=presentation_output.view},
+        wgpu::BindGroupEntry{.binding=3,.buffer=uniform,.size=sizeof words}};
+    const wgpu::BindGroupDescriptor binding{.layout=presentation_pipeline.GetBindGroupLayout(0),
+        .entryCount=entries.size(),.entries=entries.data()};
+    auto encoder=gpu::g_device.CreateCommandEncoder();auto pass=encoder.BeginComputePass();
+    pass.SetPipeline(presentation_pipeline);pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
+    pass.DispatchWorkgroups((width+15)/16,(height+7)/8);pass.End();
+    const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
+    presentation_shown=true;return &presentation_output;
+}
+bool read_presentation(uint8_t* output,uint32_t capacity,uint32_t* width,uint32_t* height) {
+    if(!width || !height || !presentation_shown)return false;
+    *width=presentation_output.size.width;*height=presentation_output.size.height;
+    if(!output)return true;
+    if(uint64_t(*width)*(*height)*4>capacity)return false;
+    worker::synchronize();validate_submission();
+    const auto rgba=gfx::read_texture_rgba8(presentation_output.texture,presentation_output.size,presentation_output.format);
+    if(rgba.size()!=uint64_t(*width)*(*height)*4)return false;
+    std::memcpy(output,rgba.data(),rgba.size());return true;
+}
 static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32_t height) {
 #if GCNLLR_QUEUED_PRESENT
     return queue_scanout(buffer,width,height);
@@ -641,7 +754,8 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
     auto encoder=gpu::g_device.CreateCommandEncoder();
     decode_scanout(encoder,buffer,scanout,width,height,idle_dimming);
     const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
-    worker::enqueue_work([] {gpu::set_present_source_override(&scanout);});
+    auto* shown=compose_presentation(scanout);
+    worker::enqueue_work([shown] {gpu::set_present_source_override(shown);});
     aurora_end_frame();
     worker::enqueue_work([] {gpu::set_present_source_override(nullptr);});
     aurora::imgui::new_frame(aurora::window::get_window_size());
@@ -653,6 +767,7 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
 bool present_display_copy(const EncodedImageHandle& image,uint32_t width,uint32_t height) {
     if(!image || image->width!=width || image->height!=height)return false;
     prepare_scanout(width,height);
+    frame_presentation=image->presentation;
     return show_encoded_buffer(image->buffer,width,height);
 }
 bool present_display_spans(const std::vector<DisplaySpan>& spans,uint32_t width,uint32_t height) {
@@ -669,6 +784,10 @@ bool present_display_spans(const std::vector<DisplaySpan>& spans,uint32_t width,
         end+=span.size;
     }
     if(end!=bytes)return false;
+    frame_presentation.reset();
+    if(!spans.empty() && spans.front().image && spans.front().image->width==width && spans.front().image->height==height &&
+       std::all_of(spans.begin(),spans.end(),[&](const DisplaySpan& s){return s.image==spans.front().image && s.source==s.destination;}))
+        frame_presentation=spans.front().image->presentation;
     prepare_scanout(width,height);
     if(!scanout_input || scanout_input_capacity<bytes) {
         const wgpu::BufferDescriptor descriptor{.label="GameCube native VI composition",
@@ -699,6 +818,11 @@ bool present_display_spans(const std::vector<DisplaySpan>& spans,uint32_t width,
 #endif
 }
 bool present(const uint8_t* yuy2,uint32_t width,uint32_t height,uint32_t stride) {
+    frame_presentation.reset();
+    const size_t content_bytes=size_t(width)*height*2;
+    if(stride==width*2 && yuy2)for(auto i=cpu_presentations.rbegin();i!=cpu_presentations.rend();++i)
+        if(presentation_source_selected && i->frame && i->frame->source==presentation_source_address &&
+           i->yuy2.size()==content_bytes && !std::memcmp(i->yuy2.data(),yuy2,content_bytes)) {frame_presentation=i->frame;break;}
     if(!yuy2 || stride<width*2)throw std::runtime_error("Invalid VI scanout bytes");
     prepare_scanout(width,height);
     const uint64_t bytes=uint64_t(width)*height*2;
@@ -746,6 +870,9 @@ void release() {
         (unsigned long long)observation_submissions,(unsigned long long)publication_joins);
     worker::synchronize();release_depth();
     worker::synchronize();scanout={};clear_pipelines={};pixels.clear();readback_buffer={};readback_capacity=0;
+    pending_presentation.reset();frame_presentation.reset();cpu_presentations.clear();presentation_shown=false;
+    presentation_source_selected=false;presentation_source_address=0;
+    presentation_output={};presentation_pixels={};presentation_capacity=0;presentation_pipeline={};
 #if GCNLLR_QUEUED_PRESENT
     queued_scanout.reset();
 #endif

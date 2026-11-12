@@ -12,6 +12,7 @@
 #include "native_gui_effects.hpp"
 #include "gcnllr/native_frame.h"
 #include "gcnllr/native_output.h"
+#include "gcnllr/native_presentation.h"
 #include "gcnllr/native_video.h"
 #if GC_WII_NATIVE_J3D
 #include "native_j3d.hpp"
@@ -1304,6 +1305,38 @@ const GcWiiNativeVideoApi native_video_api={GC_WII_NATIVE_VIDEO_ABI,native_idle_
 extern "C" GCNLLR_EXPORT const GcWiiNativeVideoApi* gc_wii_native_video_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_VIDEO_ABI?&native_video_api:nullptr;
 }
+namespace {
+int presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* frame) {
+    if(!initialized || failed.load())return 0;
+    try{return gcnllr::gpu_bridge::set_presentation_frame(address,frame);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int presentation_source(uint32_t address) {
+    if(!initialized || failed.load())return 0;
+    gcnllr::gpu_bridge::select_presentation_source(address);return 1;
+}
+int presentation_window(uint32_t* width,uint32_t* height) {
+    if(!initialized || !width || !height)return 0;
+    int w=0,h=0;auto* window=aurora::window::get_sdl_window();
+    if(!window || !SDL_GetWindowSizeInPixels(window,&w,&h) || w<=0 || h<=0)return 0;
+    *width=uint32_t(w);*height=uint32_t(h);return 1;
+}
+int presentation_read(uint8_t* output,uint32_t capacity,uint32_t* width,uint32_t* height) {
+    if(!initialized || failed.load())return 0;
+    try{return gcnllr::gpu_bridge::read_presentation(output,capacity,width,height);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int presentation_resize(uint32_t width,uint32_t height) {
+    if(!initialized || width<160 || height<120 || width>8192 || height>8192)return 0;
+    auto* window=aurora::window::get_sdl_window();
+    return window && SDL_SetWindowSize(window,int(width),int(height));
+}
+const GcWiiNativePresentationApi presentation_api={GC_WII_NATIVE_PRESENTATION_ABI,
+    presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativePresentationApi* gc_wii_native_presentation_get_api(uint32_t abi) {
+    /* Queued scanout needs its own retained target integration before it can
+     * offer this extension. Existing presentation remains available there. */
+    return !GCNLLR_QUEUED_PRESENT && abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:nullptr;
+}
 
 namespace {
 uint64_t create_native_mesh(const GcWiiNativeMesh* mesh) {
@@ -1467,6 +1500,8 @@ int native_frame_display_copy(const GcWiiNativeDisplayCopy* value) {
         ((value->destination|value->stride)&31u) || !native_clear_value(value->clear_value))
         return reject_native_frame("Unsupported native YUY2 display-copy descriptor");
     for(auto tap:value->filter)if(tap>63)return reject_native_frame("Native display filter tap exceeds six bits");
+    if(!gcnllr::gpu_bridge::presentation_matches_copy(value->destination))
+        return reject_native_frame("Presentation does not name this display copy");
     const float scale=value->invert_y_scale?256.f/float(value->scale_y):float(value->scale_y)/256.f;
     const auto rows=uint32_t(float(value->height)*scale);
     GcnllrNativeGxMemory memory{};
