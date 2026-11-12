@@ -75,6 +75,15 @@ int main(void) {
     volume_env("100");
     gcn_host_audio_start(32000);
     gcn_host_audio_submit_be_s16(NULL, be_pcm, 4);
+    CHECK(gcn_host_audio_set_volume(37),"live session volume request is accepted");
+    GcnHostAudioStats live;
+    gcn_host_audio_get_stats(&live);
+    CHECK(live.output_volume==37 && live.emulated_frames==1,
+          "live headless volume preserves the running stream");
+    CHECK(gcn_host_audio_set_volume(0),"live volume may silence the host");
+    CHECK(!gcn_host_audio_set_volume(101),"invalid live volume is rejected");
+    gcn_host_audio_get_stats(&live);
+    CHECK(live.output_volume==0,"invalid live volume preserves the last request");
     gcn_host_audio_submit_be_s16(NULL, be_pcm + 4, 4);
     GcnHostAudioStats split;
     gcn_host_audio_get_stats(&split);

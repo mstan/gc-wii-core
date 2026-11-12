@@ -54,6 +54,12 @@ u32 gcn_host_audio_convert_be_s16(u8* dst, const u8* src, u32 bytes);
 
 void gcn_host_audio_get_stats(GcnHostAudioStats* out);
 
+/* Request a live host-session gain, 0..100. The device-owning thread applies
+ * it on its next output event; output_volume reports the applied value.
+ * This never unmutes the session or changes guest PCM/capture/counters.
+ * Call from the producer thread, as with start/submit/stop. */
+bool gcn_host_audio_set_volume(u32 percent);
+
 #ifdef __cplusplus
 }
 #endif
