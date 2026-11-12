@@ -667,17 +667,13 @@ void flush_display_copies() {
     }
     pending_displays.clear();
 }
-void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
-    Measure measurement(copy_cost);
-    if (command.clear) ++efb_generation;
-    if (command.format==0xFu) { display_readback(command); return; }
+void texture_copy(const gxruntime::gxcore::EfbCopyCommand& command,uint32_t stride) {
     flush_display_copies();
     const auto tile=gcnllr::native_copy_layout(command.format);
     if(!tile.bytes || !command.destination_width || !command.destination_height)
         throw std::runtime_error("Native texture-copy format/size is unsupported");
     const uint32_t row_bytes=((command.destination_width+tile.width-1)/tile.width)*tile.bytes;
     const uint32_t rows=(command.destination_height+tile.height-1)/tile.height;
-    const uint32_t stride=(sink->bp[0x4D]&0x3FFu)<<5;
     const uint64_t extent=uint64_t(rows-1)*stride+row_bytes;
     GcnllrNativeGxMemory destination{};
     if (!stride || extent>UINT32_MAX ||
@@ -737,6 +733,12 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
     memory_epochs.clear();
     sink->memory_boundary();
     ++state.texture_copies;
+}
+void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
+    Measure measurement(copy_cost);
+    if (command.clear) ++efb_generation;
+    if (command.format==0xFu) { display_readback(command); return; }
+    texture_copy(command,(sink->bp[0x4D]&0x3FFu)<<5);
 }
 void stop() {
     if(fifo_worker) {
@@ -1537,12 +1539,37 @@ int native_frame_complete(uint32_t events,uint32_t token) {
         retire_streams(true);++native_frame_state.completions;return 1;
     } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
 }
+int native_capture_texture(const GcWiiNativeTextureCopy* value) {
+    std::unique_lock recording(recording_mutex,std::defer_lock);
+    if(GCNLLR_GX_COOPERATIVE_VI)recording.lock();
+    if(!native_frame_ready())return 0;
+    if(!value || !native_frame_rect(value->x,value->y,value->width,value->height) ||
+       value->format>6 || (value->destination&31u))
+        return reject_native_frame("Unsupported native color texture capture");
+    const auto tile=gcnllr::native_copy_layout(value->format);
+    const uint32_t stride=((value->width+tile.width-1)/tile.width)*tile.bytes;
+    const uint32_t size=stride*((value->height+tile.height-1)/tile.height);
+    GcnllrNativeGxMemory memory{};
+    if(!gcnllr::gx_memory(config,value->destination,size,memory))
+        return reject_native_frame("Native texture capture crosses its coherent memory bank");
+    const gxruntime::gxcore::EfbCopyCommand command{
+        .dest_address=memory.physical_address,.byte_size=size,.format=value->format,
+        .src_x=value->x,.src_y=value->y,.width=value->width,.height=value->height,
+        .destination_width=value->width,.destination_height=value->height};
+    try {
+        flush_geometry();texture_copy(command,stride);return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
 void native_frame_status(GcWiiNativeFrameStatus* value){if(value)*value=native_frame_state;}
 const GcWiiNativeFrameApi native_frame_api={GC_WII_NATIVE_FRAME_ABI,native_frame_clear,native_frame_display_copy,
     native_frame_complete,native_frame_status};
+const GcWiiNativeCaptureApi native_capture_api={GC_WII_NATIVE_CAPTURE_ABI,native_capture_texture};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeFrameApi* gc_wii_native_frame_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_FRAME_ABI && !GCNLLR_GX_FIFO_WORKER?&native_frame_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeCaptureApi* gc_wii_native_capture_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_CAPTURE_ABI && !GCNLLR_GX_FIFO_WORKER?&native_capture_api:nullptr;
 }
 
 namespace {

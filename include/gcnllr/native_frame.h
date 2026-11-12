@@ -63,6 +63,22 @@ typedef struct {
     void (*status)(GcWiiNativeFrameStatus*);
 } GcWiiNativeFrameApi;
 typedef const GcWiiNativeFrameApi* (*GcWiiNativeFrameGetApi)(uint32_t);
+
+/* Unscaled color EFB capture into tightly packed tiled texture memory.
+ * Formats 0..6 are I4/I8/IA4/IA8/RGB565/RGB5A3/RGBA8. No clear, mip chain,
+ * filter, depth conversion or command stream. The RGB8 source is opaque.
+ * Destination aliases resolve through the consumer's coherent memory map;
+ * existing immutable-copy ownership and CPU observation rules apply.
+ * Separate extension: NativeFrame1 and its status layout remain unchanged. */
+#define GC_WII_NATIVE_CAPTURE_ABI 1u
+typedef struct {
+    uint32_t destination,x,y,width,height,format;
+} GcWiiNativeTextureCopy;
+typedef struct {
+    uint32_t abi;
+    int (*texture_copy)(const GcWiiNativeTextureCopy*);
+} GcWiiNativeCaptureApi;
+typedef const GcWiiNativeCaptureApi* (*GcWiiNativeCaptureGetApi)(uint32_t);
 #ifdef __cplusplus
 }
 #endif

@@ -40,6 +40,12 @@ class FrameApi(c.Structure):
 class OutputApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('submit',c.CFUNCTYPE(c.c_int))]
 
+class TextureCopy(c.Structure):
+    _fields_=[(name,c.c_uint32) for name in ('destination','x','y','width','height','format')]
+
+class CaptureApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('copy',c.CFUNCTYPE(c.c_int,c.POINTER(TextureCopy)))]
+
 class VideoApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('idle_dimming',c.CFUNCTYPE(c.c_int,c.c_uint32))]
 
@@ -79,6 +85,7 @@ def main():
     parser.add_argument('--output',action='store_true',help='Qualify owned submission and complete direct/RAM presentation parity')
     parser.add_argument('--video',action='store_true',help='Qualify idle dimming and restoration on actual scanout')
     parser.add_argument('--presentation',action='store_true',help='Qualify immutable title margins and unchanged physical copies')
+    parser.add_argument('--capture',action='store_true',help='Qualify native tiled texture capture and immutable CPU observation')
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
@@ -90,6 +97,12 @@ def main():
     dll.gc_wii_native_frame_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_frame_get_api.restype=c.POINTER(FrameApi)
     assert not dll.gc_wii_native_frame_get_api(2),'Unknown native frame ABI accepted'
     frame=dll.gc_wii_native_frame_get_api(1).contents
+    capture=None
+    if args.capture:
+        dll.gc_wii_native_capture_get_api.argtypes=[c.c_uint32]
+        dll.gc_wii_native_capture_get_api.restype=c.POINTER(CaptureApi)
+        assert not dll.gc_wii_native_capture_get_api(2)
+        capture=dll.gc_wii_native_capture_get_api(1).contents
     video=None
     if args.video:
         dll.gc_wii_native_video_get_api.argtypes=[c.c_uint32]
@@ -214,6 +227,26 @@ def main():
         expect_color('alpha/depth clear preserves color',3,4,(255,0,0),255)
         assert abs(pixel(3,4,1)-0x123456)<=1
         expect_color('partial clear preserves outside pixels',10,4,(0,0,255),255)
+
+        if capture:
+            clear(0,20,4,4,(17,34,51))
+            c.memset(c.addressof(mem1)+0x20000,0xa5,64)
+            texture=TextureCopy(0x90020000,0,20,4,4,6)
+            assert capture.copy(c.byref(texture)),status().error.decode()
+            if not args.eager:
+                texture_token=max(owned)
+                assert owned[texture_token].address==0x10020000
+                assert not any(mem2[0x20000:0x20040]),'Capture eagerly wrote owned memory'
+            clear(0,20,4,4,(0,255,0))
+            assert frame.complete(0,0) and prepare(None,0x10020000,64)
+            expected_tile=bytes((255,17))*16+bytes((34,51))*16
+            assert bytes(mem2[0x20000:0x20040])==expected_tile,'Capture lost tiled color/immutable generation'
+            assert bytes(mem1[0x20000:0x20040])==bytes([0xa5])*64,'Texture capture overwrote another bank'
+            for bad in (TextureCopy(0x90020001,0,20,4,4,6),TextureCopy(0x90020000,639,20,4,4,6),
+                        TextureCopy(0x900fffe0,0,20,4,4,6),TextureCopy(0x90020000,0,20,4,4,14)):
+                assert not capture.copy(c.byref(bad)),'Invalid texture capture accepted'
+            assert bytes(mem2[0x20000:0x20040])==expected_tile,'Rejected capture changed memory'
+            checks.append('native RGBA8 tiled capture preserves bank, snapshot and CPU observation; invalid descriptors reject')
 
         colors=((0,0,255),(255,255,255),(0,255,0),(255,0,0))
         for x in range(16):clear(x,10,1,2,colors[x%4])
@@ -351,7 +384,7 @@ def main():
         assert not frame.clear(c.byref(clear_bad)),'Out-of-EFB clear accepted'
         gx_status=c.create_string_buffer(2048);c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo=struct.unpack_from('Q',gx_status.raw)[0];assert fifo==0,'Native frame emitted commands'
-        fs=status();assert fs.display_copies==4+presentation_copies+(args.efb_height==528) and fs.rejected==4+int(args.presentation), (fs.display_copies,fs.rejected,fs.error)
+        fs=status();assert fs.display_copies==4+presentation_copies+(args.efb_height==528) and fs.rejected==4+int(args.presentation)+4*int(args.capture), (fs.display_copies,fs.rejected,fs.error)
         result={'component_only':True,'game_qualified':False,'performance_qualified':False,'native_frame_abi':1,
             'library_sha256':hashlib.sha256(args.library.read_bytes()).hexdigest(),'fifo_bytes':fifo,'eager':args.eager,
             'efb_height':args.efb_height,

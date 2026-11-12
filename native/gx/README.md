@@ -61,10 +61,19 @@ texture rewrites, saturation and explicit unsupported-input rejection.
 
 `gc_wii_native_gui_mask_get_api` adds two-image color/coverage materials. It
 recolors a primary image, applies independently transformed mask alpha and byte
-opacity, and optionally multiplies RGB by the mask. Primary alpha and pane tint
-are excluded from this named family. Add `--mask` for actual pixel checks of
-coverage, opacity, RGB masking and independent coordinates. Existing API layouts
+opacity, and optionally multiplies RGB by the mask or pane. Primary alpha and
+pane alpha are excluded from this named family. Add `--mask` for actual pixel checks of
+coverage, opacity, RGB masking and independent coordinates. The mutually
+exclusive pane-RGB mode retains pane RGB while ignoring pane alpha. Existing API layouts
 remain unchanged.
+
+`gc_wii_native_capture_get_api(1)` accepts an unscaled color EFB rectangle and
+a coherent tiled-texture destination, reusing the copy backend and immutable
+ownership without command submission. Formats 0 through 6 are supported;
+depth, scaling, clearing and mip chains reject. Frame1 layouts remain unchanged.
+`test_native_frame_gpu.py --capture` checks actual RGBA8 tiled bytes, bank
+isolation, immutable capture after subsequent clears and invalid descriptors.
+Run both the retained-owner profile and `--eager` for CPU-backed consumers.
 
 `gc_wii_native_gui_effects_get_api` provides complete alpha-cutoff, two-image
 additive and alpha-product materials. It shares the same draw owner, mesh
