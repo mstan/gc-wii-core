@@ -265,6 +265,8 @@ static DWORD WINAPI audio_worker_main(void* unused) {
     if (FAILED(hr)) goto init_failed;
     hr = ISimpleAudioVolume_SetMute(volume,s_stats.output_muted,NULL);
     if (FAILED(hr)) goto init_failed;
+    hr = ISimpleAudioVolume_SetMasterVolume(volume,s_stats.output_volume/100.0f,NULL);
+    if (FAILED(hr)) goto init_failed;
 
     EnterCriticalSection(&s_audio_lock);
     s_start_hr = S_OK;
@@ -394,6 +396,17 @@ bool gcn_host_audio_start(u32 sample_rate) {
     s_stats.enabled = requested;
     const char* mute = getenv("GCN_AUDIO_MUTE");
     s_stats.output_muted = mute && *mute && *mute != '0';
+    s_stats.output_volume = 100;
+    const char* level = getenv("GCN_AUDIO_VOLUME");
+    if (level && *level) {
+        char* end;
+        long value = strtol(level,&end,10);
+        if (*end || value < 0 || value > 100) {
+            fprintf(stderr,"gcn audio: GCN_AUDIO_VOLUME must be 0..100\n");
+            return false;
+        }
+        s_stats.output_volume = (u32)value;
+    }
     s_stats.sample_rate = sample_rate;
     bool capturing = capture_start(sample_rate);
     if (!requested)

@@ -6,6 +6,13 @@
 #include <stdlib.h>
 
 static int failures;
+static void volume_env(const char* value) {
+#ifdef _WIN32
+    _putenv_s("GCN_AUDIO_VOLUME",value);
+#else
+    setenv("GCN_AUDIO_VOLUME",value,1);
+#endif
+}
 #define CHECK(cond, msg) do { \
     if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); ++failures; } \
     else { fprintf(stdout, "PASS: %s\n", msg); } \
@@ -39,6 +46,7 @@ int main(void) {
     setenv("GCN_AUDIO", "0", 1);
     unsetenv("GCN_AUDIO_CAPTURE");
 #endif
+    volume_env("100");
     gcn_host_audio_start(32000);
     gcn_host_audio_submit_be_s16(NULL, be_pcm, sizeof be_pcm);
     GcnHostAudioStats complete;
@@ -46,6 +54,25 @@ int main(void) {
     CHECK(complete.emulated_frames == 2 && complete.pcm_hash == 7160345683946154871ull,
           "PCM fingerprint covers actual ordered samples with host output disabled");
     gcn_host_audio_stop();
+
+    const char* levels[]={"37","0"};
+    for(unsigned i=0;i<2;++i) {
+        volume_env(levels[i]);
+        gcn_host_audio_start(32000);
+        gcn_host_audio_submit_be_s16(NULL,be_pcm,sizeof be_pcm);
+        GcnHostAudioStats adjusted;
+        gcn_host_audio_get_stats(&adjusted);
+        CHECK(adjusted.output_volume==(i?0u:37u),"host volume setting reaches the sink");
+        CHECK(adjusted.pcm_hash==complete.pcm_hash &&
+              adjusted.emulated_frames==complete.emulated_frames,
+              "host volume does not modify emulated PCM");
+        gcn_host_audio_stop();
+    }
+    volume_env("101");
+    CHECK(!gcn_host_audio_start(32000),"out-of-range host volume is rejected");
+    volume_env("bad");
+    CHECK(!gcn_host_audio_start(32000),"malformed host volume is rejected");
+    volume_env("100");
     gcn_host_audio_start(32000);
     gcn_host_audio_submit_be_s16(NULL, be_pcm, 4);
     gcn_host_audio_submit_be_s16(NULL, be_pcm + 4, 4);
