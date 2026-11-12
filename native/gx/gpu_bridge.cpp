@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -34,6 +35,8 @@
 #endif
 
 namespace aurora::gfx {
+void machine_raster_targets(const webgpu::TextureWithSampler&,const webgpu::TextureWithSampler&,
+    const webgpu::TextureWithSampler&,uint32_t);
 void machine_copy_clear(const wgpu::RenderPipeline&,ClipRect,wgpu::Color,float);
 void machine_encode_after_resolve(std::function<void(wgpu::CommandEncoder&)>);
 void machine_encode_tail(std::function<void(wgpu::CommandEncoder&)>);
@@ -43,7 +46,13 @@ namespace gcnllr::gpu_bridge {
 namespace gfx=aurora::gfx;
 namespace gpu=aurora::webgpu;
 namespace worker=aurora::gfx::render_worker;
-struct PresentationFrame {uint32_t source{},width{},height{},stock_width{};std::vector<uint8_t> rgba;};
+struct PresentationFrame {
+    uint32_t source{},width{},height{},stock_width{};
+    std::vector<uint8_t> rgba;
+    // Encoded at the real raster grid, never reconstructed from stock pixels.
+    std::shared_ptr<gpu::TextureWithSampler> raster;
+    uint32_t raster_width{},raster_height{};
+};
 static std::shared_ptr<const PresentationFrame> pending_presentation;
 struct EncodedImage {
     uint32_t width{},height{};
@@ -51,6 +60,8 @@ struct EncodedImage {
     std::shared_ptr<const PresentationFrame> presentation;
 };
 static gpu::TextureWithSampler scanout;
+static gpu::TextureWithSampler raster_color,raster_resolved,raster_depth;
+static uint32_t raster_scale=1;
 static std::shared_ptr<gpu::TextureWithSampler> presentation_output;
 static wgpu::Buffer presentation_pixels;
 static uint64_t presentation_capacity{};
@@ -86,7 +97,7 @@ static wgpu::Buffer readback_buffer;
 static uint64_t readback_capacity{};
 static wgpu::Buffer display_encoded;
 static uint64_t display_encoded_capacity{};
-static wgpu::ComputePipeline display_encoder;
+static wgpu::ComputePipeline display_encoder,raster_display_encoder;
 static wgpu::Buffer scanout_input;
 static uint64_t scanout_input_capacity{};
 static wgpu::ComputePipeline scanout_decoder;
@@ -95,7 +106,8 @@ static bool idle_dimming{}; // machine-owner state, captured by each presentatio
 void set_idle_dimming(bool enabled){idle_dimming=enabled;}
 struct DisplayBand {
     gfx::TextureHandle texture;
-    uint32_t width{},height{},first_row{};
+    wgpu::TextureView raster_view;
+    uint32_t width{},height{},first_row{},filter_step{1},origin_x{},minimum_y{},maximum_y{};
     std::array<uint32_t,3> weights{};
     EncodedImageHandle encoded;
     std::shared_ptr<const PresentationFrame> presentation;
@@ -124,13 +136,34 @@ void submit_copies() {
 #endif
 }
 static wgpu::Buffer display_parameters(const DisplayBand& band) {
-    const std::array<uint32_t,8> values{band.weights[0],band.weights[1],band.weights[2],band.first_row,
-        band.width,band.height,0,0};
+    const std::array<uint32_t,12> values{band.weights[0],band.weights[1],band.weights[2],band.first_row,
+        band.width,band.height,0,band.filter_step,band.origin_x,band.minimum_y,band.maximum_y,0};
     const wgpu::BufferDescriptor descriptor{.label="Immutable GameCube copy filter",
         .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof(values)};
     auto buffer=gpu::g_device.CreateBuffer(&descriptor);
     gpu::g_queue.WriteBuffer(buffer,0,values.data(),sizeof(values));
     return buffer;
+}
+static std::shared_ptr<gpu::TextureWithSampler> new_raster_display(uint32_t width,uint32_t height) {
+    auto image=std::make_shared<gpu::TextureWithSampler>();
+    image->size={width,height,1};image->format=wgpu::TextureFormat::RGBA8Unorm;
+    const wgpu::TextureDescriptor desc{.label="Immutable high-resolution display generation",
+        .usage=wgpu::TextureUsage::StorageBinding|wgpu::TextureUsage::TextureBinding,
+        .size=image->size,.format=image->format};
+    image->texture=gpu::g_device.CreateTexture(&desc);image->view=image->texture.CreateView();return image;
+}
+static void encode_raster_display(wgpu::CommandEncoder& encoder,const DisplayBand& band,
+        const gpu::TextureWithSampler& output) {
+    const auto parameters=display_parameters(band);
+    const std::array entries{
+        wgpu::BindGroupEntry{.binding=0,.textureView=band.raster_view},
+        wgpu::BindGroupEntry{.binding=1,.textureView=output.view},
+        wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=48}};
+    const wgpu::BindGroupDescriptor binding{.layout=raster_display_encoder.GetBindGroupLayout(0),
+        .entryCount=entries.size(),.entries=entries.data()};
+    auto pass=encoder.BeginComputePass();pass.SetPipeline(raster_display_encoder);
+    pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
+    pass.DispatchWorkgroups((band.width/2+15)/16,(band.height+7)/8);pass.End();
 }
 static size_t pending_displays{};
 // Same integer BT.601 conversion as the portable CPU copy. The storage word
@@ -138,20 +171,24 @@ static size_t pending_displays{};
 static constexpr char display_encode_shader[]=R"(
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> dst: array<u32>;
-struct CopyParameters { weights: vec4<u32>, geometry: vec4<u32> };
+struct CopyParameters { weights: vec4<u32>, geometry: vec4<u32>, origin:vec4<u32> };
 @group(0) @binding(2) var<uniform> parameters: CopyParameters;
 fn rgb(x: i32,y: i32) -> vec3<i32> {
     let size=textureDimensions(src);
-    return vec3<i32>(textureLoad(src,clamp(vec2<i32>(x,y),vec2<i32>(0),vec2<i32>(size)-1),0).rgb*255.0+0.5);
+    let maximum=select(size.y-1u,parameters.origin.z,parameters.origin.z!=0u);
+    let row=clamp(y,i32(parameters.origin.y),i32(maximum));
+    return vec3<i32>(textureLoad(src,vec2<i32>(clamp(x,0,i32(size.x)-1),row),0).rgb*255.0+0.5);
 }
 fn filtered(x: i32,y: i32) -> vec3<i32> {
     let row=y+i32(parameters.weights.w);
-    let middle=rgb(x,row);
+    let column=x+i32(parameters.origin.x);
+    let middle=rgb(column,row);
     let weights=parameters.weights.xyz;
     // The SDK's middle-only taps sum to64. Preserve the fast identity path;
     // every other set, including all-zero taps, follows integer arithmetic.
     if (all(weights==vec3<u32>(0u,64u,0u))) { return middle; }
-    let sum=rgb(x,row-1)*i32(weights.x)+middle*i32(weights.y)+rgb(x,row+1)*i32(weights.z);
+    let neighbor=i32(parameters.geometry.w);
+    let sum=rgb(column,row-neighbor)*i32(weights.x)+middle*i32(weights.y)+rgb(column,row+neighbor)*i32(weights.z);
     return min(sum>>vec3<u32>(6u),vec3<i32>(255));
 }
 fn yuv(rgb: vec3<i32>) -> vec3<i32> {
@@ -207,6 +244,28 @@ void initialize() {
     const wgpu::ComputePipelineDescriptor pipeline_descriptor{.label="GameCube exact YUY2 encode",
         .compute={.module=module,.entryPoint="main"}};
     display_encoder=gpu::g_device.CreateComputePipeline(&pipeline_descriptor);
+    // Keep high-resolution display pixels in a texture: no full-frame storage
+    // buffer binding or CPU upload whose size would prevent 16x rendering.
+    std::string enhanced_code=display_encode_shader;
+    const auto replace=[&](const char* from,const char* to) {
+        const auto at=enhanced_code.find(from);
+        if(at==std::string::npos)throw std::runtime_error("Raster conversion shader differs");
+        enhanced_code.replace(at,std::strlen(from),to);
+    };
+    replace("var<storage, read_write> dst: array<u32>;","var dst:texture_storage_2d<rgba8unorm,write>;");
+    replace("dst[id.y*(size.x/2u)+id.x]=y0|(u<<8u)|(y1<<16u)|(v<<24u);",R"(
+    let chroma=vec3<i32>(409*(i32(v)-128)+128,-100*(i32(u)-128)-208*(i32(v)-128)+128,516*(i32(u)-128)+128);
+    for(var n=0u;n<2u;n++) {
+        let c=298*(i32(select(y0,y1,n!=0u))-16);
+        let rgb=clamp((vec3<i32>(c)+chroma)>>vec3<u32>(8u),vec3<i32>(0),vec3<i32>(255));
+        textureStore(dst,vec2<i32>(i32(id.x*2u+n),i32(id.y)),vec4<f32>(vec3<f32>(rgb)/255.0,1.0));
+    })");
+    source.code=enhanced_code.c_str();
+    const wgpu::ShaderModuleDescriptor raster_module{.nextInChain=&source,.label="High-resolution copy and VI color"};
+    const wgpu::ComputePipelineDescriptor raster_pipeline{.label="High-resolution display conversion",
+        .compute={.module=gpu::g_device.CreateShaderModule(&raster_module),.entryPoint="main"}};
+    raster_display_encoder=gpu::g_device.CreateComputePipeline(&raster_pipeline);
+
     source.code=scanout_decode_shader;
     const auto decode_module=gpu::g_device.CreateShaderModule(&module_descriptor);
     const wgpu::ComputePipelineDescriptor decode_descriptor{.label="GameCube exact VI decode",
@@ -243,6 +302,77 @@ void initialize() {
         if (!gfx::get_pipeline(ref,pipeline) || !pipeline)
             throw std::runtime_error("Native GPU fallback pipeline did not compile");
     }
+}
+bool raster_size(uint32_t* width,uint32_t* height) {
+    if(!width || !height)return false;
+    const auto& target=raster_scale>1?raster_color:gpu::g_frameBuffer;
+    *width=target.size.width;*height=target.size.height;return *width && *height;
+}
+bool set_internal_scale(uint32_t scale) {
+    wgpu::Limits limits{};gpu::g_device.GetLimits(&limits);
+    if(scale<1 || scale>16 || efb_width*scale>limits.maxTextureDimension2D ||
+       efb_height*scale>limits.maxTextureDimension2D)return false;
+    finish();
+    // The native authority is never resized or overwritten by this operation.
+    const auto color=gpu::g_graphicsConfig.msaaSamples>1?gpu::g_frameBufferResolved:gpu::g_frameBuffer;
+    const auto depth=gpu::g_depthBuffer;
+    raster_scale=scale;
+    if(scale==1) {
+        raster_color={};raster_resolved={};raster_depth={};
+        gfx::machine_raster_targets({},{},{},1);return gfx::begin_frame(true);
+    }
+    const uint32_t width=efb_width*scale,height=efb_height*scale;
+    raster_color=gpu::create_render_texture(width,height,true);
+    raster_resolved=gpu::g_graphicsConfig.msaaSamples>1?gpu::create_render_texture(width,height,false):raster_color;
+    const wgpu::TextureDescriptor depth_desc{.label="Independent high-resolution depth",
+        .usage=wgpu::TextureUsage::RenderAttachment|wgpu::TextureUsage::TextureBinding,
+        .size={width,height,1},.format=depth.format,.sampleCount=gpu::g_graphicsConfig.msaaSamples};
+    raster_depth.size=depth_desc.size;raster_depth.format=depth_desc.format;
+    raster_depth.texture=gpu::g_device.CreateTexture(&depth_desc);raster_depth.view=raster_depth.texture.CreateView();
+    const auto target=raster_color;const auto target_depth=raster_depth;const auto resolved=raster_resolved;
+    worker::enqueue_work([color,depth,target,target_depth,resolved] {
+        std::string code=R"(
+@group(0) @binding(0) var color:texture_2d<f32>;
+@group(0) @binding(1) var depth:)";
+        code+=gpu::g_graphicsConfig.msaaSamples>1?"texture_depth_multisampled_2d;":"texture_depth_2d;";
+        code+=R"(
+@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32> {
+    let x=f32((i<<1u)&2u);let y=f32(i&2u);return vec4<f32>(x*2.0-1.0,1.0-y*2.0,0.0,1.0);
+}
+struct Output { @location(0) color:vec4<f32>, @builtin(frag_depth) depth:f32 };
+@fragment fn fs(@builtin(position) p:vec4<f32>)->Output {
+    let size=textureDimensions(color);
+    let xy=min(vec2<u32>(p.xy*vec2<f32>(size)/vec2<f32>()";
+        code+=std::to_string(target.size.width)+","+std::to_string(target.size.height);
+        code+=R"()),size-1u);
+    return Output(textureLoad(color,vec2<i32>(xy),0),textureLoad(depth,vec2<i32>(xy),0));
+})";
+        wgpu::ShaderSourceWGSL source{};source.code=code.c_str();
+        const wgpu::ShaderModuleDescriptor shader_desc{.nextInChain=&source,.label="Preserve EFB across raster scale"};
+        const auto shader=gpu::g_device.CreateShaderModule(&shader_desc);
+        const wgpu::ColorTargetState color_state{.format=target.format};
+        const wgpu::FragmentState fragment{.module=shader,.entryPoint="fs",.targetCount=1,.targets=&color_state};
+        const wgpu::DepthStencilState depth_state{.format=target_depth.format,.depthWriteEnabled=true,.depthCompare=wgpu::CompareFunction::Always};
+        const wgpu::RenderPipelineDescriptor pipeline_desc{
+            .label="Preserve raster color and depth",.vertex={.module=shader,.entryPoint="vs"},
+            .depthStencil=&depth_state,.multisample={.count=gpu::g_graphicsConfig.msaaSamples},.fragment=&fragment};
+        const auto pipeline=gpu::g_device.CreateRenderPipeline(&pipeline_desc);
+        const std::array entries{wgpu::BindGroupEntry{.binding=0,.textureView=color.view},
+            wgpu::BindGroupEntry{.binding=1,.textureView=depth.view}};
+        const wgpu::BindGroupDescriptor binding{.layout=pipeline.GetBindGroupLayout(0),.entryCount=entries.size(),.entries=entries.data()};
+        const wgpu::RenderPassColorAttachment attachment{.view=target.view,
+            .resolveTarget=gpu::g_graphicsConfig.msaaSamples>1?resolved.view:nullptr,
+            .loadOp=wgpu::LoadOp::Load,.storeOp=wgpu::StoreOp::Store};
+        const wgpu::RenderPassDepthStencilAttachment depth_attachment{.view=target_depth.view,
+            .depthLoadOp=wgpu::LoadOp::Load,.depthStoreOp=wgpu::StoreOp::Store};
+        const wgpu::RenderPassDescriptor pass_desc{.colorAttachmentCount=1,.colorAttachments=&attachment,.depthStencilAttachment=&depth_attachment};
+        auto encoder=gpu::g_device.CreateCommandEncoder();auto pass=encoder.BeginRenderPass(&pass_desc);
+        pass.SetPipeline(pipeline);pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));pass.Draw(3);pass.End();
+        const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
+    });
+    worker::synchronize();
+    gfx::machine_raster_targets(raster_color,raster_resolved,raster_depth,raster_scale);
+    return gfx::begin_frame(true);
 }
 bool settle_framebuffer() {
     // Aurora's first begin binds the window-sized EFB before VI's pending
@@ -304,14 +434,31 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     auto& band=display_bands[pending_displays++];
     band.presentation=std::move(pending_presentation);
     band.width=copy.width;band.height=copy.height;band.first_row=above;band.weights=weights;
-    if (!band.texture || band.texture->size.width!=copy.width || band.texture->size.height!=capture_height)
-        band.texture=gfx::new_render_texture(copy.width,capture_height,GX_TF_RGBA8,"GameCube display band and filter halo");
     const auto& fb=gpu::g_frameBuffer;
+    const uint32_t scale=raster_scale;
+    band.filter_step=1;band.first_row=above;
+    band.raster_view={};band.origin_x=band.minimum_y=band.maximum_y=0;
+    if (!band.texture || band.texture->size.width!=copy.width || band.texture->size.height!=capture_height)
+        band.texture=gfx::new_render_texture(copy.width,capture_height,GX_TF_RGBA8,"GameCube native display band and filter halo");
     const gfx::ClipRect capture_rect{int(copy.src_x*fb.size.width/efb_width),int(capture_y*fb.size.height/efb_height),
         int(copy.width*fb.size.width/efb_width),int(capture_height*fb.size.height/efb_height)};
-    if (capture_rect.width!=int(copy.width) || capture_rect.height!=int(capture_height))
-        throw std::runtime_error("Display-band GPU scaling is unsupported");
     gfx::resolve_pass(band.texture,capture_rect,false,false,false,{},0,GX_TF_RGBA8);
+    if(scale>1) {
+        auto frame=band.presentation?std::make_shared<PresentationFrame>(*band.presentation):std::make_shared<PresentationFrame>();
+        frame->source=copy.dest_address&0x1fffffffu;
+        frame->raster_width=copy.width*scale;frame->raster_height=copy.height*scale;
+        frame->raster=new_raster_display(frame->raster_width,frame->raster_height);
+        auto enhanced=band;enhanced.width=frame->raster_width;enhanced.height=frame->raster_height;
+        enhanced.raster_view=raster_resolved.view;
+        enhanced.filter_step=scale;enhanced.first_row=copy.src_y*scale;enhanced.origin_x=copy.src_x*scale;
+        enhanced.minimum_y=capture_y*scale;enhanced.maximum_y=(capture_y+capture_height)*scale-1;
+        const auto buffer=frame->raster;
+        gfx::machine_encode_after_resolve([enhanced,buffer](wgpu::CommandEncoder& encoder) {
+            try {encode_raster_display(encoder,enhanced,*buffer);}
+            catch(...) {std::lock_guard lock(submission_mutex);if(!submission_error)submission_error=std::current_exception();}
+        });
+        band.presentation=std::move(frame);
+    }
     record_copy_clear(copy);
     // The GPU snapshot and filter metadata are immutable before publication.
     // Encoding may happen later; it never samples the mutable EFB again.
@@ -327,9 +474,9 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
       try {
         const auto parameters=display_parameters(band);
         const std::array entries{
-            wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->texture.CreateView()},
+            wgpu::BindGroupEntry{.binding=0,.textureView=band.raster_view?band.raster_view:band.texture->texture.CreateView()},
             wgpu::BindGroupEntry{.binding=1,.buffer=image->buffer,.size=bytes},
-            wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=32}};
+            wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=48}};
         const wgpu::BindGroupDescriptor binding{.layout=display_encoder.GetBindGroupLayout(0),
             .entryCount=entries.size(),.entries=entries.data()};
         auto pass=encoder.BeginComputePass();pass.SetPipeline(display_encoder);
@@ -379,10 +526,10 @@ std::vector<CopiedImage> take_display_copies() {
             const auto& band=bands[i];
             const auto parameters=display_parameters(band);
             const std::array entries{
-                wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->texture.CreateView()},
+                wgpu::BindGroupEntry{.binding=0,.textureView=band.raster_view?band.raster_view:band.texture->texture.CreateView()},
                 wgpu::BindGroupEntry{.binding=1,.buffer=display_encoded,.offset=offsets[i],
                     .size=uint64_t(band.width)*2*band.height},
-                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=32}};
+                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=48}};
             const wgpu::BindGroupDescriptor descriptor{.layout=display_encoder.GetBindGroupLayout(0),
                 .entryCount=entries.size(),.entries=entries.data()};
             pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&descriptor));
@@ -439,9 +586,9 @@ std::vector<EncodedImageHandle> retain_display_copies() {
             image->buffer=gpu::g_device.CreateBuffer(&descriptor);
             const auto parameters=display_parameters(band);
             const std::array entries{
-                wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->texture.CreateView()},
+                wgpu::BindGroupEntry{.binding=0,.textureView=band.raster_view?band.raster_view:band.texture->texture.CreateView()},
                 wgpu::BindGroupEntry{.binding=1,.buffer=image->buffer,.size=bytes},
-                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=32}};
+                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=48}};
             const wgpu::BindGroupDescriptor binding{.layout=display_encoder.GetBindGroupLayout(0),
                 .entryCount=entries.size(),.entries=entries.data()};
             pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
@@ -685,21 +832,30 @@ static constexpr char presentation_shader[]=R"(
 @group(0) @binding(0) var<storage,read> view:array<u32>;
 @group(0) @binding(1) var stock:texture_2d<f32>;
 @group(0) @binding(2) var output:texture_storage_2d<rgba8unorm,write>;
-@group(0) @binding(3) var<uniform> info:vec4<u32>;
+struct PresentationInfo { view:vec4<u32>, raster:vec4<u32> };
+@group(0) @binding(3) var<uniform> info:PresentationInfo;
+@group(0) @binding(4) var raster:texture_2d<f32>;
 @compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) p:vec3<u32>) {
     let size=textureDimensions(output);let base=textureDimensions(stock);
     if(p.x>=size.x || p.y>=size.y){return;}
-    let left=(size.x-base.x)/2u;let margin=(info.x-info.z)/2u;
+    let center=info.raster.z;let left=(size.x-center)/2u;
+    let margin=(info.view.x-info.view.z)/2u;
     var color:vec4<f32>;
-    if(p.x>=left && p.x<left+base.x) {
-        color=textureLoad(stock,vec2<i32>(i32(p.x-left),i32(p.y)),0);
+    if(p.x>=left && p.x<left+center) {
+        if(info.raster.x!=0u) {
+            let xy=vec2<u32>((p.x-left)*info.raster.x/center,p.y*info.raster.y/size.y);
+            color=textureLoad(raster,vec2<i32>(xy),0);
+            color=vec4<f32>(color.rgb*select(1.0,0.25,info.view.w!=0u),color.a);
+        } else {
+            color=textureLoad(stock,vec2<i32>(i32(p.x-left),i32(p.y)),0);
+        }
     }else {
         var x:u32;
         if(p.x<left){x=p.x*margin/left;}
-        else{x=margin+info.z+(p.x-left-base.x)*margin/(size.x-left-base.x);}
-        let y=min(p.y*info.y/size.y,info.y-1u);
-        let word=view[y*info.x+min(x,info.x-1u)];
-        let level=select(1.0,0.25,info.w!=0u);
+        else{x=margin+info.view.z+(p.x-left-center)*margin/(size.x-left-center);}
+        let y=min(p.y*info.view.y/size.y,info.view.y-1u);
+        let word=view[y*info.view.x+min(x,info.view.x-1u)];
+        let level=select(1.0,0.25,info.view.w!=0u);
         color=vec4<f32>(vec3<f32>(f32(word&255u),f32((word>>8u)&255u),f32((word>>16u)&255u))*level/255.0,1.0);
     }
     textureStore(output,vec2<i32>(p.xy),color);
@@ -707,11 +863,21 @@ static constexpr char presentation_shader[]=R"(
 static std::shared_ptr<gpu::TextureWithSampler> prepare_presentation(const gpu::TextureWithSampler& stock,
         const std::shared_ptr<const PresentationFrame>& input) {
     presentation_shown=false;
-    if(!input || input->rgba.empty())return {};
+    if(!input || (input->rgba.empty() && !input->raster))return {};
     const auto& frame=*input;
-    const uint32_t width=(uint32_t(uint64_t(stock.size.width)*frame.width/frame.stock_width)+1u)&~1u;
-    const uint32_t height=stock.size.height;
-    if(width<=stock.size.width)return {};
+    const uint32_t center=frame.raster?frame.raster_width:stock.size.width;
+    uint32_t width=frame.rgba.empty()?center:
+        (uint32_t(uint64_t(center)*frame.width/frame.stock_width)+1u)&~1u;
+    uint32_t height=frame.raster?frame.raster_height:stock.size.height;
+    // Preserve aspect when a very wide 16x composite exceeds one texture's
+    // extent. The scene still rasterizes at full scale; only final display
+    // composition is reduced to the device's maximum presentable extent.
+    wgpu::Limits limits{};gpu::g_device.GetLimits(&limits);
+    const uint32_t extent=std::max(width,height);
+    if(extent>limits.maxTextureDimension2D) {
+        width=uint32_t(uint64_t(width)*limits.maxTextureDimension2D/extent)&~1u;
+        height=std::max(1u,uint32_t(uint64_t(height)*limits.maxTextureDimension2D/extent));
+    }
     if(!presentation_pipeline) {
         wgpu::ShaderSourceWGSL source{};source.code=presentation_shader;
         const wgpu::ShaderModuleDescriptor module{.nextInChain=&source,.label="Native title presentation"};
@@ -734,10 +900,11 @@ static std::shared_ptr<gpu::TextureWithSampler> prepare_presentation(const gpu::
         next->view=next->texture.CreateView();next->sampler=stock.sampler;
         presentation_output=std::move(next);
     }
-    if(!presentation_pixels || presentation_capacity<frame.rgba.size()) {
+    const uint64_t upload_bytes=std::max<uint64_t>(4,frame.rgba.size());
+    if(!presentation_pixels || presentation_capacity<upload_bytes) {
         const wgpu::BufferDescriptor desc{.label="Native title view pixels",
-            .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopyDst,.size=frame.rgba.size()};
-        presentation_pixels=gpu::g_device.CreateBuffer(&desc);presentation_capacity=frame.rgba.size();
+            .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopyDst,.size=upload_bytes};
+        presentation_pixels=gpu::g_device.CreateBuffer(&desc);presentation_capacity=upload_bytes;
     }
     presentation_shown=true;return presentation_output;
 }
@@ -746,15 +913,17 @@ static void encode_presentation(wgpu::CommandEncoder& encoder,const gpu::Texture
         const PresentationFrame& frame,bool dimmed) {
     // Upload on the submission owner, after the preceding frame's submission.
     // Every queued frame retains its own immutable source and GPU handles.
-    gpu::g_queue.WriteBuffer(pixels,0,frame.rgba.data(),frame.rgba.size());
-    const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(dimmed)};
+    if(!frame.rgba.empty())gpu::g_queue.WriteBuffer(pixels,0,frame.rgba.data(),frame.rgba.size());
+    const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(dimmed),
+        frame.raster_width,frame.raster_height,frame.raster?uint32_t(uint64_t(output.size.height)*frame.raster_width/frame.raster_height):stock.size.width,0};
     const wgpu::BufferDescriptor uniform_desc{.label="Native title view geometry",
         .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof words};
     auto uniform=gpu::g_device.CreateBuffer(&uniform_desc);gpu::g_queue.WriteBuffer(uniform,0,words,sizeof words);
-    const std::array entries{wgpu::BindGroupEntry{.binding=0,.buffer=pixels,.size=frame.rgba.size()},
+    const std::array entries{wgpu::BindGroupEntry{.binding=0,.buffer=pixels,.size=std::max<uint64_t>(4,frame.rgba.size())},
         wgpu::BindGroupEntry{.binding=1,.textureView=stock.view},
         wgpu::BindGroupEntry{.binding=2,.textureView=output.view},
-        wgpu::BindGroupEntry{.binding=3,.buffer=uniform,.size=sizeof words}};
+        wgpu::BindGroupEntry{.binding=3,.buffer=uniform,.size=sizeof words},
+        wgpu::BindGroupEntry{.binding=4,.textureView=frame.raster?frame.raster->view:stock.view}};
     const wgpu::BindGroupDescriptor binding{.layout=pipeline.GetBindGroupLayout(0),
         .entryCount=entries.size(),.entries=entries.data()};
     auto pass=encoder.BeginComputePass();
@@ -902,6 +1071,7 @@ void release() {
         unsigned(GCNLLR_BATCHED_SUBMISSION),(unsigned long long)recorded_encodes,
         (unsigned long long)observation_submissions,(unsigned long long)publication_joins);
     worker::synchronize();release_depth();
+    gfx::machine_raster_targets({},{},{},1);raster_color={};raster_resolved={};raster_depth={};raster_scale=1;
     worker::synchronize();scanout={};clear_pipelines={};pixels.clear();readback_buffer={};readback_capacity=0;
     pending_presentation.reset();frame_presentation.reset();cpu_presentations.clear();presentation_shown=false;
     presentation_source_selected=false;presentation_source_address=0;
@@ -909,7 +1079,7 @@ void release() {
 #if GCNLLR_QUEUED_PRESENT
     queued_scanout.reset();
 #endif
-    display_encoded={};display_encoded_capacity=0;display_encoder={};
+    display_encoded={};display_encoded_capacity=0;display_encoder={};raster_display_encoder={};
     scanout_input={};scanout_input_capacity=0;scanout_decoder={};scanout_levels={};idle_dimming=false;
     display_bands.clear();pending_displays=0;
 #ifdef _WIN32

@@ -127,3 +127,18 @@ captures the selected immutable brightness uniform, including queued and owned
 scanouts. Unknown ABI versions and modes reject without changing state.
 `test_native_frame_gpu.py --output --video --efb-height 528` verifies dimming,
 exact restoration and direct/materialized presentation parity on the real GPU.
+
+Optional `gc_wii_native_resolution_get_api(1)` selects an integer display raster
+scale between frames and reports its actual attachment dimensions. One prepared
+native draw stream is encoded into the original EFB and an independent display
+target. Original EFB color/depth, tiled captures, XFB bytes and CPU observations
+remain authoritative and independent of display scale. Display copies retain
+their own high-resolution generation through later clears and scale edits.
+The extension performs no extra guest scene traversal or CPU image rendering.
+Bitmap textures retain their original detail. Scale 1 uses the original route.
+Hardware texture limits reject unsupported scales before replacing targets;
+very wide final composites keep their aspect within the device texture extent.
+`test_native_frame_gpu.py --resolution 2 --efb-height 528 --capture --output`
+checks actual subpixel raster detail, original copy contracts, live edits and
+immutable presentation. These are component checks, separate from title-wide
+correctness, renderer coverage and sustained performance qualification.

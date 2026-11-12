@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#include <gcnllr/native_resolution.h>
+static uint32_t internal_scale=1;
 #include "gcnllr/native_gx.h"
 #include "memory.hpp"
 #include "texture_encode.hpp"
@@ -886,7 +888,7 @@ int start(const GcnllrNativeGxConfig* input) {
         GXRenderModeObj mode{};mode.viTVmode=VI_TVMODE_NTSC_PROG;
         mode.fbWidth=mode.viWidth=640;mode.efbHeight=mode.xfbHeight=mode.viHeight=480;
         VIConfigure(&mode);
-        aurora_set_frame_buffer_scale(1.0f);
+        aurora_set_frame_buffer_scale(1.0f);internal_scale=1;
         /* The machine owns a fixed physical EFB; resizing the presentation window
          * must not expand its raster grid to the host window's aspect. */
         aurora::window::set_frame_buffer_aspect_fit(true);
@@ -1306,6 +1308,24 @@ const GcWiiNativeVideoApi native_video_api={GC_WII_NATIVE_VIDEO_ABI,native_idle_
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeVideoApi* gc_wii_native_video_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_VIDEO_ABI?&native_video_api:nullptr;
+}
+namespace {
+int resolution_set(uint32_t scale) {
+    if(!initialized || failed.load() || !frame_open || scale<1 || scale>16)return 0;
+    if(scale==internal_scale)return 1;
+    if(fifo_worker)return 0;
+    try {
+        if(!drain() || !gcnllr::gpu_bridge::set_internal_scale(scale))return 0;
+        ++efb_generation;internal_scale=scale;return 1;
+    }catch(const std::exception& e){fail(e.what());return 0;}
+}
+int resolution_size(uint32_t* width,uint32_t* height) {
+    return initialized && !failed.load() && gcnllr::gpu_bridge::raster_size(width,height);
+}
+const GcWiiNativeResolutionApi resolution_api={GC_WII_NATIVE_RESOLUTION_ABI,resolution_set,resolution_size};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeResolutionApi* gc_wii_native_resolution_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_RESOLUTION_ABI?&resolution_api:nullptr;
 }
 namespace {
 int presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* frame) {

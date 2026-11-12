@@ -16,6 +16,8 @@ void select_presentation_source(uint32_t);
 bool presentation_matches_copy(uint32_t);
 bool read_presentation(uint8_t*,uint32_t,uint32_t*,uint32_t*);
 bool settle_framebuffer();
+bool set_internal_scale(uint32_t);
+bool raster_size(uint32_t*,uint32_t*);
 struct CopiedImage {uint32_t width{},height{};std::vector<uint8_t> yuy2;};
 struct EncodedImage;
 using EncodedImageHandle=std::shared_ptr<const EncodedImage>;

@@ -61,6 +61,11 @@ class PresentationApi(c.Structure):
         ('read',c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.POINTER(c.c_uint32),c.POINTER(c.c_uint32)))]
 
 
+class ResolutionApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('set_scale',c.CFUNCTYPE(c.c_int,c.c_uint32)),
+              ('raster_size',c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint32),c.POINTER(c.c_uint32)))]
+
+
 class OwnedCopy(c.Structure):
     _fields_=[('token',c.c_uint64)]+[(name,c.c_uint32) for name in ('address','row_bytes','rows','stride','flags')]
 
@@ -86,6 +91,7 @@ def main():
     parser.add_argument('--video',action='store_true',help='Qualify idle dimming and restoration on actual scanout')
     parser.add_argument('--presentation',action='store_true',help='Qualify immutable title margins and unchanged physical copies')
     parser.add_argument('--capture',action='store_true',help='Qualify native tiled texture capture and immutable CPU observation')
+    parser.add_argument('--resolution',type=int,choices=(1,2,3,4,8,16),default=1)
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
@@ -208,6 +214,16 @@ def main():
         return max(owned) if owned else None
     mesh_handle=0
     presentation_copies=0
+    resolution_copies=0
+    dll.gc_wii_native_resolution_get_api.argtypes=[c.c_uint32]
+    dll.gc_wii_native_resolution_get_api.restype=c.POINTER(ResolutionApi)
+    assert not dll.gc_wii_native_resolution_get_api(2)
+    resolution=dll.gc_wii_native_resolution_get_api(1).contents
+    assert not resolution.set_scale(0) and not resolution.set_scale(17)
+    assert resolution.set_scale(args.resolution)
+    rw=c.c_uint32();rh=c.c_uint32()
+    assert resolution.raster_size(c.byref(rw),c.byref(rh))
+    assert (rw.value,rh.value)==(640*args.resolution,args.efb_height*args.resolution),(rw.value,rh.value)
     try:
         vertices=(Vertex*4)(*[Vertex((c.c_float*3)(x,y,.5),(c.c_float*4)(1,0,0,1),(c.c_float*2)(0,0))
             for x,y in ((-1,-1),(1,-1),(1,1),(-1,1))])
@@ -388,6 +404,49 @@ def main():
             assert bytes(mem2[0x10800:0x10804])==bytes((144,54,144,34))
             assert bytes(mem2[0x10860:0x10864])==bytes((144,54,144,34))
             checks.append('display copy reads physical rows beyond VI height')
+        if args.resolution>1:
+            assert not args.presentation, 'Legacy margin oracle requires scale 1'
+            dll.gc_wii_native_presentation_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_presentation_get_api.restype=c.POINTER(PresentationApi)
+            presentation=dll.gc_wii_native_presentation_get_api(1).contents
+            clear(0,0,640,args.efb_height,(0,0,0),255,0x123456)
+            triangle=(Vertex*3)(*[Vertex((c.c_float*3)(x/320-1,1-y/240,.5),
+                (c.c_float*4)(1,1,1,1),(c.c_float*2)(0,0)) for x,y in ((1.2,1.3),(14.4,3.1),(3.7,14.8))])
+            tri_indices=(c.c_uint16*3)(0,1,2)
+            tri=render.create(c.byref(Mesh(triangle,tri_indices,3,3)));assert tri
+            job.mesh=tri
+            assert render.draw(c.byref(job));render.destroy(tri)
+            address=0x90016000
+            assert presentation.set_frame(address,None)
+            saved=copy(address,0,16);resolution_copies+=1
+            assert frame.complete(0,0)
+            if saved:assert gx.present_copy(saved,16,16,32)
+            else:
+                assert presentation.source(address)
+                present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
+                assert present(c.cast(c.byref(mem2,0x16000),c.POINTER(c.c_uint8)),16,16,32)
+            assert presentation.read(None,0,c.byref(rw),c.byref(rh))
+            assert (rw.value,rh.value)==(16*args.resolution,16*args.resolution)
+            image=(c.c_uint8*(rw.value*rh.value*4))()
+            assert presentation.read(image,len(image),c.byref(rw),c.byref(rh))
+            enhanced=bytes(image)
+            from PIL import Image
+            Image.frombytes('RGBA',(rw.value,rh.value),enhanced).save(work/'subpixel-raster.png')
+            # A large target alone is insufficient: new samples must exist
+            # inside a logical pixel. A nearest expansion has identical blocks.
+            scale=args.resolution
+            assert any(len({enhanced[((y*scale+j)*rw.value+x*scale+i)*4:((y*scale+j)*rw.value+x*scale+i)*4+3]
+                for j in range(scale) for i in range(scale)})>1 for y in range(16) for x in range(16)), 'Raster is merely an enlarged logical image'
+            retained=enhanced
+            # Changing scale preserves observable color/depth, and retained
+            # generations still present at the resolution they were rendered.
+            before=(pixel(0,0),pixel(0,0,1))
+            assert resolution.set_scale(1)
+            assert (pixel(0,0),pixel(0,0,1))==before, 'Scale edit discarded EFB color/depth'
+            if saved:assert gx.present_copy(saved,16,16,32)
+            else:assert present(c.cast(c.byref(mem2,0x16000),c.POINTER(c.c_uint8)),16,16,32)
+            assert presentation.read(image,len(image),c.byref(rw),c.byref(rh)) and bytes(image)==retained
+            checks.append('real subpixel raster detail; live scale preserves EFB color/depth and immutable display resolution')
         bad=DisplayCopy(0x900ffff0,32,0,0,16,2,256,0,0,3)
         assert not frame.copy(c.byref(bad)),'Unaligned/out-of-bank destination accepted'
         bad.destination=0x900ffff0+16
@@ -397,10 +456,10 @@ def main():
         assert not frame.clear(c.byref(clear_bad)),'Out-of-EFB clear accepted'
         gx_status=c.create_string_buffer(2048);c.CFUNCTYPE(None,c.c_void_p)(gx.status)(gx_status)
         fifo=struct.unpack_from('Q',gx_status.raw)[0];assert fifo==0,'Native frame emitted commands'
-        fs=status();assert fs.display_copies==4+presentation_copies+(args.efb_height==528) and fs.rejected==4+int(args.presentation)+4*int(args.capture), (fs.display_copies,fs.rejected,fs.error)
+        fs=status();assert fs.display_copies==4+presentation_copies+resolution_copies+(args.efb_height==528) and fs.rejected==4+int(args.presentation)+4*int(args.capture), (fs.display_copies,fs.rejected,fs.error)
         result={'component_only':True,'game_qualified':False,'performance_qualified':False,'native_frame_abi':1,
             'library_sha256':hashlib.sha256(args.library.read_bytes()).hexdigest(),'fifo_bytes':fifo,'eager':args.eager,
-            'efb_height':args.efb_height,
+            'efb_height':args.efb_height,'internal_scale':args.resolution,
             'clears':fs.clears,'display_copies':fs.display_copies,'completions':fs.completions,
             'rejected':fs.rejected,'first_yuy2_bytes':actual.hex(),'checks':checks,'events':events}
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))

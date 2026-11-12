@@ -10,7 +10,10 @@ extern "C" {
  * immediately and retains them with that immutable XFB generation. Presentation
  * adds only the margins: the center remains the actual VI image, with its HUD,
  * effects and color conversion. Physical EFB/XFB storage is never widened.
- * A null frame selects unmodified presentation for the next copy. */
+ * A null frame selects unmodified presentation for the next copy. The optional
+ * NativeResolution extension independently rasterizes the same native jobs;
+ * when enabled, its immutable high-resolution display replaces the VI center
+ * without changing the guest EFB/XFB or this ABI's margin layout. */
 typedef struct {
     const uint8_t* rgba;
     uint32_t width,height,stock_width,bytes;
