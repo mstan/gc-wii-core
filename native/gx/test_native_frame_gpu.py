@@ -287,10 +287,11 @@ def main():
             ww=c.c_uint32();hh=c.c_uint32();assert presentation.window(c.byref(ww),c.byref(hh))
             assert presentation.resize(1280,720) and not presentation.resize(0,720)
             records=[]
-            for address,color in ((0x90011000,(0,0,255)),(0x90011200,(0,255,0))):
-                rgba=(c.c_uint8*(20*2*4))(*((*color,255)*40))
-                view=PresentationFrame(rgba,20,2,16,len(rgba))
-                bad=PresentationFrame(rgba,20,2,16,len(rgba)-1)
+            for address,color,width in ((0x90011000,(0,0,255),20),(0x90011200,(0,255,0),28),
+                                        (0x90011400,(255,255,0),20)):
+                rgba=(c.c_uint8*(width*2*4))(*((*color,255)*(width*2)))
+                view=PresentationFrame(rgba,width,2,16,len(rgba))
+                bad=PresentationFrame(rgba,width,2,16,len(rgba)-1)
                 assert not presentation.set_frame(address,c.byref(bad))
                 assert presentation.set_frame(address,c.byref(view))
                 if not records:
@@ -298,21 +299,33 @@ def main():
                     assert not frame.copy(c.byref(wrong)),'Wrong XFB identity accepted'
                 clear(0,10,16,2,(255,0,0))
                 saved=copy(address,10,2)
+                if saved and not records:
+                    # A CPU observer may arrive before any submit/completion.
+                    # Materialization must seal and execute the pending copy.
+                    assert prepare(None,address&0x1fffffff,64)
+                    checks.append('CPU observation materializes an unsubmitted immutable display generation')
                 assert frame.complete(0,0)
-                records.append((address,saved,color));presentation_copies+=1
+                records.append((address,saved,color,width));presentation_copies+=1
             present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
-            for address,saved,color in records:
+            # Submit changing geometries without a screenshot/read between them.
+            # Queued output must retain both its source pixels and target descriptor.
+            for address,saved,_,_ in records:
                 assert presentation.source(address)
                 if saved:assert gx.present_copy(saved,16,2,32)
                 else:assert present(c.cast(c.addressof(mem2)+(address&0x0fffffff),c.POINTER(c.c_uint8)),16,2,32)
-                assert presentation.read(None,0,c.byref(ww),c.byref(hh)) and (ww.value,hh.value)==(20,2)
-                rgba=(c.c_uint8*(20*2*4))();assert presentation.read(rgba,len(rgba),c.byref(ww),c.byref(hh))
+            for address,saved,color,width in records:
+                assert presentation.source(address)
+                if saved:assert gx.present_copy(saved,16,2,32)
+                else:assert present(c.cast(c.addressof(mem2)+(address&0x0fffffff),c.POINTER(c.c_uint8)),16,2,32)
+                assert presentation.read(None,0,c.byref(ww),c.byref(hh)) and (ww.value,hh.value)==(width,2)
+                rgba=(c.c_uint8*(width*2*4))();assert presentation.read(rgba,len(rgba),c.byref(ww),c.byref(hh))
                 center=pixel(0,0,2);expected_center=bytes(((center>>16)&255,(center>>8)&255,center&255,center>>24))
+                left=(width-16)//2
                 for y in range(2):
-                    for x in range(20):
-                        expected=expected_center if 2<=x<18 else bytes((*color,255))
-                        assert bytes(rgba[(y*20+x)*4:(y*20+x+1)*4])==expected,('presentation generation',address,x,y)
-            for address,saved,_ in records:
+                    for x in range(width):
+                        expected=expected_center if left<=x<left+16 else bytes((*color,255))
+                        assert bytes(rgba[(y*width+x)*4:(y*width+x+1)*4])==expected,('presentation generation',address,x,y)
+            for address,saved,_,_ in records:
                 if saved:assert retire(None,saved)
             assert bytes(mem2[0x11000:0x11040])==bytes(mem2[0x11200:0x11240]),'View changed physical XFB bytes'
             assert presentation.set_frame(0x90010200,None)

@@ -9,7 +9,7 @@ extern "C" {
 /* Optional immutable-output ownership contract. The consumer must install
  * own_copy, pending_read and prepare_read, and guard EVERY CPU/host/DMA access
  * to owned memory, including raw compiled pointers. GPU work never writes RAM.
- * This seals and acknowledges earlier host submission; it does not wait for
+ * This seals immutable GPU work for ordered submission; it does not wait for
  * GPU execution, publish RAM bytes or emit a PE notification. Actual memory
  * observations must synchronously materialize the retained generation.
  * NativeFrame1 remains the physical completion interface in this profile. */

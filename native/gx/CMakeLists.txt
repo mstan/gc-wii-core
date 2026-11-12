@@ -31,6 +31,15 @@ option(GCNLLR_GX_COOPERATIVE_VI "Present completed VI scanout with donor-style r
 option(GCNLLR_COMPOSED_SCANOUT "Keep streamed generations owned for native VI and demand RAM reads" OFF)
 set(GCNLLR_GX_SUBMISSION "segmented" CACHE STRING "Build-time native submission: segmented, batched or queued")
 set_property(CACHE GCNLLR_GX_SUBMISSION PROPERTY STRINGS segmented batched queued)
+set(GCNLLR_NATIVE_OUTPUT_SUBMISSION "serial" CACHE STRING "Guarded native output presentation: serial or queued")
+set_property(CACHE GCNLLR_NATIVE_OUTPUT_SUBMISSION PROPERTY STRINGS serial queued)
+if(NOT GCNLLR_NATIVE_OUTPUT_SUBMISSION MATCHES "^(serial|queued)$")
+  message(FATAL_ERROR "Unknown native output submission provider")
+endif()
+if(GCNLLR_NATIVE_OUTPUT_SUBMISSION STREQUAL "queued" AND (GCNLLR_GX_FIFO_WORKER OR
+    GCNLLR_ASYNC_COPIES OR GCNLLR_COMPOSED_SCANOUT OR GCNLLR_GX_COOPERATIVE_VI OR GCNLLR_RESIDENT_XFB))
+  message(FATAL_ERROR "Queued native output requires the guarded serial machine owner")
+endif()
 set(GCNLLR_GX_COMPLETION "physical" CACHE STRING "Build-time PE completion: physical or owned")
 set_property(CACHE GCNLLR_GX_COMPLETION PROPERTY STRINGS physical owned)
 if(NOT GCNLLR_GX_COMPLETION MATCHES "^(physical|owned)$")
@@ -46,7 +55,7 @@ if(NOT GCNLLR_GX_SUBMISSION STREQUAL "segmented" AND NOT GCNLLR_COMPOSED_SCANOUT
   message(FATAL_ERROR "Batched submission requires composed observed GPU ownership")
 endif()
 set(_gcnllr_batched_submission OFF)
-if(NOT GCNLLR_GX_SUBMISSION STREQUAL "segmented")
+if(NOT GCNLLR_GX_SUBMISSION STREQUAL "segmented" OR GCNLLR_NATIVE_OUTPUT_SUBMISSION STREQUAL "queued")
   set(_gcnllr_batched_submission ON)
 endif()
 if(GCNLLR_COMPOSED_SCANOUT AND (NOT GCNLLR_ASYNC_COPIES OR NOT GCNLLR_RESIDENT_XFB OR NOT GCNLLR_GX_COOPERATIVE_VI OR GCNLLR_GX_FIFO_WORKER))
@@ -94,8 +103,9 @@ target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GX_FIFO_WORKER=$<BOOL
   GCNLLR_ASYNC_COPIES=$<BOOL:${GCNLLR_ASYNC_COPIES}>
   GCNLLR_COMPOSED_SCANOUT=$<BOOL:${GCNLLR_COMPOSED_SCANOUT}>
   GCNLLR_BATCHED_SUBMISSION=$<BOOL:${_gcnllr_batched_submission}>
+  GCNLLR_NATIVE_QUEUED_OUTPUT=$<STREQUAL:${GCNLLR_NATIVE_OUTPUT_SUBMISSION},queued>
   GCNLLR_OWNED_COMPLETION=$<STREQUAL:${GCNLLR_GX_COMPLETION},owned>
-  GCNLLR_QUEUED_PRESENT=$<STREQUAL:${GCNLLR_GX_SUBMISSION},queued>)
+  GCNLLR_QUEUED_PRESENT=$<OR:$<STREQUAL:${GCNLLR_GX_SUBMISSION},queued>,$<STREQUAL:${GCNLLR_NATIVE_OUTPUT_SUBMISSION},queued>>)
 set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/texture_readback.cpp" TARGET_DIRECTORY aurora_gx
   APPEND PROPERTY COMPILE_DEFINITIONS GCNLLR_ASYNC_COPIES=$<BOOL:${GCNLLR_ASYNC_COPIES}>)
 target_include_directories(gcnllr-native-gx PRIVATE "${CMAKE_BINARY_DIR}/gcnllr-services/adapted" "${GC_WII_GX_ROOT}/include" "${GXRUNTIME_DIR}/graphics/aurora/lib")

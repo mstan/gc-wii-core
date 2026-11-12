@@ -51,7 +51,7 @@ struct EncodedImage {
     std::shared_ptr<const PresentationFrame> presentation;
 };
 static gpu::TextureWithSampler scanout;
-static gpu::TextureWithSampler presentation_output;
+static std::shared_ptr<gpu::TextureWithSampler> presentation_output;
 static wgpu::Buffer presentation_pixels;
 static uint64_t presentation_capacity{};
 static wgpu::ComputePipeline presentation_pipeline;
@@ -285,7 +285,7 @@ void complete_frame(bool physical) {
         });
         worker::synchronize();
         if (!result->done || !result->success) throw std::runtime_error("Native frame GPU completion failed");
-    } else worker::synchronize();
+    } else if(!GCNLLR_NATIVE_QUEUED_OUTPUT)worker::synchronize();
     validate_submission();
 }
 void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter) {
@@ -638,14 +638,25 @@ static void decode_scanout(wgpu::CommandEncoder& encoder,const wgpu::Buffer& buf
     pass.SetPipeline(scanout_decoder);pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&descriptor));
     pass.DispatchWorkgroups((width/2+15)/16,(height+7)/8);pass.End();
 }
+static std::shared_ptr<gpu::TextureWithSampler> prepare_presentation(const gpu::TextureWithSampler&,
+    const std::shared_ptr<const PresentationFrame>&);
+static void encode_presentation(wgpu::CommandEncoder&,const gpu::TextureWithSampler&,
+    const gpu::TextureWithSampler&,const wgpu::Buffer&,const wgpu::ComputePipeline&,
+    const PresentationFrame&,bool);
 #if GCNLLR_QUEUED_PRESENT
 static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t height,
         std::vector<DisplaySpan> spans={},std::vector<uint8_t> cpu={}) {
     // The override API borrows a pointer. Retain the exact texture generation
     // through the queued clear, even if the caller changes geometry meanwhile.
     const auto target=queued_scanout;++scanout_frames;
+    const auto frame=frame_presentation;
+    const auto view=prepare_presentation(*target,frame);
+    const auto shown=view?view:target;
+    const auto view_pixels=presentation_pixels;
+    const auto view_pipeline=presentation_pipeline;
     const bool dimmed=idle_dimming;
-    gfx::machine_encode_tail([buffer,target,width,height,dimmed,spans=std::move(spans),cpu=std::move(cpu)]
+    gfx::machine_encode_tail([buffer,target,view,frame,view_pixels,view_pipeline,width,height,dimmed,
+            spans=std::move(spans),cpu=std::move(cpu)]
             (wgpu::CommandEncoder& encoder) {
         try {
             // Upload on this same FIFO worker. A later caller must not update a
@@ -654,14 +665,15 @@ static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t hei
             for(const auto& span:spans)if(span.image)
                 encoder.CopyBufferToBuffer(span.image->buffer,span.source,buffer,span.destination,span.size);
             decode_scanout(encoder,buffer,*target,width,height,dimmed);
+            if(view)encode_presentation(encoder,*target,*view,view_pixels,view_pipeline,*frame,dimmed);
         }catch(...) {
             std::lock_guard lock(submission_mutex);
             if(!submission_error)submission_error=std::current_exception();
         }
     });
-    worker::enqueue_work([target] {gpu::set_present_source_override(target.get());});
+    worker::enqueue_work([shown] {gpu::set_present_source_override(shown.get());});
     aurora_end_frame();
-    worker::enqueue_work([target] {gpu::set_present_source_override(nullptr);});
+    worker::enqueue_work([shown] {gpu::set_present_source_override(nullptr);});
     recorded_copies=false;
     aurora::imgui::new_frame(aurora::window::get_window_size());
     // Aurora's bounded frame packets provide backpressure. Real CPU/PE reads,
@@ -692,13 +704,14 @@ static constexpr char presentation_shader[]=R"(
     }
     textureStore(output,vec2<i32>(p.xy),color);
 })";
-static gpu::TextureWithSampler* compose_presentation(const gpu::TextureWithSampler& stock) {
+static std::shared_ptr<gpu::TextureWithSampler> prepare_presentation(const gpu::TextureWithSampler& stock,
+        const std::shared_ptr<const PresentationFrame>& input) {
     presentation_shown=false;
-    if(!frame_presentation || frame_presentation->rgba.empty())return const_cast<gpu::TextureWithSampler*>(&stock);
-    const auto& frame=*frame_presentation;
+    if(!input || input->rgba.empty())return {};
+    const auto& frame=*input;
     const uint32_t width=(uint32_t(uint64_t(stock.size.width)*frame.width/frame.stock_width)+1u)&~1u;
     const uint32_t height=stock.size.height;
-    if(width<=stock.size.width)return const_cast<gpu::TextureWithSampler*>(&stock);
+    if(width<=stock.size.width)return {};
     if(!presentation_pipeline) {
         wgpu::ShaderSourceWGSL source{};source.code=presentation_shader;
         const wgpu::ShaderModuleDescriptor module{.nextInChain=&source,.label="Native title presentation"};
@@ -706,43 +719,63 @@ static gpu::TextureWithSampler* compose_presentation(const gpu::TextureWithSampl
             .compute={.module=gpu::g_device.CreateShaderModule(&module),.entryPoint="main"}};
         presentation_pipeline=gpu::g_device.CreateComputePipeline(&desc);
     }
-    if(!presentation_output.texture || presentation_output.size.width!=width || presentation_output.size.height!=height) {
-        presentation_output.size={width,height,1};presentation_output.format=wgpu::TextureFormat::RGBA8Unorm;
+    if(!presentation_output || presentation_output->size.width!=width || presentation_output->size.height!=height) {
+#if GCNLLR_QUEUED_PRESENT
+        // Aurora borrows this descriptor on both the caller and worker. Keep
+        // it stable through the queued clear before replacing its geometry.
+        if(presentation_output){worker::synchronize();++scanout_joins;}
+#endif
+        auto next=std::make_shared<gpu::TextureWithSampler>();
+        next->size={width,height,1};next->format=wgpu::TextureFormat::RGBA8Unorm;
         const wgpu::TextureDescriptor desc{.label="Native title presentation target",
             .usage=wgpu::TextureUsage::StorageBinding|wgpu::TextureUsage::TextureBinding|wgpu::TextureUsage::CopySrc,
-            .size=presentation_output.size,.format=presentation_output.format};
-        presentation_output.texture=gpu::g_device.CreateTexture(&desc);
-        presentation_output.view=presentation_output.texture.CreateView();presentation_output.sampler=stock.sampler;
+            .size=next->size,.format=next->format};
+        next->texture=gpu::g_device.CreateTexture(&desc);
+        next->view=next->texture.CreateView();next->sampler=stock.sampler;
+        presentation_output=std::move(next);
     }
     if(!presentation_pixels || presentation_capacity<frame.rgba.size()) {
         const wgpu::BufferDescriptor desc{.label="Native title view pixels",
             .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopyDst,.size=frame.rgba.size()};
         presentation_pixels=gpu::g_device.CreateBuffer(&desc);presentation_capacity=frame.rgba.size();
     }
-    gpu::g_queue.WriteBuffer(presentation_pixels,0,frame.rgba.data(),frame.rgba.size());
-    const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(idle_dimming)};
+    presentation_shown=true;return presentation_output;
+}
+static void encode_presentation(wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& stock,
+        const gpu::TextureWithSampler& output,const wgpu::Buffer& pixels,const wgpu::ComputePipeline& pipeline,
+        const PresentationFrame& frame,bool dimmed) {
+    // Upload on the submission owner, after the preceding frame's submission.
+    // Every queued frame retains its own immutable source and GPU handles.
+    gpu::g_queue.WriteBuffer(pixels,0,frame.rgba.data(),frame.rgba.size());
+    const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(dimmed)};
     const wgpu::BufferDescriptor uniform_desc{.label="Native title view geometry",
         .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof words};
     auto uniform=gpu::g_device.CreateBuffer(&uniform_desc);gpu::g_queue.WriteBuffer(uniform,0,words,sizeof words);
-    const std::array entries{wgpu::BindGroupEntry{.binding=0,.buffer=presentation_pixels,.size=frame.rgba.size()},
+    const std::array entries{wgpu::BindGroupEntry{.binding=0,.buffer=pixels,.size=frame.rgba.size()},
         wgpu::BindGroupEntry{.binding=1,.textureView=stock.view},
-        wgpu::BindGroupEntry{.binding=2,.textureView=presentation_output.view},
+        wgpu::BindGroupEntry{.binding=2,.textureView=output.view},
         wgpu::BindGroupEntry{.binding=3,.buffer=uniform,.size=sizeof words}};
-    const wgpu::BindGroupDescriptor binding{.layout=presentation_pipeline.GetBindGroupLayout(0),
+    const wgpu::BindGroupDescriptor binding{.layout=pipeline.GetBindGroupLayout(0),
         .entryCount=entries.size(),.entries=entries.data()};
-    auto encoder=gpu::g_device.CreateCommandEncoder();auto pass=encoder.BeginComputePass();
-    pass.SetPipeline(presentation_pipeline);pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
-    pass.DispatchWorkgroups((width+15)/16,(height+7)/8);pass.End();
+    auto pass=encoder.BeginComputePass();
+    pass.SetPipeline(pipeline);pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
+    pass.DispatchWorkgroups((output.size.width+15)/16,(output.size.height+7)/8);pass.End();
+}
+static gpu::TextureWithSampler* compose_presentation(const gpu::TextureWithSampler& stock) {
+    const auto output=prepare_presentation(stock,frame_presentation);
+    if(!output)return const_cast<gpu::TextureWithSampler*>(&stock);
+    auto encoder=gpu::g_device.CreateCommandEncoder();
+    encode_presentation(encoder,stock,*output,presentation_pixels,presentation_pipeline,*frame_presentation,idle_dimming);
     const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
-    presentation_shown=true;return &presentation_output;
+    return output.get();
 }
 bool read_presentation(uint8_t* output,uint32_t capacity,uint32_t* width,uint32_t* height) {
     if(!width || !height || !presentation_shown)return false;
-    *width=presentation_output.size.width;*height=presentation_output.size.height;
+    *width=presentation_output->size.width;*height=presentation_output->size.height;
     if(!output)return true;
     if(uint64_t(*width)*(*height)*4>capacity)return false;
     worker::synchronize();validate_submission();
-    const auto rgba=gfx::read_texture_rgba8(presentation_output.texture,presentation_output.size,presentation_output.format);
+    const auto rgba=gfx::read_texture_rgba8(presentation_output->texture,presentation_output->size,presentation_output->format);
     if(rgba.size()!=uint64_t(*width)*(*height)*4)return false;
     std::memcpy(output,rgba.data(),rgba.size());return true;
 }

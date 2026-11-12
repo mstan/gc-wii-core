@@ -104,6 +104,17 @@ bytes into RAM. It emits no PE notification. NativeFrame1 completion retains
 its existing physical/owned policy. Retained display generations use the same
 YUY2 presentation shader as ordinary CPU-backed scanout.
 
+`GCNLLR_NATIVE_OUTPUT_SUBMISSION=queued` keeps that serial machine-memory owner
+and queues GPU copy encoding, scanout and optional title-margin composition.
+The recording owner allocates each immutable copy buffer before publishing its
+handle; output submission seals the packet without waiting for worker encoding.
+Each frame retains its source pixels, copy generation and target geometry;
+uploads run on the rendering worker after earlier submissions. Resizing drains
+borrowed target descriptors. CPU reads, screenshots and shutdown still join the
+required work. The default `serial` provider remains available. This selection
+does not enable the legacy streamed/FIFO provider group and cannot combine with
+it. NativePresentation1 is available in either presentation mode.
+
 The existing `test_native_frame_gpu.py --output --efb-height 528` exercises the
 new submission contract and compares all pixels of a colored direct scanout
 with its materialized YUY2 presentation. It remains a hidden, silent component

@@ -1335,9 +1335,7 @@ const GcWiiNativePresentationApi presentation_api={GC_WII_NATIVE_PRESENTATION_AB
     presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativePresentationApi* gc_wii_native_presentation_get_api(uint32_t abi) {
-    /* Queued scanout needs its own retained target integration before it can
-     * offer this extension. Existing presentation remains available there. */
-    return !GCNLLR_QUEUED_PRESENT && abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:nullptr;
+    return abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:nullptr;
 }
 
 namespace {
