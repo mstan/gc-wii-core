@@ -2,6 +2,7 @@
 #include "cpu/overlay_module.h"
 #include "cpu/aot_module.h"
 #include "cpu/native_candidate.h"
+#include "memory/memory.h"
 #include <stdio.h>
 static int failures;
 #define CHECK(x) do { if(!(x)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);failures++;}}while(0)
@@ -28,27 +29,32 @@ static void scoped_watches(CPUState* cpu) {
     cpu->ram[0x1000]=1;cpu->pc=0x80001008;
     CHECK(!gcn_overlay_module_call(&module,cpu,cpu->pc));
     CHECK(gcn_native_store_pages[1]&GCN_NATIVE_STORE_OBSERVED);
-    cpu->ram[0x1000]=0;gcn_native_code_note_store(0x80001000,1);
+    mem_write8(cpu,0x80001000,0,cpu->pc);
     cpu->pc=0x80001008;CHECK(gcn_overlay_module_call(&module,cpu,cpu->pc));
     CHECK(gcn_native_store_pages[1]&GCN_NATIVE_STORE_OBSERVED);
 
     /* Ordinary data records its first write, then skips redundant work only
      * while CRC dirtiness remains recorded. Consumption rearms the fence. */
     unsigned before=observer_calls;
-    cpu->ram[0x3000]=1;gcn_native_code_note_store(0xc0003000,1);
+    mem_write64(cpu,0xc0003000,UINT64_C(0x0102030405060708),cpu->pc);
     CHECK(observer_calls==before+1 && gcn_native_store_pages[3]==GCN_NATIVE_STORE_DIRTY);
-    cpu->ram[0x3001]=2;gcn_native_code_note_store(0x3001,1);
+    cpu->reserve_addr=0x3008;cpu->reserve_valid=true;
+    mem_write32(cpu,0x3008,0x090a0b0c,cpu->pc);
+    CHECK(!cpu->reserve_valid && mem_read32(cpu,0x3008,cpu->pc)==0x090a0b0c);
+    mem_write16(cpu,0x8000300c,0x0d0e,cpu->pc);
     CHECK(observer_calls==before+1);
     CHECK(gcn_native_code_page_content_stale_take(0x80003000));
-    cpu->ram[0x3002]=3;gcn_native_code_note_store(0x80003002,1);
+    mem_write8(cpu,0x8000300e,0x0f,cpu->pc);
     CHECK(observer_calls==before+2);
+    before=observer_calls;mem_write32(cpu,0x80003ffe,0x10203040,cpu->pc);
+    CHECK(observer_calls==before+1 && gcn_native_code_page_content_stale_take(0x80004000));
 
     /* Bound code stores invalidate in every alias. A negative cache also
      * remains watched and must recover when original bytes are restored. */
-    cpu->ram[0x1000]=1;gcn_native_code_note_store(0xc0001000,1);
+    mem_write8(cpu,0xc0001000,1,cpu->pc);
     cpu->pc=0x80001008;CHECK(!gcn_overlay_module_call(&module,cpu,cpu->pc));
     CHECK(gcn_native_store_pages[1]&GCN_NATIVE_STORE_OBSERVED);
-    cpu->ram[0x1000]=0;gcn_native_code_note_store(0x1000,1);
+    mem_write8(cpu,0x1000,0,cpu->pc);
     cpu->pc=0x80001008;CHECK(gcn_overlay_module_call(&module,cpu,cpu->pc));
 
     /* dcbz/GPU content dirtiness does not replace the icache authorization.
