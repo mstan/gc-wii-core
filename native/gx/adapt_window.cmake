@@ -466,6 +466,7 @@ string(REPLACE "${_gcnllr_encode_anchor}"
   "#include \"${CMAKE_CURRENT_LIST_DIR}/ordered_encode.inc\"\n${_gcnllr_encode_anchor}"
   _gcnllr_common "${_gcnllr_common}")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_frame.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_native_view.cmake")
 file(CONFIGURE OUTPUT "${_gcnllr_common_path}" CONTENT "${_gcnllr_common}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
 list(REMOVE_ITEM _gcnllr_gx_sources lib/gfx/common.cpp)

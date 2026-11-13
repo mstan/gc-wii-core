@@ -69,6 +69,13 @@ class ResolutionApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('set_scale',c.CFUNCTYPE(c.c_int,c.c_uint32)),
               ('raster_size',c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint32),c.POINTER(c.c_uint32)))]
 
+class ViewScene(c.Structure):
+    _fields_=[(n,c.c_uint32) for n in ('width','height','stock_width','target_width','target_height')]+[
+        ('draws',c.POINTER(Draw)),('count',c.c_uint32)]
+
+class ViewSceneApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('submit',c.CFUNCTYPE(c.c_int,c.c_uint32,c.POINTER(ViewScene),c.c_uint32))]
+
 
 class OwnedCopy(c.Structure):
     _fields_=[('token',c.c_uint64)]+[(name,c.c_uint32) for name in ('address','row_bytes','rows','stride','flags')]
@@ -95,10 +102,12 @@ def main():
     parser.add_argument('--video',action='store_true',help='Qualify idle dimming and restoration on actual scanout')
     parser.add_argument('--presentation',action='store_true',help='Qualify immutable title margins and unchanged physical copies')
     parser.add_argument('--filtered-presentation',action='store_true',help='Compare filtered title margins with real copy/VI pixels, tint and retained generations')
+    parser.add_argument('--view-scene',action='store_true',help='Compare GPU-only retained view geometry with the existing filtered-presentation oracle')
     parser.add_argument('--capture',action='store_true',help='Qualify native tiled texture capture and immutable CPU observation')
     parser.add_argument('--resolution',type=int,choices=(1,2,3,4,8,16),default=1)
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
     args=parser.parse_args()
+    if args.view_scene:args.filtered_presentation=True
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
     os.environ.update(SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0',SDL_AUDIODRIVER='dummy',GCN_AUDIO='0')
     directory=os.add_dll_directory(str(args.library.resolve().parent)) if os.name=='nt' else None
@@ -466,6 +475,67 @@ def main():
             if token:assert gx.present_copy(token,16,2,32)
             else:assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
             checks.append('filtered margins equal real copy/VI pixels across row transitions, tint, zero taps and immutable generations')
+        if args.view_scene:
+            dll.gc_wii_native_view_scene_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_view_scene_get_api.restype=c.POINTER(ViewSceneApi)
+            assert not dll.gc_wii_native_view_scene_get_api(2)
+            view_api=dll.gc_wii_native_view_scene_get_api(1).contents
+            # Ordinary retained geometry supplies raw colors; the native path
+            # never accepts this oracle's CPU RGBA image or a synthetic address.
+            colors=((33,56,239),(49,190,255),(255,255,255),(0,0,0))
+            vertex_list=[];index_list=[]
+            for row,color in enumerate(colors):
+                base=len(vertex_list)
+                for x,y in ((-1,1-row/2),(-1,1-(row+1)/2),(1,1-(row+1)/2),(1,1-row/2)):
+                    vertex_list.append(Vertex((c.c_float*3)(x,y,.5),(c.c_float*4)(*[v/255 for v in color],1),(c.c_float*2)(0,0)))
+                index_list.extend(base+n for n in (0,1,2,0,2,3))
+            verts=(Vertex*len(vertex_list))(*vertex_list);inds=(c.c_uint16*len(index_list))(*index_list)
+            view_mesh=render.create(c.byref(Mesh(verts,inds,len(verts),len(inds))));assert view_mesh
+            view_job=Draw.from_buffer_copy(job);view_job.mesh=view_mesh
+            view_job.width=view_job.clip_width=20*args.resolution
+            view_job.height=view_job.clip_height=4*args.resolution
+            jobs=(Draw*1)(view_job);tint=0xffc08040
+            scene=ViewScene(20,4,14,20*args.resolution,4*args.resolution,jobs,1)
+            rgba=(c.c_uint8*(20*4*4))(*[v for color in colors for x in range(20) for v in (*color,255)])
+            reference=PresentationFrame(rgba,20,4,14,len(rgba));records=[]
+            for role,address in (('reference',0x9001a000),('native',0x9001a100),('excluded',0x9001a200)):
+                for y,color in enumerate(colors):
+                    clear(0,y,16,1,tuple((v*((tint>>(8*n))&255)+127)//255 for n,v in enumerate(color)))
+                before=(pixel(1,1),pixel(1,1,1))
+                if role=='reference':assert presentation.filtered(address,c.byref(reference),tint)
+                else:
+                    value=scene if role=='native' else ViewScene(20,4,14,20*args.resolution,4*args.resolution,None,0)
+                    invalid=ViewScene.from_buffer_copy(value);invalid.target_width=0
+                    assert not view_api.submit(address,c.byref(invalid),tint)
+                    assert view_api.submit(address,c.byref(value),tint)
+                    assert before==(pixel(1,1),pixel(1,1,1)), 'Native view altered guest EFB color/depth'
+                saved=copy(address,0,4,taps=(8,8,10,12,10,8,8));presentation_copies+=1
+                assert frame.complete(0,0);records.append((role,address,saved))
+            render.destroy(view_mesh)
+            # Present old generations after a later clear-only view. A reused
+            # mutable offscreen target would destroy the retained colored view.
+            images={}
+            for role,address,saved in records:
+                assert presentation.source(address)
+                if saved:assert gx.present_copy(saved,16,4,32)
+                else:assert present(c.cast(c.addressof(mem2)+(address&0x0fffffff),c.POINTER(c.c_uint8)),16,4,32)
+                ww=c.c_uint32();hh=c.c_uint32();assert presentation.read(None,0,c.byref(ww),c.byref(hh))
+                pixels=(c.c_uint8*(ww.value*hh.value*4))()
+                assert presentation.read(pixels,len(pixels),c.byref(ww),c.byref(hh));images[role]=bytes(pixels)
+            assert images['reference']==images['native'], 'GPU view differs from existing integer filtered margin oracle'
+            center=16*args.resolution;left=(ww.value-center)//2
+            for y in range(hh.value):
+                for x in range(ww.value):
+                    at=(y*ww.value+x)*4
+                    if left<=x<left+center:
+                        assert images['excluded'][at:at+4]==images['reference'][at:at+4]
+                    else:assert images['excluded'][at:at+4]==bytes((0,0,0,255))
+            for _,_,saved in records:
+                if saved:assert retire(None,saved)
+            assert presentation.source(0x90010000)
+            if token:assert gx.present_copy(token,16,2,32)
+            else:assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
+            checks.append('GPU-only view retains immutable geometry/coverage, preserves EFB and matches filtered margins exactly')
         if output:
             direct=[pixel(x,y,2) for y in range(2) for x in range(16)]
             present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)

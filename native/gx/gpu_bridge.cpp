@@ -41,6 +41,7 @@ void machine_raster_targets(const webgpu::TextureWithSampler&,const webgpu::Text
 void machine_copy_clear(const wgpu::RenderPipeline&,ClipRect,wgpu::Color,float);
 void machine_encode_after_resolve(std::function<void(wgpu::CommandEncoder&)>);
 void machine_encode_tail(std::function<void(wgpu::CommandEncoder&)>);
+void machine_begin_native_view(const webgpu::TextureWithSampler&,const webgpu::TextureWithSampler&);
 }
 
 namespace gcnllr::gpu_bridge {
@@ -53,6 +54,7 @@ struct PresentationFrame {
     // Encoded at the real raster grid, never reconstructed from stock pixels.
     std::shared_ptr<gpu::TextureWithSampler> raster;
     uint32_t raster_width{},raster_height{};
+    std::shared_ptr<gpu::TextureWithSampler> native_view;
     bool filtered{};
     uint32_t tint{0xffffffffu},filter_step{1};
     std::array<uint32_t,3> filter{};
@@ -66,6 +68,44 @@ struct EncodedImage {
 static gpu::TextureWithSampler scanout;
 static gpu::TextureWithSampler raster_color,raster_resolved,raster_depth;
 static uint32_t raster_scale=1;
+struct NativeViewTarget {
+    std::shared_ptr<gpu::TextureWithSampler> color;
+    gpu::TextureWithSampler depth;
+    bool active{};
+};
+bool valid_native_view_target(uint32_t width,uint32_t height) {
+    if(!width || !height || !gpu::g_device)return false;
+    const auto format=gpu::g_graphicsConfig.surfaceConfiguration.format;
+    if(format!=wgpu::TextureFormat::RGBA8Unorm && format!=wgpu::TextureFormat::BGRA8Unorm)return false;
+    wgpu::Limits limits{};gpu::g_device.GetLimits(&limits);
+    return width<=limits.maxTextureDimension2D && height<=limits.maxTextureDimension2D;
+}
+NativeViewHandle begin_native_view(uint32_t width,uint32_t height) {
+    if(!valid_native_view_target(width,height) || gfx::is_offscreen())return {};
+    auto target=std::make_shared<NativeViewTarget>();
+    target->color=std::make_shared<gpu::TextureWithSampler>();
+    auto& color=*target->color;color.size={width,height,1};
+    color.format=gpu::g_graphicsConfig.surfaceConfiguration.format;
+    const wgpu::TextureDescriptor color_desc{.label="Immutable native title view",
+        .usage=wgpu::TextureUsage::RenderAttachment|wgpu::TextureUsage::TextureBinding|wgpu::TextureUsage::CopySrc,
+        .size=color.size,.format=color.format};
+    color.texture=gpu::g_device.CreateTexture(&color_desc);color.view=color.texture.CreateView();
+    auto& depth=target->depth;depth.size=color.size;depth.format=gpu::g_graphicsConfig.depthFormat;
+    const wgpu::TextureDescriptor depth_desc{.label="Native title view depth",
+        .usage=wgpu::TextureUsage::RenderAttachment,.size=depth.size,.format=depth.format};
+    depth.texture=gpu::g_device.CreateTexture(&depth_desc);depth.view=depth.texture.CreateView();
+    gfx::machine_begin_native_view(color,depth);target->active=true;return target;
+}
+void end_native_view(const NativeViewHandle& target,uint32_t address,uint32_t width,
+        uint32_t height,uint32_t stock_width,uint32_t tint,bool commit) {
+    if(!target || !target->active)return;
+    gfx::end_offscreen();target->active=false;
+    if(!commit)return;
+    auto frame=std::make_shared<PresentationFrame>();
+    frame->source=address&0x1fffffffu;frame->width=width;frame->height=height;frame->stock_width=stock_width;
+    frame->native_view=target->color;frame->filtered=true;frame->tint=tint;
+    pending_presentation=std::move(frame);
+}
 static std::shared_ptr<gpu::TextureWithSampler> presentation_output;
 static wgpu::Buffer presentation_pixels;
 static uint64_t presentation_capacity{};
@@ -849,10 +889,21 @@ static constexpr char presentation_shader[]=R"(
 struct PresentationInfo { view:vec4<u32>, raster:vec4<u32>, taps:vec4<u32>, sampling:vec4<u32> };
 @group(0) @binding(3) var<uniform> info:PresentationInfo;
 @group(0) @binding(4) var raster:texture_2d<f32>;
+@group(0) @binding(5) var native_view:texture_2d<f32>;
 fn title_word(x:i32,y:i32)->u32 {
     let base=textureDimensions(stock);
     let grid=select(base,info.raster.xy,info.raster.x!=0u);
     let row=clamp(y,0,i32(grid.y)-1);
+    if(info.sampling.y!=0u) {
+        // Preserve the real center's pixel/chroma phase while sampling the
+        // independently rasterized scene, including its finite-coverage alpha.
+        let target=textureDimensions(native_view);
+        let column=(f32(x)+0.5)*f32(info.view.z)/f32(grid.x)+f32(info.view.x-info.view.z)*0.5;
+        let sx=clamp(i32(floor(column*f32(target.x)/f32(info.view.x))),0,i32(target.x)-1);
+        let sy=min(u32(row)*target.y/grid.y,target.y-1u);
+        let rgba=vec4<u32>(round(textureLoad(native_view,vec2<i32>(sx,i32(sy)),0)*255.0));
+        return rgba.x|(rgba.y<<8u)|(rgba.z<<16u)|(rgba.w<<24u);
+    }
     let column=i32(floor((f32(x)+0.5)*f32(info.view.z)/f32(grid.x)))+i32((info.view.x-info.view.z)/2u);
     let sx=u32(clamp(column,0,i32(info.view.x)-1));
     let sy=min(u32(row)*info.view.y/grid.y,info.view.y-1u);
@@ -919,10 +970,10 @@ fn title_display(x:i32,y:i32)->vec3<f32> {
 static std::shared_ptr<gpu::TextureWithSampler> prepare_presentation(const gpu::TextureWithSampler& stock,
         const std::shared_ptr<const PresentationFrame>& input) {
     presentation_shown=false;
-    if(!input || (input->rgba.empty() && !input->raster))return {};
+    if(!input || (input->rgba.empty() && !input->raster && !input->native_view))return {};
     const auto& frame=*input;
     const uint32_t center=frame.raster?frame.raster_width:stock.size.width;
-    uint32_t width=frame.rgba.empty()?center:
+    uint32_t width=(frame.rgba.empty() && !frame.native_view)?center:
         (uint32_t(uint64_t(center)*frame.width/frame.stock_width)+1u)&~1u;
     uint32_t height=frame.raster?frame.raster_height:stock.size.height;
     // Preserve aspect when a very wide 16x composite exceeds one texture's
@@ -973,7 +1024,7 @@ static void encode_presentation(wgpu::CommandEncoder& encoder,const gpu::Texture
     const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(dimmed),
         frame.raster_width,frame.raster_height,frame.raster?uint32_t(uint64_t(output.size.height)*frame.raster_width/frame.raster_height):stock.size.width,uint32_t(frame.filtered),
         frame.filter[0],frame.filter[1],frame.filter[2],frame.tint,
-        frame.filter_step,0,0,0};
+        frame.filter_step,uint32_t(bool(frame.native_view)),0,0};
     const wgpu::BufferDescriptor uniform_desc{.label="Native title view geometry",
         .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof words};
     auto uniform=gpu::g_device.CreateBuffer(&uniform_desc);gpu::g_queue.WriteBuffer(uniform,0,words,sizeof words);
@@ -981,7 +1032,8 @@ static void encode_presentation(wgpu::CommandEncoder& encoder,const gpu::Texture
         wgpu::BindGroupEntry{.binding=1,.textureView=stock.view},
         wgpu::BindGroupEntry{.binding=2,.textureView=output.view},
         wgpu::BindGroupEntry{.binding=3,.buffer=uniform,.size=sizeof words},
-        wgpu::BindGroupEntry{.binding=4,.textureView=frame.raster?frame.raster->view:stock.view}};
+        wgpu::BindGroupEntry{.binding=4,.textureView=frame.raster?frame.raster->view:stock.view},
+        wgpu::BindGroupEntry{.binding=5,.textureView=frame.native_view?frame.native_view->view:stock.view}};
     const wgpu::BindGroupDescriptor binding{.layout=pipeline.GetBindGroupLayout(0),
         .entryCount=entries.size(),.entries=entries.data()};
     auto pass=encoder.BeginComputePass();

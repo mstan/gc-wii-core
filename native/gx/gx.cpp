@@ -11,6 +11,7 @@ static uint32_t internal_scale=1;
 #include "efb_geometry.hpp"
 #include "native_scene.hpp"
 #include <gcnllr/native_indexed.h>
+#include <gcnllr/native_view_scene.h>
 #include "native_gui.hpp"
 #include "native_gui_effects.hpp"
 #include "gcnllr/native_frame.h"
@@ -1384,8 +1385,8 @@ bool native_scene_ready() {
     }
     return true;
 }
-int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
-        if (!plan) return 0;
+bool resolve_native_scene_resources(gxruntime::gxcore::DrawPlan* plan) {
+        if (!plan) return false;
         const auto image=[](uint32_t address,uint32_t bytes,const void*& data,uint32_t& available,DolGuestResourceKind kind) {
             DolGuestResolvedRange range{};
             if(!resolve(nullptr,address,bytes,DOL_GUEST_ADDRESS_AUTO,kind,&range)){std::fprintf(stderr,"[native-scene-rejected] Unreadable resource address=%08x size=%u\n",address,bytes);return false;}
@@ -1411,6 +1412,10 @@ int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
                 }
             }
         }
+        return true;
+}
+int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
+        if(!resolve_native_scene_resources(plan))return 0;
         // Direct typed submission. No command construction, FIFO append,
         // register decoding or original guest renderer executes here.
         if (!aurora::gfx::gxcore::submit_draw_plan(*plan)) {
@@ -1430,6 +1435,44 @@ int draw_native_indexed(const GcWiiNativeDraw* job) {
     if(!native_scene_ready())return 0;
     try{return submit_native_scene(native_scene.prepare(*job,true));}
     catch(const std::exception& e){fail(e.what());return 0;}
+}
+int submit_native_view(uint32_t address,const GcWiiNativeViewScene* scene,uint32_t tint) {
+    if(!scene || (address&31) || !scene->stock_width || scene->width<scene->stock_width ||
+       scene->width>864 || uint64_t(scene->width)>uint64_t(scene->stock_width)*4 ||
+       ((scene->width-scene->stock_width)&1) || !scene->height || scene->height>576 ||
+       scene->count>262144 || (scene->count && !scene->draws) || !native_scene_ready())return 0;
+    if(!gcnllr::gpu_bridge::valid_native_view_target(scene->target_width,scene->target_height))return 0;
+    gcnllr::gpu_bridge::NativeViewHandle target;
+    try {
+        // Validate the complete scene before recording any offscreen effects.
+        // Resource bytes remain under the existing owner-thread snapshot rules.
+        for(uint32_t n=0;n<scene->count;++n) {
+            const auto& job=scene->draws[n];const auto& texture=job.material.texture;
+            if((texture.size && texture.palette_format!=GC_WII_NATIVE_PALETTE_RGB5551_ZERO) ||
+               job.x<0 || job.y<0 || job.x+job.width>scene->target_width || job.y+job.height>scene->target_height ||
+               job.clip_x<0 || job.clip_y<0 || uint64_t(job.clip_x)+job.clip_width>scene->target_width ||
+               uint64_t(job.clip_y)+job.clip_height>scene->target_height ||
+               !resolve_native_scene_resources(native_scene.prepare(job,texture.size!=0)))return 0;
+        }
+        target=gcnllr::gpu_bridge::begin_native_view(scene->target_width,scene->target_height);
+        if(!target)return 0;
+        for(uint32_t n=0;n<scene->count;++n) {
+            const auto& job=scene->draws[n];auto* plan=native_scene.prepare(job,job.material.texture.size!=0);
+            if(!resolve_native_scene_resources(plan) || !aurora::gfx::gxcore::submit_draw_plan(*plan)) {
+                gcnllr::gpu_bridge::end_native_view(target,address,scene->width,scene->height,scene->stock_width,tint,false);
+                native_scene.rejected();return 0;
+            }
+            // View jobs are host presentation work, not guest EFB mutations.
+            native_scene.submitted();
+        }
+        gcnllr::gpu_bridge::end_native_view(target,address,scene->width,scene->height,scene->stock_width,tint,true);
+        return 1;
+    } catch(const std::exception& e) {
+        if(target)try {
+            gcnllr::gpu_bridge::end_native_view(target,address,scene->width,scene->height,scene->stock_width,tint,false);
+        }catch(...) {} // Preserve the original failure across the C ABI.
+        fail(e.what());return 0;
+    }
 }
 int draw_native_gui(const GcWiiNativeGuiDraw* job) {
     if(!job){native_scene.rejected();return 0;}
@@ -1455,6 +1498,7 @@ void native_scene_status(GcWiiNativeRenderStatus* output) {
 const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
     create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
 const GcWiiNativeIndexedApi native_indexed_api={GC_WII_NATIVE_INDEXED_ABI,draw_native_indexed};
+const GcWiiNativeViewSceneApi native_view_scene_api={GC_WII_NATIVE_VIEW_SCENE_ABI,submit_native_view};
 const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
 const GcWiiNativeGuiLayersApi native_gui_layers_api={GC_WII_NATIVE_GUI_LAYERS_ABI,draw_native_gui_layers};
 const GcWiiNativeGuiMaskApi native_gui_mask_api={GC_WII_NATIVE_GUI_MASK_ABI,draw_native_gui_mask};
@@ -1476,6 +1520,9 @@ extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_ap
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeIndexedApi* gc_wii_native_indexed_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_INDEXED_ABI && !GCNLLR_GX_FIFO_WORKER?&native_indexed_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeViewSceneApi* gc_wii_native_view_scene_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_VIEW_SCENE_ABI && !GCNLLR_GX_FIFO_WORKER?&native_view_scene_api:nullptr;
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeGuiApi* gc_wii_native_gui_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_GUI_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_gui_api:nullptr;
