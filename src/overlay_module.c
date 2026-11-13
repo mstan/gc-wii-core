@@ -5,6 +5,7 @@
  * cpu/aot_module.h.
  */
 #include "cpu/overlay_module.h"
+#include "cpu/overlay_binding.h"
 #include "cpu/aot_module.h"   /* gcn_aot_fnv1a64 -- one hash function, shared */
 #include "cpu/native_code.h"
 #include "debug/cost_ring.h"
@@ -113,19 +114,19 @@ static u32 resolve_resident(GcnOverlayModule* module, CPUState* cpu,
     return chosen;
 }
 
-bool gcn_overlay_module_call(GcnOverlayModule* module, CPUState* cpu,
-                             u32 address) {
+GcnOverlayFn gcn_overlay_module_bind(GcnOverlayModule* module,CPUState* cpu,
+                                    u32 address) {
     u32 canonical;
     u32 offset;
     if (!module || !module->page_count || !cpu || !cpu->ram ||
         !canonical_mem1(address, &canonical, &offset))
-        return false;
+        return NULL;
     /* Lookup preserves the execution namespace. A physical/uncached entry
      * requires its own compiled body; identical RAM does not authorize
      * rewriting observable branch/LR/exception PCs. */
     int found = lookup_page(module, address);
     if (found < 0)
-        return false;
+        return NULL;
     u32 page_index = (u32)found;
 
     u32 resident = module->resident[page_index];
@@ -133,18 +134,27 @@ bool gcn_overlay_module_call(GcnOverlayModule* module, CPUState* cpu,
         /* Hash the whole page, not the entry offset. */
         u32 page_offset, ignored;
         if (!canonical_mem1(module->pages[page_index].start, &ignored, &page_offset))
-            return false;
+            return NULL;
         resident = resolve_resident(module, cpu, page_index, page_offset);
     }
     if (resident == GCN_OVERLAY_NONE)
-        return false;
+        return NULL;
 
-    /* The generated body switches on ctx->pc, so a mid-page entry is fine. */
+    return module->variants[resident].fn;
+}
+
+bool gcn_overlay_binding_call(GcnOverlayModule* module,CPUState* cpu,GcnOverlayFn body) {
+    if(!body)return false;
     const unsigned previous=gcn_cost_enter(GCN_COST_GUEST);
-    module->variants[resident].fn(cpu);
+    body(cpu);
     gcn_cost_leave(previous);
-    module->dispatches++;
+    ++module->dispatches;
     return true;
+}
+
+bool gcn_overlay_module_call(GcnOverlayModule* module,CPUState* cpu,u32 address) {
+    /* The generated body switches on ctx->pc, so a mid-page entry is fine. */
+    return gcn_overlay_binding_call(module,cpu,gcn_overlay_module_bind(module,cpu,address));
 }
 
 static void invalidate_page(GcnOverlayModule* module,u32 index) {

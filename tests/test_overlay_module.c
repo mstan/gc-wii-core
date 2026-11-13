@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "cpu/overlay_module.h"
+#include "cpu/overlay_binding.h"
 #include "cpu/aot_module.h"
 #include "cpu/native_candidate.h"
 #include "memory/memory.h"
@@ -92,7 +93,11 @@ int main(void){
     CHECK(gcn_overlay_module_index(&module,index,GCN_OVERLAY_INDEX_SLOTS));
     for(unsigned i=0;i<3;i++){
         cpu.pc=pages[i].start+8;
-        CHECK(gcn_overlay_module_call(&module,&cpu,cpu.pc));
+        const u64 before=module.dispatches;
+        GcnOverlayFn bound=gcn_overlay_module_bind(&module,&cpu,cpu.pc);
+        CHECK(bound==body && cpu.pc==pages[i].start+8 && module.dispatches==before);
+        CHECK(i==1?gcn_overlay_module_call(&module,&cpu,cpu.pc):
+                   gcn_overlay_binding_call(&module,&cpu,bound));
         CHECK(cpu.pc==pages[i].start+12 && cpu.lr==pages[i].start+12);
     }
     CHECK(module.pages_resident==3 && module.hashes==3);
@@ -102,6 +107,9 @@ int main(void){
     CHECK(module.invalidations==3);
     for(unsigned i=0;i<3;i++){
         cpu.pc=pages[i].start+8;
+        const u64 before=module.dispatches;
+        CHECK(!gcn_overlay_module_bind(&module,&cpu,cpu.pc));
+        CHECK(!gcn_overlay_binding_call(&module,&cpu,NULL) && module.dispatches==before);
         CHECK(!gcn_overlay_module_call(&module,&cpu,cpu.pc));
         CHECK(cpu.pc==pages[i].start+8);
     }
@@ -110,6 +118,7 @@ int main(void){
     CHECK(gcn_overlay_module_index(&cached,index,GCN_OVERLAY_INDEX_SLOTS));
     resident[1]=GCN_OVERLAY_UNKNOWN;cpu.ram[0x1000]=0;cpu.pc=0x1008;
     CHECK(!gcn_overlay_module_call(&cached,&cpu,cpu.pc));
+    CHECK(!gcn_overlay_module_bind(&cached,&cpu,cpu.pc));
     CHECK(cpu.pc==0x1008);
     scoped_watches(&cpu);
     cpu_free(&cpu);return failures?1:0;
