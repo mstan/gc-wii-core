@@ -12,6 +12,7 @@ namespace gcnllr::gpu_bridge {
 void initialize();
 void set_idle_dimming(bool enabled);
 bool set_presentation_frame(uint32_t,const GcWiiNativePresentationFrame*);
+bool set_filtered_presentation_frame(uint32_t,const GcWiiNativePresentationFrame*,uint32_t);
 void select_presentation_source(uint32_t);
 bool presentation_matches_copy(uint32_t);
 bool read_presentation(uint8_t*,uint32_t,uint32_t*,uint32_t*);

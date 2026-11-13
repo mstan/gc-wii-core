@@ -115,6 +115,17 @@ required work. The default `serial` provider remains available. This selection
 does not enable the legacy streamed/FIFO provider group and cannot combine with
 it. NativePresentation1 is available in either presentation mode.
 
+NativePresentation2 adds a nearest-sampled logical view with an explicit tint.
+The immutable display generation retains the copy's real vertical filter and
+uses the same integer YUY2 conversion and VI decoding for its margins. The
+center remains the actual stock or high-resolution native display. This path
+requires both vertical copy clamps. Zero-alpha input marks excluded canvas;
+it stays opaque black after filtering, including finite room/panel borders.
+ABI1 retains its direct-RGB margin contract;
+existing consumers do not acquire filtering by changing the service DLL.
+`test_native_frame_gpu.py --filtered-presentation` compares margins with actual
+copy/VI pixels through row changes, tints and retained generations.
+
 The existing `test_native_frame_gpu.py --output --efb-height 528` exercises the
 new submission contract and compares all pixels of a colored direct scanout
 with its materialized YUY2 presentation. It remains a hidden, silent component

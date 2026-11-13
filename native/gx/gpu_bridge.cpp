@@ -52,8 +52,11 @@ struct PresentationFrame {
     // Encoded at the real raster grid, never reconstructed from stock pixels.
     std::shared_ptr<gpu::TextureWithSampler> raster;
     uint32_t raster_width{},raster_height{};
+    bool filtered{};
+    uint32_t tint{0xffffffffu},filter_step{1};
+    std::array<uint32_t,3> filter{};
 };
-static std::shared_ptr<const PresentationFrame> pending_presentation;
+static std::shared_ptr<PresentationFrame> pending_presentation;
 struct EncodedImage {
     uint32_t width{},height{};
     wgpu::Buffer buffer;
@@ -84,6 +87,11 @@ bool set_presentation_frame(uint32_t address,const GcWiiNativePresentationFrame*
        uint64_t(input->width)*input->height*4!=input->bytes)return false;
     frame->width=input->width;frame->height=input->height;frame->stock_width=input->stock_width;
     frame->rgba.assign(input->rgba,input->rgba+input->bytes);pending_presentation=std::move(frame);return true;
+}
+bool set_filtered_presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* input,uint32_t tint) {
+    if(!set_presentation_frame(address,input))return false;
+    if(input){pending_presentation->filtered=true;pending_presentation->tint=tint;}
+    return true;
 }
 #if GCNLLR_QUEUED_PRESENT
 // Aurora also borrows the override on the caller while preparing a viewport.
@@ -432,10 +440,15 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     const uint32_t capture_y=copy.src_y-above,capture_height=copy.height+above+below;
     if (pending_displays==display_bands.size()) display_bands.emplace_back();
     auto& band=display_bands[pending_displays++];
-    band.presentation=std::move(pending_presentation);
+    auto frame=std::move(pending_presentation);
     band.width=copy.width;band.height=copy.height;band.first_row=above;band.weights=weights;
     const auto& fb=gpu::g_frameBuffer;
     const uint32_t scale=raster_scale;
+    if(frame && frame->filtered) {
+        if(!filter.clamp_top || !filter.clamp_bottom)
+            throw std::runtime_error("Filtered title view requires explicit vertical copy clamps");
+        frame->filter=weights;frame->filter_step=scale;
+    }
     band.filter_step=1;band.first_row=above;
     band.raster_view={};band.origin_x=band.minimum_y=band.maximum_y=0;
     if (!band.texture || band.texture->size.width!=copy.width || band.texture->size.height!=capture_height)
@@ -444,7 +457,7 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
         int(copy.width*fb.size.width/efb_width),int(capture_height*fb.size.height/efb_height)};
     gfx::resolve_pass(band.texture,capture_rect,false,false,false,{},0,GX_TF_RGBA8);
     if(scale>1) {
-        auto frame=band.presentation?std::make_shared<PresentationFrame>(*band.presentation):std::make_shared<PresentationFrame>();
+        if(!frame)frame=std::make_shared<PresentationFrame>();
         frame->source=copy.dest_address&0x1fffffffu;
         frame->raster_width=copy.width*scale;frame->raster_height=copy.height*scale;
         frame->raster=new_raster_display(frame->raster_width,frame->raster_height);
@@ -457,8 +470,8 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
             try {encode_raster_display(encoder,enhanced,*buffer);}
             catch(...) {std::lock_guard lock(submission_mutex);if(!submission_error)submission_error=std::current_exception();}
         });
-        band.presentation=std::move(frame);
     }
+    band.presentation=std::move(frame);
     record_copy_clear(copy);
     // The GPU snapshot and filter metadata are immutable before publication.
     // Encoding may happen later; it never samples the mutable EFB again.
@@ -832,9 +845,43 @@ static constexpr char presentation_shader[]=R"(
 @group(0) @binding(0) var<storage,read> view:array<u32>;
 @group(0) @binding(1) var stock:texture_2d<f32>;
 @group(0) @binding(2) var output:texture_storage_2d<rgba8unorm,write>;
-struct PresentationInfo { view:vec4<u32>, raster:vec4<u32> };
+struct PresentationInfo { view:vec4<u32>, raster:vec4<u32>, taps:vec4<u32>, sampling:vec4<u32> };
 @group(0) @binding(3) var<uniform> info:PresentationInfo;
 @group(0) @binding(4) var raster:texture_2d<f32>;
+fn title_word(x:i32,y:i32)->u32 {
+    let base=textureDimensions(stock);
+    let grid=select(base,info.raster.xy,info.raster.x!=0u);
+    let row=clamp(y,0,i32(grid.y)-1);
+    let column=i32(floor((f32(x)+0.5)*f32(info.view.z)/f32(grid.x)))+i32((info.view.x-info.view.z)/2u);
+    let sx=u32(clamp(column,0,i32(info.view.x)-1));
+    let sy=min(u32(row)*info.view.y/grid.y,info.view.y-1u);
+    return view[sy*info.view.x+sx];
+}
+fn title_rgb(x:i32,y:i32)->vec3<i32> {
+    let word=title_word(x,y);
+    let rgb=vec3<u32>(word&255u,(word>>8u)&255u,(word>>16u)&255u);
+    let tint=vec3<u32>(info.taps.w&255u,(info.taps.w>>8u)&255u,(info.taps.w>>16u)&255u);
+    return vec3<i32>((rgb*tint+vec3<u32>(127u))/255u);
+}
+fn title_filtered(x:i32,y:i32)->vec3<i32> {
+    let step=i32(info.sampling.x);let weights=vec3<i32>(info.taps.xyz);
+    return min((title_rgb(x,y-step)*weights.x+title_rgb(x,y)*weights.y+title_rgb(x,y+step)*weights.z)>>vec3<u32>(6u),vec3<i32>(255));
+}
+fn title_yuv(rgb:vec3<i32>)->vec3<i32> {
+    return vec3<i32>(((66*rgb.r+129*rgb.g+25*rgb.b+128)>>8u)+16,
+        ((-38*rgb.r-74*rgb.g+112*rgb.b+128)>>8u)+128,
+        ((112*rgb.r-94*rgb.g-18*rgb.b+128)>>8u)+128);
+}
+fn title_display(x:i32,y:i32)->vec3<f32> {
+    // Pair phase is relative to the real center, including odd-width margins
+    // at higher raster scales; it must not restart at the extended left edge.
+    let even=x & ~1;let a=title_yuv(title_filtered(even,y));
+    let b=title_yuv(title_filtered(even+1,y));let l=title_yuv(title_filtered(even-1,y));
+    let chroma=clamp((l.yz+2*a.yz+b.yz)>>vec2<u32>(2u),vec2<i32>(0),vec2<i32>(255))-128;
+    let c=298*(clamp(select(a.x,b.x,(x&1)!=0),0,255)-16);
+    let rgb=clamp((vec3<i32>(c)+vec3<i32>(409*chroma.y+128,-100*chroma.x-208*chroma.y+128,516*chroma.x+128))>>vec3<u32>(8u),vec3<i32>(0),vec3<i32>(255));
+    return vec3<f32>(rgb)/255.0;
+}
 @compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) p:vec3<u32>) {
     let size=textureDimensions(output);let base=textureDimensions(stock);
     if(p.x>=size.x || p.y>=size.y){return;}
@@ -849,6 +896,14 @@ struct PresentationInfo { view:vec4<u32>, raster:vec4<u32> };
         } else {
             color=textureLoad(stock,vec2<i32>(i32(p.x-left),i32(p.y)),0);
         }
+    }else if(info.raster.w!=0u) {
+        let grid=select(base,info.raster.xy,info.raster.x!=0u);
+        let x=i32(floor(f32(i32(p.x)-i32(left))*f32(grid.x)/f32(center)));
+        let y=i32(p.y*grid.y/size.y);
+        let covered=(title_word(x,y)>>24u)!=0u;
+        var rgb=vec3<f32>(0.0);
+        if(covered){rgb=title_display(x,y)*select(1.0,0.25,info.view.w!=0u);}
+        color=vec4<f32>(rgb,1.0);
     }else {
         var x:u32;
         if(p.x<left){x=p.x*margin/left;}
@@ -915,7 +970,9 @@ static void encode_presentation(wgpu::CommandEncoder& encoder,const gpu::Texture
     // Every queued frame retains its own immutable source and GPU handles.
     if(!frame.rgba.empty())gpu::g_queue.WriteBuffer(pixels,0,frame.rgba.data(),frame.rgba.size());
     const uint32_t words[]{frame.width,frame.height,frame.stock_width,uint32_t(dimmed),
-        frame.raster_width,frame.raster_height,frame.raster?uint32_t(uint64_t(output.size.height)*frame.raster_width/frame.raster_height):stock.size.width,0};
+        frame.raster_width,frame.raster_height,frame.raster?uint32_t(uint64_t(output.size.height)*frame.raster_width/frame.raster_height):stock.size.width,uint32_t(frame.filtered),
+        frame.filter[0],frame.filter[1],frame.filter[2],frame.tint,
+        frame.filter_step,0,0,0};
     const wgpu::BufferDescriptor uniform_desc{.label="Native title view geometry",
         .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof words};
     auto uniform=gpu::g_device.CreateBuffer(&uniform_desc);gpu::g_queue.WriteBuffer(uniform,0,words,sizeof words);

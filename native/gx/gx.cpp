@@ -1332,6 +1332,10 @@ int presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* fram
     if(!initialized || failed.load())return 0;
     try{return gcnllr::gpu_bridge::set_presentation_frame(address,frame);}catch(const std::exception& e){fail(e.what());return 0;}
 }
+int presentation_filtered_frame(uint32_t address,const GcWiiNativePresentationFrame* frame,uint32_t tint) {
+    if(!initialized || failed.load())return 0;
+    try{return gcnllr::gpu_bridge::set_filtered_presentation_frame(address,frame,tint);}catch(const std::exception& e){fail(e.what());return 0;}
+}
 int presentation_source(uint32_t address) {
     if(!initialized || failed.load())return 0;
     gcnllr::gpu_bridge::select_presentation_source(address);return 1;
@@ -1352,10 +1356,12 @@ int presentation_resize(uint32_t width,uint32_t height) {
     return window && SDL_SetWindowSize(window,int(width),int(height));
 }
 const GcWiiNativePresentationApi presentation_api={GC_WII_NATIVE_PRESENTATION_ABI,
-    presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read};
+    presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read,presentation_filtered_frame};
+const GcWiiNativePresentationApi legacy_presentation_api={1,
+    presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read,nullptr};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativePresentationApi* gc_wii_native_presentation_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:nullptr;
+    return abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:abi==1?&legacy_presentation_api:nullptr;
 }
 
 namespace {

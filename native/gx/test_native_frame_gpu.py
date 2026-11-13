@@ -60,6 +60,10 @@ class PresentationApi(c.Structure):
         ('resize',c.CFUNCTYPE(c.c_int,c.c_uint32,c.c_uint32)),
         ('read',c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.POINTER(c.c_uint32),c.POINTER(c.c_uint32)))]
 
+class FilteredPresentationApi(c.Structure):
+    _fields_=PresentationApi._fields_+[
+        ('filtered',c.CFUNCTYPE(c.c_int,c.c_uint32,c.POINTER(PresentationFrame),c.c_uint32))]
+
 
 class ResolutionApi(c.Structure):
     _fields_=[('abi',c.c_uint32),('set_scale',c.CFUNCTYPE(c.c_int,c.c_uint32)),
@@ -90,6 +94,7 @@ def main():
     parser.add_argument('--output',action='store_true',help='Qualify owned submission and complete direct/RAM presentation parity')
     parser.add_argument('--video',action='store_true',help='Qualify idle dimming and restoration on actual scanout')
     parser.add_argument('--presentation',action='store_true',help='Qualify immutable title margins and unchanged physical copies')
+    parser.add_argument('--filtered-presentation',action='store_true',help='Compare filtered title margins with real copy/VI pixels, tint and retained generations')
     parser.add_argument('--capture',action='store_true',help='Qualify native tiled texture capture and immutable CPU observation')
     parser.add_argument('--resolution',type=int,choices=(1,2,3,4,8,16),default=1)
     parser.add_argument('--efb-height',type=int,choices=(480,528),default=480)
@@ -298,7 +303,7 @@ def main():
         if args.presentation:
             dll.gc_wii_native_presentation_get_api.argtypes=[c.c_uint32]
             dll.gc_wii_native_presentation_get_api.restype=c.POINTER(PresentationApi)
-            assert not dll.gc_wii_native_presentation_get_api(2)
+            assert not dll.gc_wii_native_presentation_get_api(3)
             presentation=dll.gc_wii_native_presentation_get_api(1).contents
             ww=c.c_uint32();hh=c.c_uint32();assert presentation.window(c.byref(ww),c.byref(hh))
             assert presentation.resize(1280,720) and not presentation.resize(0,720)
@@ -352,6 +357,115 @@ def main():
             else:assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
             assert not presentation.read(None,0,c.byref(ww),c.byref(hh))
             checks.append('title margins stay with their own address/generation; center and physical XFB unchanged')
+        if args.filtered_presentation:
+            dll.gc_wii_native_presentation_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_presentation_get_api.restype=c.POINTER(FilteredPresentationApi)
+            assert not dll.gc_wii_native_presentation_get_api(3)
+            presentation=dll.gc_wii_native_presentation_get_api(2).contents
+            assert presentation.abi==2
+            colors=((33,56,239),(49,190,255),(255,255,255),(0,0,0))
+            records=[]
+            for n,(tint,taps) in enumerate(((0xffffffff,(8,8,10,12,10,8,8)),
+                    (0xffc08040,(0,0,21,22,21,0,0)),(0xffffffff,(0,0,0,0,0,0,0)))):
+                address=0x90018000+n*0x100
+                rgba=(c.c_uint8*(20*4*4))(*[v for color in colors for x in range(20) for v in (*color,255)])
+                view=PresentationFrame(rgba,20,4,14,len(rgba))
+                assert presentation.filtered(address,c.byref(view),tint)
+                # The caller can release/change its pixels immediately.
+                rgba[:]=bytes(len(rgba))
+                for y,color in enumerate(colors):
+                    tinted=tuple((value*((tint>>(8*channel))&255)+127)//255 for channel,value in enumerate(color))
+                    clear(0,y,16,1,tinted)
+                saved=copy(address,0,4,taps=taps);presentation_copies+=1
+                assert frame.complete(0,0)
+                records.append((address,saved))
+            present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)
+            for address,saved in records:
+                assert presentation.source(address)
+                if saved:assert gx.present_copy(saved,16,4,32)
+                else:assert present(c.cast(c.addressof(mem2)+(address&0x0fffffff),c.POINTER(c.c_uint8)),16,4,32)
+                ww=c.c_uint32();hh=c.c_uint32()
+                assert presentation.read(None,0,c.byref(ww),c.byref(hh))
+                center=16*args.resolution;left=(ww.value-center)//2
+                image=(c.c_uint8*(ww.value*hh.value*4))()
+                assert presentation.read(image,len(image),c.byref(ww),c.byref(hh))
+                image=bytes(image)
+                for y in range(hh.value):
+                    expected=image[(y*ww.value+left)*4:(y*ww.value+left+1)*4]
+                    for x in range(ww.value):
+                        assert image[(y*ww.value+x)*4:(y*ww.value+x+1)*4]==expected,('copy-filter margin seam',address,x,y,left,args.resolution)
+            for _,saved in records:
+                if saved:assert retire(None,saved)
+            if args.resolution==1:
+                # Independent oracle: encode the entire extended colored
+                # canvas through a REAL native EFB copy. Crop it with a
+                # three-pixel margin, so output and VI chroma pairs have
+                # different parity. No Python copy/color implementation.
+                palette=((33,56,239),(255,34,5),(0,254,17),(241,255,220))
+                rgba=(c.c_uint8*(20*4*4))(*[v for y in range(4) for x in range(20)
+                    for v in (*palette[(x+y)%4],255)])
+                for y in range(4):
+                    for x in range(32):
+                        sx=max(0,min(19,3+((2*(x-10)+1)*14)//32))
+                        clear(x,y,1,1,palette[(sx+y)%4])
+                reference_address=0x90019000
+                assert presentation.set_frame(reference_address,None)
+                reference_copy=DisplayCopy(reference_address,64,0,0,32,4,256,0,0,3)
+                reference_copy.filter[:]=(8,8,10,12,10,8,8)
+                assert frame.copy(c.byref(reference_copy));presentation_copies+=1
+                reference_token=max(owned) if owned else None
+                assert frame.complete(0,0)
+                if reference_token:assert gx.present_copy(reference_token,32,4,64)
+                else:
+                    assert presentation.source(reference_address)
+                    assert present(c.cast(c.byref(mem2,0x19000),c.POINTER(c.c_uint8)),32,4,64)
+                reference=[pixel(x,y,2) for y in range(4) for x in range(32)]
+                address=0x90019200;view=PresentationFrame(rgba,20,4,14,len(rgba))
+                assert presentation.filtered(address,c.byref(view),0xffffffff)
+                cropped=DisplayCopy(address,32,10,0,16,4,256,0,0,3)
+                cropped.filter[:]=reference_copy.filter[:]
+                assert frame.copy(c.byref(cropped));presentation_copies+=1
+                cropped_token=max(owned) if owned else None
+                assert frame.complete(0,0)
+                if cropped_token:assert gx.present_copy(cropped_token,16,4,32)
+                else:
+                    assert presentation.source(address)
+                    assert present(c.cast(c.byref(mem2,0x19200),c.POINTER(c.c_uint8)),16,4,32)
+                ww=c.c_uint32();hh=c.c_uint32();assert presentation.read(None,0,c.byref(ww),c.byref(hh))
+                assert (ww.value,hh.value)==(22,4)
+                image=(c.c_uint8*(22*4*4))();assert presentation.read(image,len(image),c.byref(ww),c.byref(hh))
+                for y in range(4):
+                    for x in (0,1,2,19,20,21):
+                        r,g,b,a=image[(y*22+x)*4:(y*22+x+1)*4]
+                        assert (a<<24|r<<16|g<<8|b)==reference[y*32+x+7],('native-copy chroma phase',x,y)
+                for saved in (reference_token,cropped_token):
+                    if saved:assert retire(None,saved)
+                checks.append('colored margins with odd center offset match an independent whole-canvas native copy')
+            rgba=(c.c_uint8*(20*4*4))(*[v for y in range(4) for x in range(20)
+                for v in (0,0,255,255 if 3<=x<17 else 0)])
+            view=PresentationFrame(rgba,20,4,14,len(rgba));address=0x90019800
+            assert presentation.filtered(address,c.byref(view),0xffffffff)
+            clear(0,0,16,4,(0,0,255));saved=copy(address,0,4,taps=(8,8,10,12,10,8,8));presentation_copies+=1
+            assert frame.complete(0,0)
+            if saved:assert gx.present_copy(saved,16,4,32)
+            else:
+                assert presentation.source(address)
+                assert present(c.cast(c.byref(mem2,0x19800),c.POINTER(c.c_uint8)),16,4,32)
+            ww=c.c_uint32();hh=c.c_uint32();assert presentation.read(None,0,c.byref(ww),c.byref(hh))
+            image=(c.c_uint8*(ww.value*hh.value*4))();assert presentation.read(image,len(image),c.byref(ww),c.byref(hh))
+            left=(ww.value-16*args.resolution)//2
+            for y in range(hh.value):
+                for x in range(ww.value):
+                    if left<=x<left+16*args.resolution:continue
+                    assert bytes(image[(y*ww.value+x)*4:(y*ww.value+x+1)*4])==bytes((0,0,0,255)),('excluded canvas received filter/chroma bleed',x,y)
+            assert bytes(image[left*4:left*4+3])!=bytes(3),'Coverage clipped the original center'
+            if saved:assert retire(None,saved)
+            checks.append('excluded canvas stays opaque black after filtering while the real center remains visible')
+            assert presentation.filtered(0x90010200,None,0)
+            assert presentation.source(0x90010000)
+            if token:assert gx.present_copy(token,16,2,32)
+            else:assert present(c.cast(c.addressof(mem2)+0x10000,c.POINTER(c.c_uint8)),16,2,32)
+            checks.append('filtered margins equal real copy/VI pixels across row transitions, tint, zero taps and immutable generations')
         if output:
             direct=[pixel(x,y,2) for y in range(2) for x in range(16)]
             present=c.CFUNCTYPE(c.c_int,c.POINTER(c.c_uint8),c.c_uint32,c.c_uint32,c.c_uint32)(gx.present)

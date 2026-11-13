@@ -5,7 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define GC_WII_NATIVE_PRESENTATION_ABI 1u
+#define GC_WII_NATIVE_PRESENTATION_ABI 2u
 /* A title-owned view for the NEXT display copy. The service copies the pixels
  * immediately and retains them with that immutable XFB generation. Presentation
  * adds only the margins: the center remains the actual VI image, with its HUD,
@@ -29,6 +29,14 @@ typedef struct {
     /* Read the actual enhanced GPU output, not guest RAM. Null output queries
      * its dimensions. Zero means the last presentation had no custom view. */
     int (*read_rgba)(uint8_t* output,uint32_t capacity,uint32_t* width,uint32_t* height);
+    /* ABI 2: nearest-sampled, untinted logical copy image. The next display
+     * copy supplies its real vertical filter; margins use the same integer
+     * copy/VI color conversion as the center. tint packs R,G,B in the low three
+     * bytes; output is opaque. A zero-alpha input pixel excludes that part of
+     * the canvas after filtering (opaque black), preserving finite pillarboxes.
+     * Requires both vertical copy clamps. ABI 1 remains available with
+     * its original direct-RGB margin contract and function-table prefix. */
+    int (*set_filtered_frame)(uint32_t xfb_address,const GcWiiNativePresentationFrame*,uint32_t tint);
 } GcWiiNativePresentationApi;
 typedef const GcWiiNativePresentationApi* (*GcWiiNativePresentationGetApi)(uint32_t);
 #ifdef __cplusplus
