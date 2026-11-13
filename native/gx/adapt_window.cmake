@@ -66,6 +66,43 @@ list(APPEND _gcnllr_core_sources "${_gcnllr_gpu_path}")
 set_property(TARGET aurora_core PROPERTY SOURCES "${_gcnllr_core_sources}")
 target_include_directories(aurora_core PRIVATE "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu")
 
+# Pass timestamp descriptors own QuerySet handles. Release the descriptor ring
+# during normal shutdown, rather than from a function-static destructor under
+# the Windows loader lock after the shader compiler has torn down its TLS.
+file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu_prof.cpp" _gcnllr_gpu_prof)
+set(_profiler_ring "std::array<Slot, RingDepth> g_slots;")
+set(_profiler_shutdown "void shutdown() {\n  g_querySet = {};")
+set(_profiler_local [=[  static std::array<wgpu::PassTimestampWrites, 4> writes;
+  static size_t writesIndex = 0;
+  auto& out = writes[writesIndex++ % writes.size()];]=])
+foreach(_profiler_anchor IN ITEMS "${_profiler_ring}" "${_profiler_shutdown}" "${_profiler_local}")
+  string(FIND "${_gcnllr_gpu_prof}" "${_profiler_anchor}" _profiler_offset)
+  if(_profiler_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned Aurora GPU profiler lifetime boundary differs")
+  endif()
+endforeach()
+string(REPLACE "${_profiler_ring}"
+  "${_profiler_ring}\nstd::array<wgpu::PassTimestampWrites, 4> g_passWrites;\nsize_t g_passWritesIndex = 0;"
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+string(REPLACE "${_profiler_shutdown}"
+  "void shutdown() {\n  g_passWrites = {};\n  g_passWritesIndex = 0;\n  g_querySet = {};"
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+string(REPLACE "${_profiler_local}"
+  "  auto& out = g_passWrites[g_passWritesIndex++ % g_passWrites.size()];"
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+string(REPLACE "#include \"../internal.hpp\"" "#include \"internal.hpp\""
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+set(_profiler_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gpu_prof.cpp")
+file(CONFIGURE OUTPUT "${_profiler_path}" CONTENT "${_gcnllr_gpu_prof}" @ONLY)
+get_target_property(_profiler_sources aurora_core SOURCES)
+list(FIND _profiler_sources lib/webgpu/gpu_prof.cpp _profiler_source_index)
+if(_profiler_source_index EQUAL -1)
+  message(FATAL_ERROR "Pinned Aurora GPU profiler target source differs")
+endif()
+list(REMOVE_ITEM _profiler_sources lib/webgpu/gpu_prof.cpp)
+list(APPEND _profiler_sources "${_profiler_path}")
+set_property(TARGET aurora_core PROPERTY SOURCES "${_profiler_sources}")
+
 # Release live-device owners during shutdown, before Windows' loader lock is
 # held by FreeLibrary. The unmodified donor executable never tested DLL unload.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gx/gx.cpp" _gcnllr_gx)
