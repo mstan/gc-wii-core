@@ -15,6 +15,7 @@
 #include "imgui.hpp"
 #include "window.hpp"
 #include "webgpu/gpu.hpp"
+#include "webgpu/gpu_prof.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1105,7 +1106,10 @@ bool present(const uint8_t* yuy2,uint32_t width,uint32_t height,uint32_t stride)
 void finish() {
     gfx::finish();
     gfx::end_frame([](wgpu::CommandEncoder& encoder) {
-        const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);gfx::after_submit();
+        gpu::gpu_prof::frame_end(encoder);
+        const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
+        gpu::gpu_prof::after_submit();
+        gfx::after_submit();
     });
     worker::synchronize();
     recorded_copies=false;
