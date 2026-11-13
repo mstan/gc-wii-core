@@ -19,6 +19,7 @@ if(GCNLLR_ASYNC_COPIES AND (NOT GCNLLR_RESIDENT_XFB OR NOT GCNLLR_GX_COOPERATIVE
   message(FATAL_ERROR "Streamed copies require observed memory and cooperative completion")
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_window.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_worker_timing.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_retail.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_efb.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_viewport_depth.cmake")

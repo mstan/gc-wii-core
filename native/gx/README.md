@@ -153,3 +153,11 @@ very wide final composites keep their aspect within the device texture extent.
 checks actual subpixel raster detail, original copy contracts, live edits and
 immutable presentation. These are component checks, separate from title-wide
 correctness, renderer coverage and sustained performance qualification.
+
+`GCNLLR_RENDER_WORKER_TIMES` optionally names a new CSV file for render-worker
+callback and idle-hook service intervals. Existing files are never overwritten.
+Rows retain monotonic begin/end nanoseconds, queue-item type, frame identity and
+pass index; queue waits are excluded. This is host-thread wall service time,
+not GPU execution time. Unidentified synchronous jobs use frame identity zero
+and need their actual queue-order relationship before per-field attribution.
+The trace is disabled when the variable is unset.
