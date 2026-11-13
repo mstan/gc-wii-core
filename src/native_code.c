@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include "cpu/native_code.h"
+#include "cpu/native_candidate.h"
 #include "cpu/rel_module.h"
 
 #include <string.h>
@@ -13,6 +13,7 @@ static u32 s_invalid_count;
 static u32 s_candidate_start, s_candidate_end;
 static GcnNativeCandidateFn s_candidate;
 static GcnNativeCandidateInvalidateFn s_candidate_invalidate;
+static bool s_candidate_full_watch = true;
 
 /* Content-staleness companion to s_invalid, consumed by interpreter.c's
  * native-miss page-CRC memo. A page's CRC identity can only change through
@@ -53,21 +54,33 @@ void gcn_native_code_reset(void) {
      * repopulated. */
     memset(s_content_stale, 0xFF, sizeof s_content_stale);
     if (s_candidate_invalidate) {
-        gcn_native_code_watch(s_candidate_start,s_candidate_end-s_candidate_start);
+        if (s_candidate_full_watch)
+            gcn_native_code_watch(s_candidate_start,s_candidate_end-s_candidate_start);
         s_candidate_invalidate(s_candidate_start, s_candidate_end - s_candidate_start);
     }
 }
 
-void gcn_native_code_set_candidate(u32 start, u32 end,
-    GcnNativeCandidateFn call, GcnNativeCandidateInvalidateFn invalidate) {
+static void set_candidate(u32 start,u32 end,GcnNativeCandidateFn call,
+                          GcnNativeCandidateInvalidateFn invalidate,bool full_watch) {
     s_candidate_start = start;
     s_candidate_end = end;
     s_candidate = start < end && end <= GC_MAIN_RAM_SIZE ? call : NULL;
     s_candidate_invalidate = s_candidate ? invalidate : NULL;
+    s_candidate_full_watch = full_watch;
     if (s_candidate_invalidate) {
-        gcn_native_code_watch(start,end-start);
+        if (full_watch) gcn_native_code_watch(start,end-start);
         s_candidate_invalidate(start, end - start);
     }
+}
+
+void gcn_native_code_set_candidate(u32 start,u32 end,
+    GcnNativeCandidateFn call,GcnNativeCandidateInvalidateFn invalidate) {
+    set_candidate(start,end,call,invalidate,true);
+}
+
+void gcn_native_code_set_candidate_scoped(u32 start,u32 end,
+    GcnNativeCandidateFn call,GcnNativeCandidateInvalidateFn invalidate) {
+    set_candidate(start,end,call,invalidate,false);
 }
 
 void gcn_native_code_watch(u32 address,u32 size) {

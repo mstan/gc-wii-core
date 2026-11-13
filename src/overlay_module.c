@@ -6,6 +6,7 @@
  */
 #include "cpu/overlay_module.h"
 #include "cpu/aot_module.h"   /* gcn_aot_fnv1a64 -- one hash function, shared */
+#include "cpu/native_code.h"
 #include "debug/cost_ring.h"
 
 /* Same three MEM1 windows the reservation logic and the AOT module fold
@@ -93,6 +94,9 @@ static u32 resolve_resident(GcnOverlayModule* module, CPUState* cpu,
         return GCN_OVERLAY_NONE;
     }
 
+    /* Negative identities are cached too: a later store may restore a known
+     * body. Observe the page before publishing either cached decision. */
+    gcn_native_code_watch(page->start,length);
     u64 live = gcn_aot_fnv1a64(cpu->ram + offset, length);
     module->hashes++;
 
