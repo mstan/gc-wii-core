@@ -47,6 +47,9 @@ class NativeApi(c.Structure):
         ('destroy',c.CFUNCTYPE(c.c_int,c.c_uint64)),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(Draw))),
         ('status',c.CFUNCTYPE(None,c.POINTER(Status)))]
 
+class IndexedApi(c.Structure):
+    _fields_=[('abi',c.c_uint32),('draw',c.CFUNCTYPE(c.c_int,c.POINTER(Draw)))]
+
 class GuiMaterial(c.Structure):
     _fields_=[('low',c.c_int32*4),('high',c.c_int32*4)]
 
@@ -95,6 +98,7 @@ def main():
     parser.add_argument('--layers',action='store_true',help='Check the fixed three-texture GUI background family')
     parser.add_argument('--mask',action='store_true',help='Check the two-texture GUI coverage family')
     parser.add_argument('--effects',action='store_true',help='Check cutoff/additive/product GUI effects and retained UV channels')
+    parser.add_argument('--indexed',action='store_true',help='Check exact native RGB5551 palette assets and index-zero transparency')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -191,6 +195,46 @@ def main():
         assert not native.draw(c.byref(bad)), 'Truncated tiled texture silently accepted'
         status=Status();native.status(c.byref(status))
         assert (status.mesh_uploads,status.draws,status.rejected,status.live_meshes)==(1,7,3,1), vars(status)
+        if args.indexed:
+            dll.gc_wii_native_indexed_get_api.argtypes=[c.c_uint32]
+            dll.gc_wii_native_indexed_get_api.restype=c.POINTER(IndexedApi)
+            assert not dll.gc_wii_native_indexed_get_api(2)
+            indexed=dll.gc_wii_native_indexed_get_api(1).contents
+            for vertex in vertices:vertex.color[:]=(1,1,1,1)
+            indexed_handle=native.create(c.byref(mesh));assert indexed_handle
+            tile=Draw.from_buffer_copy(job);tile.mesh=indexed_handle;tile.material.flags=1;tile.model_view[11]=0
+            tile.material.texture=Texture(0x500,32,8,8,8,0x540,16,0x4d390001,0,0,0)
+            # Equal colors at indices0/1 prove transparency is an index rule,
+            # not an approximate color key or the source color's low bit.
+            c.memmove(c.addressof(ram)+0x540,bytes.fromhex('04000400')+bytes(28),32)
+            c.memset(c.addressof(ram)+0x500,0x01,32)
+            background=Draw.from_buffer_copy(job);background.material=Material();background.model_view[11]=0
+            assert native.draw(c.byref(background))
+            assert not native.draw(c.byref(tile)), 'Render1 accepted a native indexed-only family'
+            assert indexed.draw(c.byref(tile))
+            expect('native CI4 zero index preserves background',40,240,(255,0,0))
+            converted=pixel(120,240)
+            reference=Draw.from_buffer_copy(tile);reference.material.flags=0
+            reference.material.texture=Texture(0x580,32,4,4,4,0,0,0,0,0,0)
+            c.memmove(c.addressof(ram)+0x580,bytes.fromhex('0420')*16,32)
+            assert native.draw(c.byref(reference))
+            assert converted==pixel(120,240),('indexed RGB565 expansion differs from real RGB565 texture',converted,pixel(120,240))
+            observations.append({'check':'native indexed palette exactly matches RGB565 texture expansion','actual':converted})
+            ram[0x543]=1
+            assert indexed.draw(c.byref(tile))
+            assert pixel(120,240)==converted,'RGB5551 low bit changed an opaque palette entry'
+            c.memmove(c.addressof(ram)+0x542,bytes.fromhex('03c0'),2)
+            c.memset(c.addressof(ram)+0x500,0x11,32)
+            assert indexed.draw(c.byref(tile));rewritten=pixel(40,240)
+            c.memmove(c.addressof(ram)+0x580,bytes.fromhex('03c0')*16,32)
+            assert native.draw(c.byref(reference))
+            assert rewritten==pixel(40,240),'Palette/source rewrite was not coherent'
+            observations.append({'check':'native indexed source and palette rewrites remain coherent','actual':rewritten})
+            for field,value in [('palette_format',3),('palette_entries',15),('format',9),('linear',1),('size',0)]:
+                bad=Draw.from_buffer_copy(tile);setattr(bad.material.texture,field,value)
+                assert not indexed.draw(c.byref(bad)),('unsupported indexed descriptor',field)
+            assert native.destroy(indexed_handle)
+            native.status(c.byref(status))
         if args.gui:
             dll.gc_wii_native_gui_get_api.argtypes=[c.c_uint32]
             dll.gc_wii_native_gui_get_api.restype=c.POINTER(GuiApi)

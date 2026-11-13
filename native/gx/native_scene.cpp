@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "native_scene.hpp"
+#include <gcnllr/native_indexed.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -9,7 +10,8 @@
 namespace gcnllr {
 namespace gxc = gxruntime::gxcore;
 
-bool valid_native_texture(const GcWiiNativeTexture& t) {
+bool valid_native_texture(const GcWiiNativeTexture& t){return valid_native_texture(t,false);}
+bool valid_native_texture(const GcWiiNativeTexture& t,bool indexed) {
     if (!t.size) return true;
     if (!t.width || !t.height || t.width>1024 || t.height>1024 ||
         t.wrap_s>2 || t.wrap_t>2 || t.linear>1) return false;
@@ -28,7 +30,9 @@ bool valid_native_texture(const GcWiiNativeTexture& t) {
         // A loaded palette describes its actual span, not the format's
         // maximum index capacity. CI8 images can legitimately use 96 entries.
         // The shared decoder bounds each index against that supplied span.
-        if (!t.palette_entries || t.palette_entries>16384 || t.palette_format>2) return false;
+        if (!t.palette_entries || t.palette_entries>16384) return false;
+        if (t.palette_format>2 && !(indexed && t.format==8 && t.palette_entries==16 &&
+            t.palette_format==GC_WII_NATIVE_PALETTE_RGB5551_ZERO && !t.linear))return false;
     } else if (t.palette_entries) return false;
     return true;
 }
@@ -76,7 +80,8 @@ bool NativeScene::destroy_mesh(uint64_t handle) {
     return true;
 }
 
-gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
+gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job){return prepare(job,false);}
+gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job,bool indexed) {
     const auto found=meshes_.find(job.mesh);
     const auto& texture=job.material.texture;
     const auto decline=[&](const char* reason)->gxc::DrawPlan* {
@@ -94,7 +99,10 @@ gxc::DrawPlan* NativeScene::prepare(const GcWiiNativeDraw& job) {
         !std::isfinite(job.near_depth) || !std::isfinite(job.far_depth) ||
         job.width<=0 || job.height<=0 || job.clip_width<=0 || job.clip_height<=0 ||
         job.near_depth<0 || job.far_depth>1 || job.near_depth>job.far_depth)return decline("Invalid logical raster");
-    if(!valid_native_texture(texture))return decline("Invalid tiled texture descriptor");
+    if(indexed && (!texture.size || texture.format!=8 || texture.palette_entries!=16 ||
+       texture.palette_format!=GC_WII_NATIVE_PALETTE_RGB5551_ZERO || texture.linear))
+        return decline("Invalid native indexed asset family");
+    if(!valid_native_texture(texture,indexed))return decline("Invalid tiled texture descriptor");
     for (float f:job.model_view) if (!std::isfinite(f))return decline("Nonfinite model-view matrix");
     for (float f:job.projection) if (!std::isfinite(f))return decline("Nonfinite projection matrix");
     auto& plan=found->second.plan;

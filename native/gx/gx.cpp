@@ -10,6 +10,7 @@ static uint32_t internal_scale=1;
 #include "gpu_bridge.hpp"
 #include "efb_geometry.hpp"
 #include "native_scene.hpp"
+#include <gcnllr/native_indexed.h>
 #include "native_gui.hpp"
 #include "native_gui_effects.hpp"
 #include "gcnllr/native_frame.h"
@@ -1402,7 +1403,9 @@ int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
                 }
             } else {
                 if(!image(plan->tex_address,plan->tex_size,plan->tex_data,plan->tex_available,DOL_GUEST_RESOURCE_TEXTURE) ||
-                   (plan->has_tlut && (plan->tlut_entries>16384 || plan->tlut_format>2 ||
+                   (plan->has_tlut && (plan->tlut_entries>16384 ||
+                    (plan->tlut_format>2 && !(plan->tlut_format==GC_WII_NATIVE_PALETTE_RGB5551_ZERO &&
+                      plan->tex_format==8 && plan->tlut_entries==16)) ||
                     !image(plan->tlut_address,plan->tlut_entries*2,plan->tlut_data,plan->tlut_available,DOL_GUEST_RESOURCE_TLUT)))) {
                     native_scene.rejected();return 0;
                 }
@@ -1421,6 +1424,12 @@ int draw_native_mesh(const GcWiiNativeDraw* job) {
     if(!native_scene_ready())return 0;
     try {return submit_native_scene(native_scene.prepare(*job));}
     catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int draw_native_indexed(const GcWiiNativeDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try{return submit_native_scene(native_scene.prepare(*job,true));}
+    catch(const std::exception& e){fail(e.what());return 0;}
 }
 int draw_native_gui(const GcWiiNativeGuiDraw* job) {
     if(!job){native_scene.rejected();return 0;}
@@ -1445,6 +1454,7 @@ void native_scene_status(GcWiiNativeRenderStatus* output) {
 }
 const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
     create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
+const GcWiiNativeIndexedApi native_indexed_api={GC_WII_NATIVE_INDEXED_ABI,draw_native_indexed};
 const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
 const GcWiiNativeGuiLayersApi native_gui_layers_api={GC_WII_NATIVE_GUI_LAYERS_ABI,draw_native_gui_layers};
 const GcWiiNativeGuiMaskApi native_gui_mask_api={GC_WII_NATIVE_GUI_MASK_ABI,draw_native_gui_mask};
@@ -1463,6 +1473,9 @@ const GcWiiNativeGuiEffectsApi native_gui_effects_api={GC_WII_NATIVE_GUI_EFFECTS
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeIndexedApi* gc_wii_native_indexed_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_INDEXED_ABI && !GCNLLR_GX_FIFO_WORKER?&native_indexed_api:nullptr;
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeGuiApi* gc_wii_native_gui_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_GUI_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_gui_api:nullptr;

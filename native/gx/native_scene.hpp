@@ -6,6 +6,7 @@
 
 namespace gcnllr {
 bool valid_native_texture(const GcWiiNativeTexture&);
+bool valid_native_texture(const GcWiiNativeTexture&,bool indexed);
 // Owns converted native geometry, not a shadow CP/XF/BP state machine.
 // The GPU backend consumes DrawPlan directly: no FIFO or register decoder.
 class NativeScene {
@@ -14,6 +15,7 @@ public:
     uint32_t uv_count(uint64_t) const;
     bool destroy_mesh(uint64_t);
     gxruntime::gxcore::DrawPlan* prepare(const GcWiiNativeDraw&);
+    gxruntime::gxcore::DrawPlan* prepare(const GcWiiNativeDraw&,bool indexed);
     void submitted() { ++status_.draws; }
     void rejected() { ++status_.rejected; }
     void reset();
