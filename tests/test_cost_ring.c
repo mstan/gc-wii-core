@@ -2,6 +2,9 @@
 #include "debug/cost_ring.h"
 #include <stdio.h>
 #include <string.h>
+#if !GCN_COST_RING_ENABLED && defined(_WIN32)
+#include <windows.h>
+#endif
 
 static int failures;
 #define CHECK(condition) do { if(!(condition)) { \
@@ -19,6 +22,46 @@ static void read_json(char* output,size_t capacity,u32 limit) {
     fclose(file);
 }
 
+#if !GCN_COST_RING_ENABLED
+static void check_disabled(u32 limit) {
+    char json[512];
+    read_json(json,sizeof json,limit);
+    CHECK(strstr(json,"\"enabled\":false"));
+    CHECK(strstr(json,"\"clock\":\"disabled\""));
+    CHECK(strstr(json,"\"clock_pair_overhead_ticks\":0"));
+    CHECK(strstr(json,"\"written\":0"));
+    CHECK(strstr(json,"\"fields\":[]"));
+    CHECK(!gcn_cost_sampling);
+}
+static void invoke_disabled(void) {
+    /* The first direct call exposed an uninitialized Windows clock when OFF.
+     * Direct operations and unusual values must stay inert before init too. */
+    gcn_cost_owner_boundary(GCN_COST_OWNER_GRAPHICS);
+    CHECK(gcn_cost_boundary(GCN_COST_DSP)==GCN_COST_HOST);
+    gcn_cost_begin_turn(UINT64_MAX,~0u);
+    gcn_cost_thread_boundary(0,0);
+    gcn_cost_note_idle(UINT64_MAX);
+    const unsigned previous=gcn_cost_enter(GCN_COST_DSP);
+    CHECK(previous==GCN_COST_HOST);
+    gcn_cost_leave(previous);
+    gcn_cost_end_turn(0);
+    gcn_cost_finish_field(UINT64_MAX,0);
+}
+int main(void) {
+#ifdef _WIN32
+    SetErrorMode(SEM_NOGPFAULTERRORBOX|SEM_FAILCRITICALERRORS);
+#endif
+    check_disabled(0);
+    invoke_disabled();
+    check_disabled(UINT32_MAX);
+    gcn_cost_init(UINT64_MAX);
+    for(unsigned i=0;i<4;++i)invoke_disabled();
+    check_disabled(1);
+    gcn_cost_init(0);
+    check_disabled(UINT32_MAX);
+    return failures?1:0;
+}
+#else
 int main(void) {
     char json[8192];
     gcn_cost_init(0);
@@ -58,3 +101,5 @@ int main(void) {
     CHECK(strstr(json,"\"field\":2052,"));
     return failures?1:0;
 }
+
+#endif

@@ -1,5 +1,22 @@
 /* SPDX-License-Identifier: MIT */
 #include "debug/cost_ring.h"
+#if !GCN_COST_RING_ENABLED
+/* Consumers may call accounting entry points directly even when their own
+ * scopes are compiled out. OFF must neither require init nor read a clock. */
+bool gcn_cost_sampling;
+unsigned gcn_cost_boundary(unsigned next) { (void)next;return GCN_COST_HOST; }
+void gcn_cost_init(u64 cycles) { (void)cycles;gcn_cost_sampling=false; }
+void gcn_cost_begin_turn(u64 cycles,u32 thread) { (void)cycles;(void)thread; }
+void gcn_cost_end_turn(u64 cycles) { (void)cycles; }
+void gcn_cost_owner_boundary(GcnCostOwner next) { (void)next; }
+void gcn_cost_thread_boundary(u64 cycles,u32 thread) { (void)cycles;(void)thread; }
+void gcn_cost_note_idle(u64 cycles) { (void)cycles; }
+void gcn_cost_finish_field(u64 field,u64 cycles) { (void)field;(void)cycles; }
+void gcn_cost_write_json(FILE* output,u32 limit) {
+    (void)limit;
+    fputs("{\"enabled\":false,\"clock\":\"disabled\",\"clock_pair_overhead_ticks\":0,\"sampling_period\":257,\"written\":0,\"fields\":[]}",output);
+}
+#else
 #include <string.h>
 #if defined(__x86_64__) || defined(_M_X64)
 #ifdef _MSC_VER
@@ -235,3 +252,5 @@ void gcn_cost_write_json(FILE* output,u32 limit) {
     }
     fputs("]}",output);
 }
+
+#endif /* GCN_COST_RING_ENABLED */

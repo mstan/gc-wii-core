@@ -78,6 +78,8 @@ static inline void gcn_cost_leave(unsigned previous) {
 #endif
 }
 
+/* A compiled-OFF provider keeps every exported operation clock-free and
+ * inert even before init; JSON explicitly reports disabled with no fields. */
 void gcn_cost_init(u64 guest_cycles);
 void gcn_cost_begin_turn(u64 guest_cycles,u32 current_thread);
 void gcn_cost_end_turn(u64 guest_cycles);
