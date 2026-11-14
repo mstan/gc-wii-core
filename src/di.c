@@ -7,6 +7,14 @@
  * false, and Read Sector / Read DiscID perform real seek+fread transfers from
  * the mounted image.
  */
+#ifndef _WIN32
+#ifndef _FILE_OFFSET_BITS
+#define _FILE_OFFSET_BITS 64
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
 #include "di/di.h"
 #include "debug/rings.h"
 #include "memory/memory.h"   /* gcn_mem_resolve — direct-into-guest-RAM disc reads */
@@ -16,6 +24,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
+/* Disc command offsets exceed 4 GiB. Keep host file positioning 64-bit on
+ * both the Windows CRT and POSIX, with the original error return contract. */
+static int di_file_seek(FILE* file, long long offset, int origin) {
+#ifdef _WIN32
+    return _fseeki64(file, offset, origin);
+#else
+    _Static_assert(sizeof(off_t)>=8,"DI requires 64-bit POSIX file offsets");
+    return fseeko(file, (off_t)offset, origin);
+#endif
+}
+static long long di_file_tell(FILE* file) {
+#ifdef _WIN32
+    return _ftelli64(file);
+#else
+    return (long long)ftello(file);
+#endif
+}
 
 /* The dispatch loop ticks one DI (like the one VI); registered at init. */
 static GcnDi* s_di = NULL;
@@ -396,8 +426,12 @@ static void di_commit_pending_read(GcnDi* di, CPUState* cpu) {
     if (avail < dvd_length)
         dvd_length = avail;
 
-    _fseeki64(di->disc_file, (long long)dvd_offset, SEEK_SET);
-    size_t got = fread(dst, 1, dvd_length, di->disc_file);
+    size_t got = 0;
+    if (di_file_seek(di->disc_file, (long long)dvd_offset, SEEK_SET) == 0)
+        got = fread(dst, 1, dvd_length, di->disc_file);
+    else
+        fprintf(stderr,"gcn di: cannot seek mounted disc to %llu\n",
+                (unsigned long long)dvd_offset);
     if (got < (size_t)dvd_length)
         /* Real hardware/Dolphin never reads short inside disc_size; the only
          * way we land here is the file being shorter than `disc_size` said
@@ -638,18 +672,31 @@ int gcn_di_set_disc(GcnDi* di, const char* path) {
         fprintf(stderr, "gcn di: cannot open disc image '%s'\n", path);
         return 0;
     }
-    if (_fseeki64(f, 0, SEEK_END) != 0) {
+#ifndef _WIN32
+    /* POSIX can open/seek a directory, whose end cookie is not a file size. */
+    struct stat info;
+    if (fstat(fileno(f), &info) != 0 || !S_ISREG(info.st_mode)) {
+        fprintf(stderr, "gcn di: disc image '%s' is not a regular file\n", path);
+        fclose(f);
+        return 0;
+    }
+#endif
+    if (di_file_seek(f, 0, SEEK_END) != 0) {
         fprintf(stderr, "gcn di: cannot seek disc image '%s'\n", path);
         fclose(f);
         return 0;
     }
-    long long sz = _ftelli64(f);
+    long long sz = di_file_tell(f);
     if (sz <= 0) {
         fprintf(stderr, "gcn di: disc image '%s' is empty/unreadable\n", path);
         fclose(f);
         return 0;
     }
-    _fseeki64(f, 0, SEEK_SET);
+    if (di_file_seek(f, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "gcn di: cannot rewind disc image '%s'\n", path);
+        fclose(f);
+        return 0;
+    }
 
     if (di->disc_file)   /* SetDisc replaces any previously-mounted image */
         fclose(di->disc_file);

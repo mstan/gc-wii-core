@@ -190,6 +190,12 @@ add_executable(test_vi_xfb tests/test_vi_xfb.c src/vi.c)
 target_link_libraries(test_vi_xfb PRIVATE gcn_runtime_core)
 add_test(NAME vi_xfb_geometry COMMAND test_vi_xfb)
 
+add_executable(test_di_file tests/test_di_file.c src/di.c)
+target_link_libraries(test_di_file PRIVATE gcn_runtime_core)
+add_test(NAME di_large_file_io COMMAND test_di_file
+  "${CMAKE_CURRENT_BINARY_DIR}/di-large-file-fixture.bin"
+  "${CMAKE_CURRENT_BINARY_DIR}")
+
 # M4: EXI memcard device model + GCMemcard image module. Both are standalone
 # (only libc + their own headers), so they build/test without the generated C.
 add_executable(test_memcard tests/test_memcard.c src/memcard.c)
