@@ -14,6 +14,9 @@ extern "C" {
 #ifndef GCN_COST_RING_ENABLED
 #define GCN_COST_RING_ENABLED 1
 #endif
+#ifndef GCN_COST_THREAD_FAST
+#define GCN_COST_THREAD_FAST 0
+#endif
 
 typedef enum {
     GCN_COST_HOST,
@@ -86,6 +89,30 @@ void gcn_cost_end_turn(u64 guest_cycles);
 void gcn_cost_owner_boundary(GcnCostOwner);
 /* Account thread changes inside an event-owner turn without adding clocks. */
 void gcn_cost_thread_boundary(u64 guest_cycles,u32 current_thread);
+/* Optional inline observation of the canonical turn origin/thread. Only the
+ * last unchanged-thread timestamp is pending; all cycle totals stay in the
+ * existing ledger. A NULL provider retains the raw API (including OFF). */
+typedef struct {
+    u64 cycles,pending_cycles;
+    u32 thread;
+    bool pending;
+} GcnCostThreadState;
+extern GcnCostThreadState* const gcn_cost_thread_state;
+#if GCN_COST_THREAD_FAST
+static inline void gcn_cost_thread_boundary_fast(u64 cycles,u32 thread) {
+#if GCN_COST_RING_ENABLED
+    GcnCostThreadState* state=gcn_cost_thread_state;
+    if(state && thread==state->thread &&
+       cycles>=(state->pending?state->pending_cycles:state->cycles)) {
+        state->pending_cycles=cycles;state->pending=true;
+        return;
+    }
+#endif
+    gcn_cost_thread_boundary(cycles,thread);
+}
+#else
+#define gcn_cost_thread_boundary_fast gcn_cost_thread_boundary
+#endif
 void gcn_cost_note_idle(u64 skipped_cycles);
 void gcn_cost_finish_field(u64 field,u64 guest_cycles);
 void gcn_cost_write_json(FILE*,u32 limit);

@@ -4,6 +4,7 @@
 /* Consumers may call accounting entry points directly even when their own
  * scopes are compiled out. OFF must neither require init nor read a clock. */
 bool gcn_cost_sampling;
+GcnCostThreadState* const gcn_cost_thread_state=NULL;
 unsigned gcn_cost_boundary(unsigned next) { (void)next;return GCN_COST_HOST; }
 void gcn_cost_init(u64 cycles) { (void)cycles;gcn_cost_sampling=false; }
 void gcn_cost_begin_turn(u64 cycles,u32 thread) { (void)cycles;(void)thread; }
@@ -34,10 +35,22 @@ void gcn_cost_write_json(FILE* output,u32 limit) {
 
 bool gcn_cost_sampling;
 static GcnCostField ring[GCN_COST_RING_CAPACITY],current;
-static u64 written,field_cycles,field_start,turn_cycles,sample_start,total_turns;
+static u64 written,field_cycles,field_start,sample_start,total_turns;
 static u64 field_ticks,clock_overhead,turn_end_ticks;
 static bool use_tsc;
-static u32 turn_thread,last_thread_index;
+static u32 last_thread_index;
+#if GCN_COST_THREAD_FAST
+static GcnCostThreadState thread_state;
+GcnCostThreadState* const gcn_cost_thread_state=&thread_state;
+#define turn_cycles thread_state.cycles
+#define turn_thread thread_state.thread
+static void flush_thread_pending(void);
+#else
+static u64 turn_cycles;
+static u32 turn_thread;
+GcnCostThreadState* const gcn_cost_thread_state=NULL;
+#define flush_thread_pending() ((void)0)
+#endif
 static unsigned bucket;
 static unsigned owner_bucket;
 static u64 owner_start;
@@ -87,6 +100,8 @@ static u64 ticks_now(void) {
 }
 
 void gcn_cost_init(u64 cycles) {
+    /* Raw init clears accumulated totals but retains the last origin. */
+    flush_thread_pending();
 #ifdef _WIN32
     LARGE_INTEGER value;
     QueryPerformanceFrequency(&value);
@@ -135,6 +150,8 @@ void gcn_cost_owner_boundary(GcnCostOwner next) {
 }
 
 void gcn_cost_begin_turn(u64 cycles,u32 thread) {
+    /* A bootstrap launch can begin another turn without ending this one. */
+    flush_thread_pending();
     turn_cycles=cycles;
     turn_thread=thread;
     ++current.turns;
@@ -171,7 +188,18 @@ static void charge_thread(u64 cycles) {
     current.threads[last_thread_index].cycles+=elapsed;
 }
 
+#if GCN_COST_THREAD_FAST
+static void flush_thread_pending(void) {
+    if(thread_state.pending) {
+        thread_state.pending=false;
+        charge_thread(thread_state.pending_cycles);
+        turn_cycles=thread_state.pending_cycles;
+    }
+}
+#endif
+
 void gcn_cost_thread_boundary(u64 cycles,u32 thread) {
+    flush_thread_pending();
     charge_thread(cycles);
     turn_cycles=cycles;turn_thread=thread;
 }
@@ -186,10 +214,12 @@ void gcn_cost_end_turn(u64 cycles) {
     owner_at(GCN_COST_OWNER_HOST,now);
     turn_end_ticks=now;
     gcn_cost_sampling=false;
+    flush_thread_pending();
     charge_thread(cycles);
 }
 
 void gcn_cost_finish_field(u64 field,u64 cycles) {
+    flush_thread_pending();
     const u64 now=now_ns();
     const u64 ticks=ticks_now();
     owner_at(GCN_COST_OWNER_HOST,ticks);
