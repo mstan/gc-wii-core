@@ -36,6 +36,19 @@ bool gcn_overlay_region_call(GcnOverlayModule*, CPUState*,
                              GcnOverlayRegion*, u32 address);
 GcnOverlayRegionInvocation gcn_overlay_region_invocation(void);
 
+/* Code ownership only, for safety checks between the original scheduling
+ * checkpoints. Exceptions, halt, deadline and owner policy remain cross's
+ * responsibility; calling this must not create a new device/yield boundary. */
+static inline bool gcn_overlay_region_identity(
+    const GcnOverlayRegionInvocation* invocation,const CPUState* cpu,u32 target) {
+    if(!invocation || !cpu || !invocation->region)return false;
+    const GcnOverlayRegion* region=invocation->region;
+    return invocation->cpu==cpu && region->cpu==cpu && region->enabled && region->valid &&
+        invocation->generation==region->generation && !(target&3u) &&
+        target>=region->start &&
+        (u64)target<(u64)region->start+(u64)region->page_count*4096u;
+}
+
 /* Emit this guard on EVERY cross-page entry, including local calls, shadow
  * returns and sequential flow. Entry-only attestation is insufficient: a store
  * or callback can invalidate another member while the current body runs.
@@ -44,13 +57,10 @@ GcnOverlayRegionInvocation gcn_overlay_region_invocation(void);
 static inline bool gcn_overlay_region_cross(
     const GcnOverlayRegionInvocation* invocation, const CPUState* cpu,
     u32 target, u64 cycles, u64 deadline) {
+    if (!invocation || !cpu) return false;
     GcnOverlayRegion* region=invocation->region;
     if (!region) return false;
-    const bool inside=target>=region->start &&
-        (u64)target<(u64)region->start+(u64)region->page_count*4096u;
-    bool allowed=invocation->cpu==cpu && region->cpu==cpu &&
-        region->enabled && region->valid &&
-        invocation->generation==region->generation && inside && !(target&3u) &&
+    bool allowed=gcn_overlay_region_identity(invocation,cpu,target) &&
         !cpu->exception && !cpu->halted && cycles<deadline;
     if (allowed && region->boundary)
         allowed=region->boundary(cpu,target,cycles,region->boundary_user);

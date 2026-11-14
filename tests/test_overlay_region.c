@@ -113,16 +113,33 @@ int main(void) {
     CHECK(cpu.gpr[3]==1 && cpu.gpr[4]==1);
 
     GcnOverlayRegionInvocation invocation={&region,&cpu,region.generation};
+    CHECK(!gcn_overlay_region_identity(NULL,&cpu,0x80002000u));
+    CHECK(!gcn_overlay_region_identity(&invocation,NULL,0x80002000u));
+    CHECK(!gcn_overlay_region_cross(NULL,&cpu,0x80002000u,1,100));
+    CHECK(!gcn_overlay_region_cross(&invocation,NULL,0x80002000u,1,100));
+    CHECK(gcn_overlay_region_identity(&invocation,&cpu,0x80002000u));
+    /* A safety observation cannot introduce an earlier scheduling boundary. */
+    CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,1));
+    CHECK(gcn_overlay_region_identity(&invocation,&cpu,0x80002000u));
     CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0xc0002000u,1,100));
     CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002001u,1,100));
     cpu.exception=1;CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,100));
+    CHECK(gcn_overlay_region_identity(&invocation,&cpu,0x80002000u));
     cpu.exception=0;cpu.halted=true;
-    CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,100));cpu.halted=false;
+    CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,100));
+    CHECK(gcn_overlay_region_identity(&invocation,&cpu,0x80002000u));cpu.halted=false;
     CPUState other=cpu;CHECK(!gcn_overlay_region_cross(&invocation,&other,0x80002000u,1,100));
+    CHECK(!gcn_overlay_region_identity(&invocation,&other,0x80002000u));
+    CHECK(!gcn_overlay_region_identity(&invocation,&cpu,0xc0002000u));
+    CHECK(!gcn_overlay_region_identity(&invocation,&cpu,0x80002001u));
+    GcnOverlayRegionInvocation retired=invocation;--retired.generation;
+    CHECK(!gcn_overlay_region_identity(&retired,&cpu,0x80002000u));
     region.boundary=boundary;region.boundary_user=&owner_allows;owner_allows=false;
+    CHECK(gcn_overlay_region_identity(&invocation,&cpu,0x80002000u));
     CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,100));
     owner_allows=true;CHECK(gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,100));
     gcn_overlay_region_enable(&region,false);
+    CHECK(!gcn_overlay_region_identity(&invocation,&cpu,0x80002000u));
     CHECK(!gcn_overlay_region_cross(&invocation,&cpu,0x80002000u,1,100));
     CHECK(!gcn_overlay_region_call(&module,&cpu,&region,cpu.pc));
     /* Invalid shape cannot be opted in, including a range crossing MEM1. */
