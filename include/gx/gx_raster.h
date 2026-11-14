@@ -113,7 +113,8 @@ void gx_raster_restore_reset(void);
 /* CPU EFB aperture access (physical 0x08000000..0x0BFFFFFF, normally reached
  * through the SDK's 0xC8000000 effective mapping). `address` keeps the encoded
  * x/y and color-vs-depth plane bits. Returns 1 when the access is implemented;
- * unsupported combined/color cases return 0 so the PE bus layer can report
+ * color returns raw ARGB before PE alpha-read policy. Unsupported combined
+ * cases return 0 so the PE bus layer can report
  * them loudly rather than fabricate a value. The caller must first retire
  * queued GX work and materialize any resident GPU EFB. */
 int gx_raster_efb_cpu_read(u32 address, u32* value);

@@ -1228,8 +1228,21 @@ int gx_raster_efb_cpu_read(u32 address, u32* value) {
         return 1;
     }
 
-    TRAP(efb_cpu_color, "CPU EFB color read");
-    return 0;
+    /* SWEFBInterface::PeekColorInternal: expose the current packed EFB in
+     * CPU ARGB order. Consult the live format register, including changes
+     * since the last draw (s_pf is only a draw/clear specialization). The
+     * CPU-facing PE layer applies its separate alpha-read mode. */
+    u32 rgba;
+    switch(pixel_format()) {
+    case PF_RGB8_Z24: case PF_Z24: case PF_RGB565_Z16:
+        rgba=get_pixel_color_direct(y*EFB_WIDTH+x);break;
+    case PF_RGBA6_Z24:
+        rgba=get_pixel_color_rgba6(y*EFB_WIDTH+x);break;
+    default:
+        TRAP(efb_cpu_color_format,"CPU EFB color read pixel format");return 0;
+    }
+    *value=(rgba>>8)|(rgba<<24);
+    return 1;
 }
 
 /* BlendMode (bp 0x41) accessors. */
