@@ -161,3 +161,15 @@ pass index; queue waits are excluded. This is host-thread wall service time,
 not GPU execution time. Unidentified synchronous jobs use frame identity zero
 and need their actual queue-order relationship before per-field attribution.
 The trace is disabled when the variable is unset.
+
+`DOL_AURORA_GPU_PROF=1` also labels existing timestamp packets by native VI
+presentation interval. `[gpu-presentation]` reports the sum of complete packet
+durations (`packet_busy_ns`), non-nested instrumented pass time, and the separate
+first-to-last GPU queue span. These are not hardware occupancy or guest VI field
+counts. The existing native presentation counter supplies the closing ID; a
+current-title run must establish its relationship with guest VI fields.
+Startup, shutdown tails, missing/invalid/asynchronous results, query loss and
+known untimestamped native uploads/submissions/readbacks mark the packet set
+incomplete. Empty intervals have null metrics. `packet_set_complete` certifies
+that tagged packet set only, not coverage of every GPU operation. Logging is
+off by default and adds no query buffers or worker boundary commands while off.

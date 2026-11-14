@@ -221,6 +221,10 @@ add_executable(test_gx_pipeline tests/test_gx_pipeline.c)
 target_include_directories(test_gx_pipeline PRIVATE include)
 add_test(NAME gx_pipeline_carry_boundary COMMAND test_gx_pipeline)
 
+add_executable(test_gpu_field_prof tests/test_gpu_field_prof.cpp)
+target_include_directories(test_gpu_field_prof PRIVATE native/gx)
+add_test(NAME gpu_presentation_intervals COMMAND test_gpu_field_prof)
+
 # Interpreter counted-cache-loop batching fast path: exactness of batched vs.
 # unbatched icbi/dcbi loop execution (GPR/CTR/cycles/native-invalidation),
 # including a cycle-deadline crossing mid-loop.

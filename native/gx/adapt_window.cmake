@@ -92,6 +92,7 @@ string(REPLACE "${_profiler_local}"
   _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
 string(REPLACE "#include \"../internal.hpp\"" "#include \"internal.hpp\""
   _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_gpu_fields.cmake")
 set(_profiler_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gpu_prof.cpp")
 file(CONFIGURE OUTPUT "${_profiler_path}" CONTENT "${_gcnllr_gpu_prof}" @ONLY)
 get_target_property(_profiler_sources aurora_core SOURCES)
