@@ -102,6 +102,7 @@ add_library(gcn_runtime_core STATIC
   src/interpreter.c
   src/aot_module.c
   src/overlay_module.c
+  src/overlay_region.c
   src/native_code.c
   src/dsp_regs.c
   src/audio_dma.c
@@ -167,6 +168,54 @@ add_test(NAME aot_module_identity COMMAND test_aot_module)
 add_executable(test_overlay_module tests/test_overlay_module.c)
 target_link_libraries(test_overlay_module PRIVATE gcn_runtime_core)
 add_test(NAME overlay_pc_namespaces COMMAND test_overlay_module)
+add_executable(test_overlay_region tests/test_overlay_region.c)
+target_link_libraries(test_overlay_region PRIVATE gcn_runtime_core)
+add_test(NAME overlay_region_invalidation COMMAND test_overlay_region)
+# Optional generated-code contract test.  The compiler is supplied by the
+# developer; normal shared-core builds have no code-generation dependency.
+set(GCN_REGION_CODEGEN_COMPILER "" CACHE FILEPATH "DolRecomp executable for emitted overlay-region tests")
+if(GCN_REGION_CODEGEN_COMPILER AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  set(REGION_FIXTURES "${CMAKE_CURRENT_BINARY_DIR}/overlay_region_codegen")
+  set(REGION_OUTPUTS "${REGION_FIXTURES}/synthetic.bin")
+  foreach(namespace cached physical uncached)
+    if(namespace STREQUAL "cached")
+      set(region_base 80001000)
+    elseif(namespace STREQUAL "physical")
+      set(region_base 00001000)
+    else()
+      set(region_base C0001000)
+    endif()
+    list(APPEND REGION_OUTPUTS
+      "${REGION_FIXTURES}/${namespace}/region.c"
+      "${REGION_FIXTURES}/${namespace}/generated_abi.h"
+      "${REGION_FIXTURES}/${namespace}/overlay_regions.inc"
+      "${REGION_FIXTURES}/${namespace}/members/page_${region_base}.c")
+    math(EXPR region_next "0x${region_base} + 4096" OUTPUT_FORMAT HEXADECIMAL)
+    string(SUBSTRING "${region_next}" 2 -1 region_next)
+    string(TOUPPER "${region_next}" region_next)
+    if(namespace STREQUAL "physical")
+      set(region_next 00002000)
+    endif()
+    list(APPEND REGION_OUTPUTS "${REGION_FIXTURES}/${namespace}/members/page_${region_next}.c")
+    add_executable(test_overlay_region_codegen_${namespace}
+      tests/test_overlay_region_codegen.c
+      "${REGION_FIXTURES}/${namespace}/region.c"
+      "${REGION_FIXTURES}/${namespace}/members/page_${region_base}.c"
+      "${REGION_FIXTURES}/${namespace}/members/page_${region_next}.c")
+    target_include_directories(test_overlay_region_codegen_${namespace} PRIVATE "${REGION_FIXTURES}/${namespace}")
+    target_compile_definitions(test_overlay_region_codegen_${namespace} PRIVATE
+      TEST_REGION_BASE=0x${region_base}u DOLRECOMP_NATIVE_CHAIN=0)
+    target_link_libraries(test_overlay_region_codegen_${namespace} PRIVATE gcn_runtime_core)
+    add_test(NAME overlay_region_emitted_${namespace}
+      COMMAND test_overlay_region_codegen_${namespace} "${REGION_FIXTURES}/synthetic.bin")
+  endforeach()
+  add_custom_command(OUTPUT ${REGION_OUTPUTS}
+    COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/prepare_overlay_region_codegen.py"
+      --compiler "${GCN_REGION_CODEGEN_COMPILER}" --output "${REGION_FIXTURES}"
+    DEPENDS tests/prepare_overlay_region_codegen.py tools/gen_overlay_region.py tools/gen_overlay_module.py
+    VERBATIM COMMENT "Generating one synthetic overlay tuple in its three PC namespaces")
+endif()
 add_executable(test_cost_ring tests/test_cost_ring.c)
 target_link_libraries(test_cost_ring PRIVATE gcn_runtime_core)
 add_test(NAME cost_ring_fields COMMAND test_cost_ring)
