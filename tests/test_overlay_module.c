@@ -89,8 +89,18 @@ int main(void){
     u32 resident[]={GCN_OVERLAY_UNKNOWN,GCN_OVERLAY_UNKNOWN,GCN_OVERLAY_UNKNOWN};
     GcnOverlayModule module={pages,&variant,resident,3,1};
     static u32 index[GCN_OVERLAY_INDEX_SLOTS];
+    /* Eligibility never binds/hashes code or loses unknown catalog ownership.
+     * All aliases share bytes, including a catalog with only one namespace. */
+    CHECK(!gcn_overlay_module_unowned_range(&module,0x3000,0));
+    CHECK(!gcn_overlay_module_unowned_range(NULL,0x3000,1));
+    CHECK(!gcn_overlay_module_unowned_range(&module,0x817fffff,2));
+    CHECK(gcn_overlay_module_unowned_range(&module,0x3000,8));
+    CHECK(!gcn_overlay_module_unowned_range(&module,0xc0000fff,2));
     CHECK(!gcn_overlay_module_index(&module,index,GCN_OVERLAY_INDEX_SLOTS-1));
     CHECK(gcn_overlay_module_index(&module,index,GCN_OVERLAY_INDEX_SLOTS));
+    CHECK(gcn_overlay_module_unowned_range(&module,0x80003000,8));
+    CHECK(!gcn_overlay_module_unowned_range(&module,0x1fff,2));
+    CHECK(module.hashes==0 && module.pages_resident==0);
     for(unsigned i=0;i<3;i++){
         cpu.pc=pages[i].start+8;
         const u64 before=module.dispatches;
@@ -116,6 +126,8 @@ int main(void){
     /* A cached-only table cannot substitute its body for a physical PC. */
     GcnOverlayModule cached={pages+1,&variant,resident+1,1,1};
     CHECK(gcn_overlay_module_index(&cached,index,GCN_OVERLAY_INDEX_SLOTS));
+    CHECK(!gcn_overlay_module_unowned_range(&cached,0x1000,4));
+    CHECK(!gcn_overlay_module_unowned_range(&cached,0xc0001000,4));
     resident[1]=GCN_OVERLAY_UNKNOWN;cpu.ram[0x1000]=0;cpu.pc=0x1008;
     CHECK(!gcn_overlay_module_call(&cached,&cpu,cpu.pc));
     CHECK(!gcn_overlay_module_bind(&cached,&cpu,cpu.pc));

@@ -57,6 +57,31 @@ static int index_slot(u32 address) {
     return (int)(bank*(GC_MAIN_RAM_SIZE/4096u)+offset/4096u);
 }
 
+/* SPDX-License-Identifier: MIT */
+bool gcn_overlay_module_unowned_range(const GcnOverlayModule* module,u32 address,u32 size) {
+    u32 canonical,offset;
+    if(!module || !size || !canonical_mem1(address,&canonical,&offset) ||
+       size>GC_MAIN_RAM_SIZE-offset || (module->page_count && !module->pages))return false;
+    const u32 end=offset+size;
+    if(module->index) {
+        const u32 pages=GC_MAIN_RAM_SIZE/4096u;
+        for(u32 page=offset/4096u;page<=(end-1u)/4096u;++page)
+            for(u32 bank=0;bank<3u;++bank)
+                if(module->index[bank*pages+page]!=GCN_OVERLAY_NONE)return false;
+        return true;
+    }
+    /* Partial/duplicate catalog shapes retain the existing search floor.
+     * Ownership is physical even though executable binding is not. */
+    for(u32 i=0;i<module->page_count;++i) {
+        const GcnOverlayPage* page=&module->pages[i];
+        u32 ignored,start;
+        if(page->end<=page->start || !canonical_mem1(page->start,&ignored,&start) ||
+           page->end-page->start>GC_MAIN_RAM_SIZE-start)return false;
+        if(start<end && (u64)start+page->end-page->start>offset)return false;
+    }
+    return true;
+}
+
 bool gcn_overlay_module_index(GcnOverlayModule* module,u32* storage,u32 capacity) {
     if(!module)return false;
     module->index=NULL;
