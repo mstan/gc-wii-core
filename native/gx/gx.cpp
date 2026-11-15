@@ -12,6 +12,7 @@ static uint32_t internal_scale=1;
 #include "native_scene.hpp"
 #include "native_gui.hpp"
 #include "native_gui_effects.hpp"
+#include "native_gui_program.hpp"
 #include "gcnllr/native_frame.h"
 #include "gcnllr/native_output.h"
 #include "gcnllr/native_presentation.h"
@@ -1455,11 +1456,13 @@ template<class Input> int draw_gui_effect(const Input* input,gxruntime::gxcore::
 int draw_gui_cutout(const GcWiiNativeGuiCutoutDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_cutout);}
 int draw_gui_add(const GcWiiNativeGuiAddDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_add);}
 int draw_gui_product(const GcWiiNativeGuiProductDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_product);}
+int draw_gui_program(const GcWiiNativeGuiProgramDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_program);}
 uint64_t create_gui_mesh(const GcWiiNativeGuiMesh* input) {
     if(!initialized || failed.load() || fifo_worker || !input){native_scene.rejected();return 0;}
     try{return native_scene.create_mesh(input->mesh,input->extra_uv,input->extra_uv_count);}catch(const std::exception& e){fail(e.what());return 0;}
 }
 const GcWiiNativeGuiEffectsApi native_gui_effects_api={GC_WII_NATIVE_GUI_EFFECTS_ABI,create_gui_mesh,draw_gui_cutout,draw_gui_add,draw_gui_product};
+const GcWiiNativeGuiProgramApi native_gui_program_api={GC_WII_NATIVE_GUI_PROGRAM_ABI,create_gui_mesh,draw_gui_program};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
@@ -1475,6 +1478,9 @@ extern "C" GCNLLR_EXPORT const GcWiiNativeGuiMaskApi* gc_wii_native_gui_mask_get
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeGuiEffectsApi* gc_wii_native_gui_effects_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_GUI_EFFECTS_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_effects_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiProgramApi* gc_wii_native_gui_program_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_PROGRAM_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_program_api:nullptr;
 }
 
 namespace {

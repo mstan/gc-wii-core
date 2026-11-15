@@ -70,7 +70,8 @@ if(NOT GCNLLR_GPU_BACKEND MATCHES "^(auto|d3d12|vulkan)$")
 endif()
 add_library(gcnllr-native-gx SHARED "${CMAKE_CURRENT_LIST_DIR}/gx.cpp" "${CMAKE_CURRENT_LIST_DIR}/gpu_bridge.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/efb_depth.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_gui_effects.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_gui_effects.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/native_gui_program.cpp")
 option(GC_WII_NATIVE_J3D "Build native J3D resource/material renderer (experimental consumer binding)" OFF)
 target_compile_definitions(gcnllr-native-gx PRIVATE GC_WII_NATIVE_J3D=$<BOOL:${GC_WII_NATIVE_J3D}>)
 if(GC_WII_NATIVE_J3D)
@@ -94,6 +95,15 @@ set_target_properties(gcnllr-native-gx PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gcnllr-services"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gcnllr-services")
 target_compile_features(gcnllr-native-gx PRIVATE cxx_std_20)
+if(BUILD_TESTING)
+  add_executable(test_native_gui_program "${GC_WII_GX_ROOT}/tests/test_native_gui_program.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/native_gui_program.cpp")
+  target_compile_features(test_native_gui_program PRIVATE cxx_std_20)
+  target_include_directories(test_native_gui_program PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${GC_WII_GX_ROOT}/include"
+    "${GXRUNTIME_DIR}/include" "${GXRUNTIME_DIR}/graphics/gxcore/include")
+  add_test(NAME native_gui_program_lowering COMMAND test_native_gui_program)
+endif()
 target_compile_definitions(gcnllr-native-gx PRIVATE GC_WII_GX_WII=$<BOOL:${GC_WII_GX_WII}>)
 target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_RETAIL_PIPELINE=$<STREQUAL:${GCNLLR_RENDER_PIPELINE},retail>)
 target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_NATIVE_PIPELINE=$<BOOL:${GCNLLR_NATIVE_PIPELINE}>)
