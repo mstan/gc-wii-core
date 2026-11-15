@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Included in gpu_bridge; physical completion and validation remain unchanged.
 static void complete_frame_submission(bool physical,bool allow_empty_continuation) {
-    if (!((allow_empty_continuation && !physical) ? gfx::submit_frame_if_needed() : gfx::segment_frame()))
+    if (!((allow_empty_continuation && !physical && !recorded_copies) ? gfx::submit_frame_if_needed() : gfx::segment_frame()))
         throw std::runtime_error("Native frame completion submission failed");
     recorded_copies=false;
     if (physical) {

@@ -12,8 +12,16 @@ _completion_replace("#include \"common.hpp\""
 _completion_replace("struct FramePacket {" "struct FramePacket {\n  gcnllr::RecordingCompletion completion;")
 _completion_replace("frame.continuation = preserveEfb;"
   "frame.continuation = preserveEfb;\n  frame.completion.begin(preserveEfb);")
-_completion_replace("static inline void push_command(CommandType type, const Command::Data& data) {"
-  "static inline void push_command(CommandType type, const Command::Data& data) {\n  if (type != CommandType::SetViewport && type != CommandType::SetScissor)\n    current_frame_packet().completion.record();")
+# Keep the caller's existing dropped-command path ahead of any packet access.
+set(_completion_push_entry [=[static inline void push_command(CommandType type, const Command::Data& data) {
+  if (g_currentRenderPass == UINT32_MAX)
+    UNLIKELY {
+      Log.warn("Dropping command {}", magic_enum::enum_name(type));
+      return;
+    }
+]=])
+_completion_replace("${_completion_push_entry}"
+  "static inline void push_command(CommandType type, const Command::Data& data) {\n#include \"${CMAKE_CURRENT_LIST_DIR}/recording_push_entry.inc\"\n")
 # Any queued pass/op is conservative work, including observable depth snapshots.
 _completion_replace("static void enqueue_op(FramePacket& frame, size_t frameSlot, uint32_t opIndex) {"
   "static void enqueue_op(FramePacket& frame, size_t frameSlot, uint32_t opIndex) {\n  frame.completion.record();")

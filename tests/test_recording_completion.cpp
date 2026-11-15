@@ -30,11 +30,22 @@ static std::array<FramePacket,2> g_framePackets;
 static FramePacket* g_recordingFrame;
 static size_t g_recordingFrameSlot;
 static bool g_inOffscreen,seal_failure;
-static unsigned seals,syncs,validations,waits;
+static unsigned seals,syncs,validations,waits,packet_accesses,dropped_commands;
 static bool validation_failure,gpu_success;
 static std::deque<std::function<void()>> pending;
 static std::vector<std::string> order;
-static FramePacket& current_frame_packet() { CHECK(g_recordingFrame);return *g_recordingFrame; }
+static FramePacket& current_frame_packet() { ++packet_accesses;CHECK(g_recordingFrame);return *g_recordingFrame; }
+enum class CommandType {SetViewport,SetScissor,Draw,Unknown};
+struct Command {struct Data {};};
+namespace magic_enum {static const char* enum_name(CommandType){return "command";}}
+static struct {void warn(const char*,const char*){++dropped_commands;}} Log;
+static uint32_t g_currentRenderPass;
+static void push_command(CommandType type,const Command::Data& data) {
+#define UNLIKELY
+#include "recording_push_entry.inc"
+#undef UNLIKELY
+    (void)data;
+}
 static void drain() { while(!pending.empty()){auto f=std::move(pending.front());pending.pop_front();f();} }
 static void finish() { current_frame_packet().completion.record();order.push_back("finish"); }
 static bool segment_frame() {
@@ -58,7 +69,7 @@ static void reset(bool continuation) {
     g_recordingFrame->frameId=41;g_recordingFrame->encoder.owner=41;
     g_recordingFrame->completion.begin(continuation);
     g_inOffscreen=seal_failure=validation_failure=false;gpu_success=true;
-    seals=syncs=validations=waits=0;order.clear();
+    seals=syncs=validations=waits=packet_accesses=dropped_commands=0;g_currentRenderPass=0;order.clear();
 }
 }
 namespace gpu {
@@ -85,9 +96,31 @@ template<class F> static void fails(F&& f) {
 int main() {
     using namespace fixture;
     try {
+        // Execute the actual production push entry, including its original drop.
+        reset(true);auto* recording=g_recordingFrame;g_recordingFrame=nullptr;g_currentRenderPass=UINT32_MAX;
+        for(auto type:{CommandType::SetViewport,CommandType::SetScissor,CommandType::Draw,CommandType::Unknown})
+            push_command(type,{});
+        CHECK(dropped_commands==4 && packet_accesses==0 && g_recordingFrame==nullptr);
+        CHECK(recording->completion.empty && recording->frameId==41);
+        g_recordingFrame=recording;g_currentRenderPass=0;
+        push_command(CommandType::SetViewport,{});push_command(CommandType::SetScissor,{});
+        CHECK(recording->completion.empty && packet_accesses==0);
+        push_command(CommandType::Draw,{});CHECK(!recording->completion.empty && packet_accesses==1);
+        recording->completion.begin(true);push_command(CommandType::Unknown,{});
+        CHECK(!recording->completion.empty && packet_accesses==2 && dropped_commands==4);
+
         // A real frame's initial clear is work, including an otherwise drawless frame.
         reset(false);bridge::complete_output();CHECK(seals==1 && validations==1);
         CHECK(syncs==(GCNLLR_NATIVE_QUEUED_OUTPUT?0u:1u));
+
+        // The authoritative copy flag overrides even an inconsistent empty marker.
+        reset(true);bridge::recorded_copies=true;bridge::complete_output();
+        CHECK(seals==1 && !bridge::recorded_copies);
+        reset(true);bridge::recorded_copies=true;seal_failure=true;
+        fails([]{bridge::complete_output();});
+        CHECK(seals==1 && bridge::recorded_copies && current_frame_packet().completion.empty);
+        CHECK(current_frame_packet().frameId==41);
+        seal_failure=false;bridge::complete_output();CHECK(seals==2 && !bridge::recorded_copies);
 
         // A fresh continuation holds its packet/staging/resource identity across no-ops.
         reset(true);
