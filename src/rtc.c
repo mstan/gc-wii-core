@@ -18,6 +18,11 @@ void gcn_rtc_start(GcnRtc* rtc, u32 counter, u64 core_cycles) {
 }
 
 u32 gcn_rtc_read(GcnRtc* rtc, u64 core_cycles) {
+    return gcn_rtc_read_clock(rtc, core_cycles, GCN_RTC_CORE_CLOCK_HZ);
+}
+
+u32 gcn_rtc_read_clock(GcnRtc* rtc, u64 core_cycles, u64 clock_hz) {
+    if (!clock_hz) return rtc ? rtc->counter : 0u;
     if (!rtc || !rtc->running) return rtc ? rtc->counter : 0u;
 
     /* CPUState.cycles is monotonic. Defensively rebase if a caller restores
@@ -28,10 +33,10 @@ u32 gcn_rtc_read(GcnRtc* rtc, u64 core_cycles) {
     }
 
     u64 elapsed = core_cycles - rtc->anchor_cycles;
-    u64 seconds = elapsed / GCN_RTC_CORE_CLOCK_HZ;
+    u64 seconds = elapsed / clock_hz;
     if (seconds) {
         rtc->counter += (u32)seconds; /* real 32-bit hardware wrap semantics */
-        rtc->anchor_cycles += seconds * GCN_RTC_CORE_CLOCK_HZ;
+        rtc->anchor_cycles += seconds * clock_hz;
     }
     return rtc->counter;
 }

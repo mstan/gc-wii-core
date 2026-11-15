@@ -146,7 +146,11 @@ u32 gcn_exi_sync_rtc_from_host(GcnExi* exi, u64 core_cycles) {
 }
 
 u32 gcn_exi_rtc_latch(GcnExi* exi, u64 core_cycles) {
-    return gcn_rtc_read(&exi->rtc, core_cycles);
+    return gcn_exi_rtc_latch_clock(exi, core_cycles, GCN_RTC_CORE_CLOCK_HZ);
+}
+
+u32 gcn_exi_rtc_latch_clock(GcnExi* exi, u64 core_cycles, u64 clock_hz) {
+    return gcn_rtc_read_clock(exi ? &exi->rtc : NULL, core_cycles, clock_hz);
 }
 
 void gcn_exi_set_persist(GcnExi* exi, GcnExiPersistFn fn, void* user) {
@@ -311,7 +315,7 @@ static void ipl_rom_read(GcnExi* exi, const GcnExiAccess* access, u32 ch, bool d
 
 /* Serve the RTC counter / SRAM image on a read. RTC is a single 4-byte value;
  * SRAM is the 0x40-byte image, DMA'd or streamed 4 bytes per immediate read. */
-static void ipl_dev_read(GcnExi* exi, const GcnExiAccess* access, u32 ch, bool dma, u32 len) {
+static void ipl_dev_read(GcnExi* exi, const GcnExiAccess* access, u32 ch, bool dma, u32 len, u64 clock_hz) {
     GcnExiChannel* c = &exi->channels[ch];
     switch (exi->op[ch]) {
     case GCN_EXI_OP_ROM_READ:
@@ -319,8 +323,8 @@ static void ipl_dev_read(GcnExi* exi, const GcnExiAccess* access, u32 ch, bool d
         break;
     case GCN_EXI_OP_RTC_READ:
         /* Host time, when requested, was sampled once at boot. Reads advance
-         * the device solely from monotonic emulated Gekko cycles. */
-        c->data = gcn_rtc_read(&exi->rtc, access ? access->core_cycles : 0u);
+         * the device solely from the caller's monotonic emulated cycles. */
+        c->data = gcn_rtc_read_clock(&exi->rtc, access ? access->core_cycles : 0u, clock_hz);
         break;
     case GCN_EXI_OP_SRAM_READ:
         if (dma) {
@@ -354,7 +358,7 @@ static void ipl_dev_read(GcnExi* exi, const GcnExiAccess* access, u32 ch, bool d
 
 /* IPL device (channel 0, chip-select bit 1 = device index 1): mask ROM + RTC +
  * SRAM, distinguished by the leading command word. */
-static void ipl_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u32 rw, bool dma, u32 len) {
+static void ipl_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u32 rw, bool dma, u32 len, u64 clock_hz) {
     GcnExiChannel* c = &exi->channels[ch];
     if (rw == 1u) {              /* WRITE: CPU -> device */
         if (!exi->have_cmd[ch]) {
@@ -386,7 +390,7 @@ static void ipl_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u32 rw
             }
         }
     } else {                    /* READ: device -> CPU */
-        ipl_dev_read(exi, access, ch, dma, len);
+        ipl_dev_read(exi, access, ch, dma, len, clock_hz);
     }
 }
 
@@ -448,9 +452,9 @@ static int memcard_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u32
  * raises TCINT (a non-delayed device completes immediately; the memcard only on
  * DMA — see memcard_transfer). Chip-select is one-hot: 1=dev0, 2=dev1, 4=dev2. */
 static int device_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u32 cs,
-                           u32 rw, bool dma, u32 len) {
+                           u32 rw, bool dma, u32 len, u64 clock_hz) {
     if (ch == 0u && cs == 2u) {                        /* mask ROM / RTC / SRAM */
-        ipl_transfer(exi, access, ch, rw, dma, len);
+        ipl_transfer(exi, access, ch, rw, dma, len, clock_hz);
         return 1;
     } else if (ch < 2u && cs == 1u && exi->card[ch]) { /* memory card slot A/B */
         return memcard_transfer(exi, access, ch, rw, dma, len);
@@ -466,14 +470,14 @@ static int device_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u32 
     }
 }
 
-static void start_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch) {
+static void start_transfer(GcnExi* exi, const GcnExiAccess* access, u32 ch, u64 clock_hz) {
     GcnExiChannel* c = &exi->channels[ch];
     bool dma = (c->cr & GCN_EXI_CR_DMA) != 0u;
     u32 rw  = (c->cr & GCN_EXI_CR_RW_MASK) >> 2u;      /* 0=read 1=write */
     u32 len = dma ? c->len : (((c->cr & GCN_EXI_CR_TLEN_MASK) >> 4u) + 1u);
     u32 cs  = csr_chip_select(c->csr);
 
-    int set_tcint = device_transfer(exi, access, ch, cs, rw, dma, len);
+    int set_tcint = device_transfer(exi, access, ch, cs, rw, dma, len, clock_hz);
 
     /* Clear TSTART, then latch transfer-complete (EXI_Channel.cpp:210) for any
      * device that completes synchronously, and re-evaluate the PI line. */
@@ -506,6 +510,11 @@ u32 gcn_exi_bus_read(GcnExi* exi, u32 addr, u8 size) {
 }
 
 void gcn_exi_bus_write(GcnExi* exi, const GcnExiAccess* access, u32 addr, u32 value, u8 size) {
+    gcn_exi_bus_write_clock(exi, access, addr, value, size, GCN_RTC_CORE_CLOCK_HZ);
+}
+
+void gcn_exi_bus_write_clock(GcnExi* exi, const GcnExiAccess* access, u32 addr, u32 value, u8 size, u64 clock_hz) {
+    if (!clock_hz) return;
     (void)size;
     u32 ch = 0, off = 0;
     if (!decode(addr, &ch, &off)) return;
@@ -517,7 +526,7 @@ void gcn_exi_bus_write(GcnExi* exi, const GcnExiAccess* access, u32 addr, u32 va
     case GCN_EXI_CR_OFF:
         c->cr = value;
         if (value & GCN_EXI_CR_TSTART)
-            start_transfer(exi, access, ch);
+            start_transfer(exi, access, ch, clock_hz);
         break;
     case GCN_EXI_DATA_OFF: c->data = value; break;
     default: break;
