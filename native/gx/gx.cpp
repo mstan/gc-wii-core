@@ -29,6 +29,7 @@ static uint32_t internal_scale=1;
 #endif
 #include "gfx/thread_cpu.hpp"
 #include "window.hpp"
+#include <gcnllr/native_session.h>
 #if GCNLLR_NATIVE_DRAW_SINK
 #include "native_draw_sink.hpp"
 #endif
@@ -194,6 +195,7 @@ bool texture_epoch(uint32_t address,uint32_t size,uint64_t* epoch) {
     return config.texture_epoch(config.user,address,size,epoch)!=0;
 }
 bool initialized{}, frame_open{};
+bool retain_next_host{}, retained_host{};
 gcnllr::NativeScene native_scene;
 #if GC_WII_NATIVE_J3D
 gcnllr::NativeJ3D native_j3d;
@@ -744,6 +746,8 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
     texture_copy(command,(sink->bp[0x4D]&0x3FFu)<<5);
 }
 void stop() {
+    const bool retain_host=retain_next_host;
+    retain_next_host=false;
     if(fifo_worker) {
         try {fifo_worker->wait(true);}catch(const std::exception& e){fail(e.what());}
         fifo_worker->stop();
@@ -803,6 +807,8 @@ void stop() {
         texture_producers.clear();retained_copies.clear();
     }
     aurora::gfx::gxcore::set_owned_texture_lookup(nullptr);
+    aurora::gfx::gxcore::set_texture_dirty_epoch_observer(nullptr);
+    aurora::gfx::gxcore::set_efb_copy_epoch_observer(nullptr);
     native_scene.reset();
 #if GC_WII_NATIVE_J3D
     native_j3d.reset();
@@ -814,7 +820,15 @@ void stop() {
     retail_active=false;retail_texture_ids.clear();aurora::gx::recomp::clear_guest_address_resolver();
 #endif
     if (gamepad) { SDL_CloseGamepad(gamepad);gamepad=nullptr; }
-    if (initialized) { gcnllr::gpu_bridge::release();aurora_shutdown();initialized=false; }
+    if (initialized) {
+        gcnllr::gpu_bridge::release();
+        retained_host=retain_host && !failed.load();
+        if(!retained_host)aurora_shutdown();
+        initialized=false;
+    } else if(retained_host && !retain_host) {
+        aurora_shutdown();retained_host=false;
+    }
+    config={};memory_epochs.clear();
     if (frame_times) {std::fclose(frame_times);frame_times=nullptr;}
     frame_open=false;
 }
@@ -876,13 +890,20 @@ int start(const GcnllrNativeGxConfig* input) {
         settings.windowPosX=-1;settings.windowPosY=-1;
         settings.vsync=false;settings.startFullscreen=false;settings.pauseOnFocusLost=false;
         settings.allowJoystickBackgroundEvents=true;settings.logLevel=LOG_INFO;settings.logCallback=log_message;
-        auto info=aurora_initialize(0,nullptr,&settings);
-        initialized=true;
-        if (!info.window) throw std::runtime_error("Aurora did not create a native GPU window");
-        if (info.backend==BACKEND_NULL) throw std::runtime_error("A real GPU backend is required");
-        if (info.backend!=settings.desiredBackend) throw std::runtime_error("Requested native GPU backend is unavailable");
-        if (input->hidden) SDL_HideWindow(info.window);
-        else place_playtest_window(info.window);
+        if(retained_host) {
+            retained_host=false;initialized=true;
+            auto* window=aurora::window::get_sdl_window();
+            if(!window || !SDL_SetWindowTitle(window,input->title?input->title:"Wii"))
+                throw std::runtime_error("Retained native GPU window is unavailable");
+        } else {
+            auto info=aurora_initialize(0,nullptr,&settings);
+            initialized=true;
+            if (!info.window) throw std::runtime_error("Aurora did not create a native GPU window");
+            if (info.backend==BACKEND_NULL) throw std::runtime_error("A real GPU backend is required");
+            if (info.backend!=settings.desiredBackend) throw std::runtime_error("Requested native GPU backend is unavailable");
+            if (input->hidden) SDL_HideWindow(info.window);
+            else place_playtest_window(info.window);
+        }
         gcnllr::gpu_bridge::initialize();
         GXInit(nullptr,0);
         GXSetCopyClear(GXColor{0,0,0,255},0xFFFFFFu);
@@ -1216,12 +1237,29 @@ const GcnllrNativeGxApi api={GCNLLR_NATIVE_GX_ABI,start,fifo,drain,status,peek,s
         |(!GCNLLR_GX_FIFO_WORKER && !GCNLLR_ASYNC_COPIES && !GCNLLR_COMPOSED_SCANOUT && !GCNLLR_GX_COOPERATIVE_VI &&
           !GCNLLR_RESIDENT_XFB ? GCNLLR_NATIVE_GX_SERIAL_RAM_WRITES : 0u),
     materialize_copy,release_copy,present_copy,present_spans};
+int retain_session() {
+    if(!initialized || failed.load() || retain_next_host || retained_host || !SDL_IsMainThread())return 0;
+    retain_next_host=true;return 1;
+}
+void cancel_session() {
+    retain_next_host=false;
+    if(retained_host) {aurora_shutdown();retained_host=false;}
+}
+uint64_t session_window_identity() {
+    if(!initialized && !retained_host)return 0;
+    auto* window=aurora::window::get_sdl_window();
+    return window?uint64_t(SDL_GetWindowID(window)):0;
+}
+const GcWiiNativeSessionApi session_api={GC_WII_NATIVE_SESSION_ABI,retain_session,cancel_session,session_window_identity};
 }
 #ifdef _WIN32
 #define GCNLLR_EXPORT __declspec(dllexport)
 #else
 #define GCNLLR_EXPORT __attribute__((visibility("default")))
 #endif
+extern "C" GCNLLR_EXPORT const GcWiiNativeSessionApi* gc_wii_native_session_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_SESSION_ABI?&session_api:nullptr;
+}
 #if GCNLLR_RETAIL_PIPELINE
 extern "C" uint64_t gcnllr_aurora_retail_array(const void* data,uint32_t bytes) {
     if(!retail_active || !data || !bytes)return 0;
