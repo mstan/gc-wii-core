@@ -171,6 +171,15 @@ add_executable(test_cost_ring tests/test_cost_ring.c)
 target_link_libraries(test_cost_ring PRIVATE gcn_runtime_core)
 target_compile_definitions(test_cost_ring PRIVATE GCN_COST_RING_ENABLED=$<BOOL:${GCN_COST_RING}>)
 add_test(NAME cost_ring_fields COMMAND test_cost_ring)
+
+# CPU-only contract: use the real completion/ordered-encode bodies and a bounded
+# recording-worker substitute; no GPU SDK, device or consumer dependency.
+foreach(_completion_queued 0 1)
+  add_executable(test_recording_completion_${_completion_queued} tests/test_recording_completion.cpp)
+  target_include_directories(test_recording_completion_${_completion_queued} PRIVATE native/gx)
+  target_compile_definitions(test_recording_completion_${_completion_queued} PRIVATE GCNLLR_NATIVE_QUEUED_OUTPUT=${_completion_queued})
+  add_test(NAME native_recording_completion_${_completion_queued} COMMAND test_recording_completion_${_completion_queued})
+endforeach()
 # Exercise exported OFF operations even in the normal ON core configuration.
 add_executable(test_cost_ring_disabled tests/test_cost_ring.c src/cost_ring.c)
 target_include_directories(test_cost_ring_disabled PRIVATE include)

@@ -53,6 +53,9 @@ void clear_efb(const gxruntime::gxcore::EfbCopyCommand& copy);
 // copies in the same GPU packet. No resource/address or command is invented.
 void record_efb_clear(const gxruntime::gxcore::EfbCopyCommand& copy);
 void complete_frame(bool physical);
+// Guarded serial NativeOutput only: a true empty continuation needs no packet
+// turnover. Every other frame/PE/CPU completion keeps its unconditional seal.
+void complete_output();
 bool present(const uint8_t* yuy2,uint32_t width,uint32_t height,uint32_t stride);
 bool peek_scanout(uint16_t x,uint16_t y,uint32_t* value);
 void finish();

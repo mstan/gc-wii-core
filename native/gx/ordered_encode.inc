@@ -4,6 +4,7 @@
 // submission, staging unmap or frame-slot turnover is needed for this copy.
 // Actual CPU/PE observations still submit the packet before waiting for bytes.
 void machine_encode_after_resolve(std::function<void(wgpu::CommandEncoder&)> encode) {
+  current_frame_packet().completion.record();
   const size_t slot = g_recordingFrameSlot;
   render_worker::enqueue_encode_pass(current_frame_packet().frameId, 0,
       [slot, encode = std::move(encode)] { encode(g_framePackets[slot].encoder); });

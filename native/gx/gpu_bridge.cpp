@@ -36,6 +36,8 @@
 #endif
 
 namespace aurora::gfx {
+// Private provider seam; external NativeOutput and donor headers stay unchanged.
+bool submit_frame_if_needed();
 void machine_raster_targets(const webgpu::TextureWithSampler&,const webgpu::TextureWithSampler&,
     const webgpu::TextureWithSampler&,uint32_t);
 void machine_copy_clear(const wgpu::RenderPipeline&,ClipRect,wgpu::Color,float);
@@ -409,24 +411,7 @@ void record_efb_clear(const gxruntime::gxcore::EfbCopyCommand& copy) {
     gfx::resolve_pass({}, {0,0,int(fb.size.width),int(fb.size.height)},false,false,false,{},0,GX_TF_RGBA8);
     record_copy_clear(copy);
 }
-void complete_frame(bool physical) {
-    if (!gfx::segment_frame()) throw std::runtime_error("Native frame completion submission failed");
-    recorded_copies=false;
-    if (physical) {
-        struct Completion {bool done{},success{};};
-        auto result=std::make_shared<Completion>();
-        worker::enqueue_work([result] {
-            const auto future=gpu::g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly,
-                [result](wgpu::QueueWorkDoneStatus status,wgpu::StringView) {
-                    result->success=status==wgpu::QueueWorkDoneStatus::Success;result->done=true;
-                });
-            gpu::g_instance.WaitAny(future,5000000000ull);
-        });
-        worker::synchronize();
-        if (!result->done || !result->success) throw std::runtime_error("Native frame GPU completion failed");
-    } else if(!GCNLLR_NATIVE_QUEUED_OUTPUT)worker::synchronize();
-    validate_submission();
-}
+#include "frame_completion.inc"
 void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter) {
     if (!copy.width || !copy.height || copy.src_x+copy.width>efb_width || copy.src_y+copy.height>efb_height)
         throw std::runtime_error("Display copy outside supported EFB");

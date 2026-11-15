@@ -1607,7 +1607,7 @@ int native_output_submit() {
     if(!native_frame_ready())return 0;
     try {
         flush_geometry();flush_display_copies();
-        gcnllr::gpu_bridge::complete_frame(false);
+        gcnllr::gpu_bridge::complete_output();
         ++native_frame_state.completions;return 1;
     } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
 }
