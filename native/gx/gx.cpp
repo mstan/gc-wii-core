@@ -30,6 +30,8 @@ static uint32_t internal_scale=1;
 #include "gfx/thread_cpu.hpp"
 #include "window.hpp"
 #include <gcnllr/native_session.h>
+#include <gcnllr/native_display.h>
+#include "display_aspect.hpp"
 #if GCNLLR_NATIVE_DRAW_SINK
 #include "native_draw_sink.hpp"
 #endif
@@ -308,10 +310,12 @@ void pump(bool force=false) {
     if(window && SDL_GetMouseFocus()==window && SDL_GetKeyboardFocus()==window) {
         float x,y;const auto buttons=SDL_GetMouseState(&x,&y);
         const auto size=aurora::window::get_window_size();
+        uint32_t pointer_width=size.fb_width,pointer_height=size.fb_height;
+        gcnllr::display_aspect::pointer_dimensions(pointer_width,pointer_height);
         state.pointer=gcnllr::image_pointer(x,y,
             ((buttons&SDL_BUTTON_LMASK)?1u:0u)|((buttons&SDL_BUTTON_RMASK)?2u:0u)|
             ((buttons&SDL_BUTTON_MMASK)?4u:0u),size.width,size.height,
-            size.native_fb_width,size.native_fb_height,size.fb_width,size.fb_height);
+            size.native_fb_width,size.native_fb_height,pointer_width,pointer_height);
     }
     const bool* keys=SDL_GetKeyboardState(nullptr);
     pad={}; pad.stick_x=uint8_t(128+100*(int(keys[SDL_SCANCODE_RIGHT])-int(keys[SDL_SCANCODE_LEFT])));
@@ -1251,6 +1255,11 @@ uint64_t session_window_identity() {
     return window?uint64_t(SDL_GetWindowID(window)):0;
 }
 const GcWiiNativeSessionApi session_api={GC_WII_NATIVE_SESSION_ABI,retain_session,cancel_session,session_window_identity};
+int display_aspect(uint32_t numerator,uint32_t denominator) {
+    return initialized && !failed.load() && SDL_IsMainThread() &&
+        gcnllr::display_aspect::set({numerator,denominator});
+}
+const GcWiiNativeDisplayApi display_api={GC_WII_NATIVE_DISPLAY_ABI,display_aspect};
 }
 #ifdef _WIN32
 #define GCNLLR_EXPORT __declspec(dllexport)
@@ -1259,6 +1268,9 @@ const GcWiiNativeSessionApi session_api={GC_WII_NATIVE_SESSION_ABI,retain_sessio
 #endif
 extern "C" GCNLLR_EXPORT const GcWiiNativeSessionApi* gc_wii_native_session_get_api(uint32_t abi) {
     return abi==GC_WII_NATIVE_SESSION_ABI?&session_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeDisplayApi* gc_wii_native_display_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_DISPLAY_ABI?&display_api:nullptr;
 }
 #if GCNLLR_RETAIL_PIPELINE
 extern "C" uint64_t gcnllr_aurora_retail_array(const void* data,uint32_t bytes) {

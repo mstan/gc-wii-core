@@ -96,6 +96,12 @@ set_target_properties(gcnllr-native-gx PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gcnllr-services")
 target_compile_features(gcnllr-native-gx PRIVATE cxx_std_20)
 if(BUILD_TESTING)
+  find_package(Threads REQUIRED)
+  add_executable(test_native_display "${GC_WII_GX_ROOT}/tests/test_native_display.cpp")
+  target_include_directories(test_native_display PRIVATE "${GC_WII_GX_ROOT}/include")
+  target_compile_features(test_native_display PRIVATE cxx_std_20)
+  target_link_libraries(test_native_display PRIVATE Threads::Threads)
+  add_test(NAME native_display_aspect_contract COMMAND test_native_display)
   add_executable(test_native_gui_program "${GC_WII_GX_ROOT}/tests/test_native_gui_program.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/native_gui_program.cpp")

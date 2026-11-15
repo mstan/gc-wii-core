@@ -28,6 +28,15 @@ target_include_directories(aurora_core PRIVATE "${GXRUNTIME_DIR}/graphics/aurora
 # Dawn's Windows loader requires absolute runtime search directories. A DLL
 # service cannot assume that the caller's executable sits beside Dawn/DXC.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu.cpp" _gcnllr_gpu)
+set(_gcnllr_display_viewport "  uint32_t viewport_width = surface_width;")
+string(FIND "${_gcnllr_gpu}" "${_gcnllr_display_viewport}" _gcnllr_display_offset)
+if(_gcnllr_display_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned native presentation viewport differs")
+endif()
+string(REPLACE "${_gcnllr_display_viewport}"
+  "  gcnllr::display_aspect::apply_dimensions(content_width, content_height);\n${_gcnllr_display_viewport}"
+  _gcnllr_gpu "${_gcnllr_gpu}")
+string(PREPEND _gcnllr_gpu "#include \"${GC_WII_GX_ROOT}/native/gx/display_aspect.hpp\"\n")
 string(PREPEND _gcnllr_gpu "#include <SDL3/SDL_hints.h>\n")
 set(_gcnllr_power ".powerPreference = wgpu::PowerPreference::HighPerformance,")
 string(FIND "${_gcnllr_gpu}" "${_gcnllr_power}" _gcnllr_power_offset)

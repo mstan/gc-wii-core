@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "gpu_bridge.hpp"
+#include "display_aspect.hpp"
 #include "efb_geometry.hpp"
 #include <gxruntime/gxcore/shader.hpp>
 #include <aurora/aurora.h>
@@ -832,9 +833,14 @@ static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t hei
             if(!submission_error)submission_error=std::current_exception();
         }
     });
-    worker::enqueue_work([shown] {gpu::set_present_source_override(shown.get());});
+    const auto aspect=display_aspect::snapshot();
+    worker::enqueue_work([shown,aspect] {
+        display_aspect::active=aspect;gpu::set_present_source_override(shown.get());
+    });
     aurora_end_frame();
-    worker::enqueue_work([shown] {gpu::set_present_source_override(nullptr);});
+    worker::enqueue_work([shown,aspect] {
+        gpu::set_present_source_override(nullptr);display_aspect::publish(aspect);display_aspect::active={};
+    });
     recorded_copies=false;
     aurora::imgui::new_frame(aurora::window::get_window_size());
     // Aurora's bounded frame packets provide backpressure. Real CPU/PE reads,
@@ -1015,9 +1021,14 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
     decode_scanout(encoder,buffer,scanout,width,height,idle_dimming);
     const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
     auto* shown=compose_presentation(scanout);
-    worker::enqueue_work([shown] {gpu::set_present_source_override(shown);});
+    const auto aspect=display_aspect::snapshot();
+    worker::enqueue_work([shown,aspect] {
+        display_aspect::active=aspect;gpu::set_present_source_override(shown);
+    });
     aurora_end_frame();
-    worker::enqueue_work([] {gpu::set_present_source_override(nullptr);});
+    worker::enqueue_work([aspect] {
+        gpu::set_present_source_override(nullptr);display_aspect::publish(aspect);display_aspect::active={};
+    });
     aurora::imgui::new_frame(aurora::window::get_window_size());
     const bool ok=gfx::begin_frame(true);
     worker::synchronize();++scanout_joins;
@@ -1126,6 +1137,10 @@ bool peek_scanout(uint16_t x,uint16_t y,uint32_t* value) {
     return true;
 }
 void release() {
+    display_aspect::set({});
+    worker::enqueue_work([] {
+        gpu::set_present_source_override(nullptr);display_aspect::publish({});display_aspect::active={};
+    });
     std::fprintf(stderr,"[native-vi-submission] queued=%u frames=%llu worker_joins=%llu\n",
         unsigned(GCNLLR_QUEUED_PRESENT),(unsigned long long)scanout_frames,(unsigned long long)scanout_joins);
     std::fprintf(stderr,"[native-gx-submission] batched=%u encodes=%llu observation_submissions=%llu publication_joins=%llu\n",
