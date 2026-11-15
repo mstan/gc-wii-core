@@ -28,11 +28,16 @@ _completion_replace("static void enqueue_op(FramePacket& frame, size_t frameSlot
 foreach(_completion_seam
     "void queue_texture_upload(TextureUpload upload) {"
     "void begin_color_pass(const ColorPassDescriptor& desc) {"
-    "void queue_palette_conv(tex_palette_conv::ConvRequest req) {"
-    "void begin_offscreen(uint32_t width, uint32_t height) {")
+    "void queue_palette_conv(tex_palette_conv::ConvRequest req) {")
   _completion_replace("${_completion_seam}"
     "${_completion_seam}\n  current_frame_packet().completion.record();")
 endforeach()
+# Preserve the existing offscreen validation/diagnostic before packet access.
+set(_completion_offscreen_entry [=[void begin_offscreen(uint32_t width, uint32_t height) {
+  ZoneScoped;
+  CHECK(g_currentRenderPass != UINT32_MAX, "begin_offscreen called outside of a frame");]=])
+_completion_replace("${_completion_offscreen_entry}"
+  "${_completion_offscreen_entry}\n  current_frame_packet().completion.record();")
 # Copy clears are observable without a Draw command; do not infer emptiness
 # from command or operation vectors. Direct native encodes mark their own seam.
 _completion_replace("  pass.machineClearPipeline = pipeline;"
