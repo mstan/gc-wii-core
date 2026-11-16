@@ -198,6 +198,23 @@ set_property(TARGET gxruntime_retail_gx_frontend PROPERTY SOURCES "${_gcnllr_fro
 # The donor only encoded I8/RGB565 because its own CPU path bypassed other
 # consumers. Our actual retail CPU can observe every copied buffer.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/gxcore_draw.cpp" _gcnllr_draw)
+# Dawn platform packages can declare these fields in different orders.
+# Named assignments retain the descriptor values without an order-sensitive initializer.
+set(_gcnllr_vertex_layout [=[  const wgpu::VertexBufferLayout vertexLayout{
+      .arrayStride = gxc::kVertexStrideBytes,
+      .stepMode = wgpu::VertexStepMode::Vertex,
+      .attributeCount = attributes.size(),
+      .attributes = attributes.data(),
+  };]=])
+string(FIND "${_gcnllr_draw}" "${_gcnllr_vertex_layout}" _gcnllr_vertex_layout_offset)
+if(_gcnllr_vertex_layout_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned Dawn vertex-buffer layout differs")
+endif()
+string(REPLACE "${_gcnllr_vertex_layout}" [=[  wgpu::VertexBufferLayout vertexLayout{};
+  vertexLayout.arrayStride = gxc::kVertexStrideBytes;
+  vertexLayout.stepMode = wgpu::VertexStepMode::Vertex;
+  vertexLayout.attributeCount = attributes.size();
+  vertexLayout.attributes = attributes.data();]=] _gcnllr_draw "${_gcnllr_draw}")
 set(_gcnllr_copy_guard "it == g_efbCopyTextures.end() || !it->second.handle ||\n      (cmd.format != 1u && cmd.format != 4u)")
 string(FIND "${_gcnllr_draw}" "${_gcnllr_copy_guard}" _gcnllr_copy_offset)
 if(_gcnllr_copy_offset EQUAL -1)
