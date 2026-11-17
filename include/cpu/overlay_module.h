@@ -51,7 +51,7 @@ enum {
     GCN_OVERLAY_NONE    = 0xFFFFFFFEu, /* hashed; no variant matches this page */
 };
 
-#define GCN_OVERLAY_INDEX_SLOTS (3u * (GC_MAIN_RAM_SIZE / 4096u))
+#define GCN_OVERLAY_INDEX_SLOTS (3u * ((GC_MAIN_RAM_SIZE + WII_MEM2_SIZE) / 4096u))
 
 typedef struct {
     const GcnOverlayPage* pages;

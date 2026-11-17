@@ -82,6 +82,45 @@ static void scoped_watches(CPUState* cpu) {
     CHECK(gcn_native_store_pages[3]&GCN_NATIVE_STORE_OBSERVED);
     gcn_native_code_set_candidate(0,0,NULL,NULL);gcn_native_code_reset();observed_module=NULL;
 }
+static void mem2_overlays(CPUState* cpu) {
+    CHECK(cpu_alloc_mem2(cpu,8192));
+    const GcnOverlayPage pages[]={{0x10001000,0x10002000,0,1},{0x90001000,0x90002000,0,1},{0xd0001000,0xd0002000,0,1}};
+    GcnOverlayVariant variant={gcn_aot_fnv1a64(cpu->mem2+4096,4096),body};
+    u32 resident[]={GCN_OVERLAY_UNKNOWN,GCN_OVERLAY_UNKNOWN,GCN_OVERLAY_UNKNOWN};
+    GcnOverlayModule module={pages,&variant,resident,3,1};
+    static u32 index[GCN_OVERLAY_INDEX_SLOTS];
+    CHECK(gcn_overlay_module_index(&module,index,GCN_OVERLAY_INDEX_SLOTS));
+    observed_module=&module;
+    gcn_native_code_set_candidate_scoped(0,GCN_NATIVE_RAM_LIMIT,candidate,invalidate);
+    for(unsigned i=0;i<3;++i) {
+        cpu->pc=pages[i].start+8;
+        CHECK(gcn_overlay_module_call(&module,cpu,cpu->pc));
+        CHECK(cpu->pc==pages[i].start+12 && cpu->lr==pages[i].start+12);
+    }
+    CHECK(module.pages_resident==3);
+    CHECK(gcn_native_store_pages[0x10001]&GCN_NATIVE_STORE_OBSERVED);
+    /* Real uncached store retires all aliases and rejects their changed code. */
+    mem_write8(cpu,0xd0001000,1,cpu->pc);
+    CHECK(module.pages_resident==0);
+    for(unsigned i=0;i<3;++i) {
+        cpu->pc=pages[i].start+8;CHECK(!gcn_overlay_module_call(&module,cpu,cpu->pc));
+    }
+    mem_write8(cpu,0x10001000,0,cpu->pc);
+    cpu->pc=0x90001008;CHECK(gcn_overlay_module_call(&module,cpu,cpu->pc));
+    /* Content-only writes preserve the modeled icache until real ICBI/DMA. */
+    cpu->mem2[4096]=1;gcn_native_code_content_dirty(0x90001000,1);
+    cpu->pc=0x90001008;CHECK(gcn_overlay_module_call(&module,cpu,cpu->pc));
+    gcn_native_code_invalidate(0x10001000,32);
+    cpu->pc=0x90001008;CHECK(!gcn_overlay_module_call(&module,cpu,cpu->pc));
+    cpu->mem2[4096]=0;gcn_native_code_reset();
+    cpu->pc=0x90001008;CHECK(gcn_overlay_module_call(&module,cpu,cpu->pc));
+    CHECK(!gcn_overlay_module_bind(&module,cpu,0x90002000));
+    gcn_native_code_set_candidate(0,GCN_NATIVE_RAM_LIMIT,candidate,invalidate);
+    CHECK(gcn_native_store_pages[0x10001]&GCN_NATIVE_STORE_OBSERVED);
+    gcn_native_code_reset();
+    CHECK(gcn_native_store_pages[0x10001]&GCN_NATIVE_STORE_OBSERVED);
+    gcn_native_code_set_candidate(0,0,NULL,NULL);observed_module=NULL;
+}
 int main(void){
     CPUState cpu; if(!cpu_init(&cpu))return 1;
     const GcnOverlayPage pages[]={{0x1000,0x2000,0,1},{0x80001000,0x80002000,0,1},{0xc0001000,0xc0002000,0,1}};
@@ -121,5 +160,6 @@ int main(void){
     CHECK(!gcn_overlay_module_bind(&cached,&cpu,cpu.pc));
     CHECK(cpu.pc==0x1008);
     scoped_watches(&cpu);
+    mem2_overlays(&cpu);
     cpu_free(&cpu);return failures?1:0;
 }

@@ -9,12 +9,12 @@
 #include "cpu/aot_module.h"   /* gcn_aot_fnv1a64 -- one hash function, shared */
 #include "cpu/native_code.h"
 #include "debug/cost_ring.h"
+#include "memory/memory.h"
 
-/* Same three MEM1 windows the reservation logic and the AOT module fold
- * together: cached, uncached, and the bare physical view used in real mode.
- * Overlay pages are recorded in the cached form, so everything canonicalizes
- * to that before lookup. */
-static bool canonical_mem1(u32 address, u32* canonical, u32* offset) {
+/* Normalize physical backing in either RAM bank. Table lookup still keeps
+ * the exact physical/cached/uncached execution namespace and never substitutes
+ * a different PC's body. */
+static bool canonical_ram(u32 address, u32* canonical, u32* offset) {
     if (address < GC_MAIN_RAM_SIZE) {
         *offset = address;
         *canonical = address | GC_RAM_BASE;
@@ -30,6 +30,11 @@ static bool canonical_mem1(u32 address, u32* canonical, u32* offset) {
         *offset = address - GC_RAM_UNCACHED;
         *canonical = *offset | GC_RAM_BASE;
         return true;
+    }
+    const u32 physical=address&0x1fffffffu;
+    if ((address>>29u==0 || address>>29u==4 || address>>29u==6) &&
+        physical>=0x10000000u && physical-0x10000000u<WII_MEM2_SIZE) {
+        *offset=physical;*canonical=physical|0x80000000u;return true;
     }
     return false;
 }
@@ -52,9 +57,10 @@ static int find_page(const GcnOverlayModule* module, u32 canonical) {
 
 static int index_slot(u32 address) {
     u32 canonical,offset;
-    if(!canonical_mem1(address,&canonical,&offset))return -1;
-    const u32 bank=address<GC_MAIN_RAM_SIZE?0u:address<GC_RAM_UNCACHED?1u:2u;
-    return (int)(bank*(GC_MAIN_RAM_SIZE/4096u)+offset/4096u);
+    if(!canonical_ram(address,&canonical,&offset))return -1;
+    const u32 bank=address>>29u==0?0u:address>>29u==4?1u:2u;
+    if(offset<GC_MAIN_RAM_SIZE)return (int)(bank*(GC_MAIN_RAM_SIZE/4096u)+offset/4096u);
+    return (int)(3u*(GC_MAIN_RAM_SIZE/4096u)+bank*(WII_MEM2_SIZE/4096u)+(offset-0x10000000u)/4096u);
 }
 
 bool gcn_overlay_module_index(GcnOverlayModule* module,u32* storage,u32 capacity) {
@@ -90,7 +96,9 @@ static u32 resolve_resident(GcnOverlayModule* module, CPUState* cpu,
                             u32 page_index, u32 offset) {
     const GcnOverlayPage* page = &module->pages[page_index];
     u32 length = page->end - page->start;
-    if (offset > cpu->ram_size || length > cpu->ram_size - offset) {
+    u32 available;
+    const u8* bytes=gcn_mem_resolve(cpu,offset,&available);
+    if (!bytes || length > available) {
         module->resident[page_index] = GCN_OVERLAY_NONE;
         return GCN_OVERLAY_NONE;
     }
@@ -98,7 +106,7 @@ static u32 resolve_resident(GcnOverlayModule* module, CPUState* cpu,
     /* Negative identities are cached too: a later store may restore a known
      * body. Observe the page before publishing either cached decision. */
     gcn_native_code_watch(page->start,length);
-    u64 live = gcn_aot_fnv1a64(cpu->ram + offset, length);
+    u64 live = gcn_aot_fnv1a64(bytes, length);
     module->hashes++;
 
     u32 chosen = GCN_OVERLAY_NONE;
@@ -119,7 +127,7 @@ GcnOverlayFn gcn_overlay_module_bind(GcnOverlayModule* module,CPUState* cpu,
     u32 canonical;
     u32 offset;
     if (!module || !module->page_count || !cpu || !cpu->ram ||
-        !canonical_mem1(address, &canonical, &offset))
+        !canonical_ram(address, &canonical, &offset))
         return NULL;
     /* Lookup preserves the execution namespace. A physical/uncached entry
      * requires its own compiled body; identical RAM does not authorize
@@ -133,7 +141,7 @@ GcnOverlayFn gcn_overlay_module_bind(GcnOverlayModule* module,CPUState* cpu,
     if (resident == GCN_OVERLAY_UNKNOWN) {
         /* Hash the whole page, not the entry offset. */
         u32 page_offset, ignored;
-        if (!canonical_mem1(module->pages[page_index].start, &ignored, &page_offset))
+        if (!canonical_ram(module->pages[page_index].start, &ignored, &page_offset))
             return NULL;
         resident = resolve_resident(module, cpu, page_index, page_offset);
     }
@@ -169,18 +177,22 @@ void gcn_overlay_module_invalidate(GcnOverlayModule* module, u32 address,
     u32 canonical;
     u32 offset;
     if (!module || !module->page_count || !size ||
-        !canonical_mem1(address, &canonical, &offset))
+        !canonical_ram(address, &canonical, &offset))
         return;
 
     const u64 end = (u64)offset + size;
     const unsigned previous=gcn_cost_enter(GCN_COST_INVALIDATE);
 #if GCN_OVERLAY_INDEXED
-    if(module->index) {
-        const u32 pages=GC_MAIN_RAM_SIZE/4096u;
-        const u32 last=end>=GC_MAIN_RAM_SIZE?pages-1u:(u32)((end-1u)/4096u);
-        for(u32 page=offset/4096u;page<=last;++page) {
+    const bool mem2=offset>=0x10000000u;
+    const u32 base=mem2?0x10000000u:0u;
+    const u32 capacity=mem2?WII_MEM2_SIZE:GC_MAIN_RAM_SIZE;
+    if(module->index && end<=(u64)base+capacity) {
+        const u32 pages=capacity/4096u;
+        const u32 first_index=mem2?3u*(GC_MAIN_RAM_SIZE/4096u):0u;
+        const u32 last=(u32)((end-base-1u)/4096u);
+        for(u32 page=(offset-base)/4096u;page<=last;++page) {
             for(u32 bank=0;bank<3;++bank) {
-                const u32 index=module->index[bank*pages+page];
+                const u32 index=module->index[first_index+bank*pages+page];
                 if(index!=GCN_OVERLAY_NONE)invalidate_page(module,index);
             }
         }
@@ -191,7 +203,7 @@ void gcn_overlay_module_invalidate(GcnOverlayModule* module, u32 address,
     for (u32 i = 0; i < module->page_count; i++) {
         const GcnOverlayPage* page = &module->pages[i];
         u32 page_offset, ignored;
-        if (!canonical_mem1(page->start, &ignored, &page_offset) ||
+        if (!canonical_ram(page->start, &ignored, &page_offset) ||
             (u64)page_offset + (page->end-page->start) <= offset || page_offset >= end)
             continue;
         invalidate_page(module,i);

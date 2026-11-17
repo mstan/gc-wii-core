@@ -43,6 +43,18 @@ int main(void) {
     CHECK(cpu_init(&cpu));
     gcn_native_code_reset();
 
+    CHECK(cpu_alloc_mem2(&cpu,8192));
+    write_be32(cpu.mem2+4096,0x60000000u);cpu.pc=0x90001000u;
+    CHECK(gcn_interpreter_note_native_miss(&cpu)==1);
+    u64 mem2_crc=gcn_interpreter_page_crc_recomputes();
+    CHECK(gcn_interpreter_note_native_miss(&cpu)==0);
+    CHECK(gcn_interpreter_page_crc_recomputes()==mem2_crc);
+    mem_write8_legacy(&cpu,0xd0001100u,0xab);
+    CHECK(gcn_interpreter_note_native_miss(&cpu)==1);
+    CHECK(gcn_interpreter_page_crc_recomputes()==mem2_crc+1);
+    CHECK(gcn_native_code_is_invalid(0x10001000u));
+    gcn_native_code_reset();
+
     const u32 page_base = 0x80005000u;   /* one 4 KiB page of scratch code */
     for (u32 off = 0; off < 4096u; off += 4u)
         put_insn(&cpu, page_base + off, 0x60000000u /* nop */);

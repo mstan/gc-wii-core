@@ -4,7 +4,7 @@
 #include "cpu/cpu.h"
 
 /*
- * Page-granular validity fence for statically recompiled MEM1 code.
+ * Page-granular validity fence for statically recompiled MEM1/MEM2 code.
  *
  * A generated candidate is eligible only while its backing page still holds
  * the bytes it was compiled from. Disc DMA and interpreted stores invalidate
@@ -41,7 +41,10 @@ void gcn_native_code_content_dirty(u32 address, u32 size);
  * This cache never authorizes native code or suppresses a required callback. */
 #define GCN_NATIVE_STORE_DIRTY 1u
 #define GCN_NATIVE_STORE_OBSERVED 2u
-extern u8 gcn_native_store_pages[GC_MAIN_RAM_SIZE >> 12u];
+/* Indexed by physical page. The bounded gap between MEM1 and MEM2 remains
+ * unused; MEM1 indices and generated MEM1 fast-store contracts are unchanged. */
+#define GCN_NATIVE_RAM_LIMIT (0x10000000u + WII_MEM2_SIZE)
+extern u8 gcn_native_store_pages[GCN_NATIVE_RAM_LIMIT >> 12u];
 void gcn_native_code_watch(u32 address,u32 size);
 static inline void gcn_native_code_note_store(u32 address,u32 size) {
     u32 offset=address-GC_RAM_BASE;
@@ -61,10 +64,10 @@ static inline void gcn_native_code_note_store(u32 address,u32 size) {
     gcn_native_code_invalidate(address,size);
 }
 
-/* Read-and-clear content-staleness bit for pc's MEM1 page: true if any
+/* Read-and-clear content-staleness bit for pc's RAM page: true if any
  * gcn_native_code_invalidate or gcn_native_code_content_dirty call (guest
  * store, DMA, icbi, dcbz, device RAM write) covered the page since the last
- * take. Backs interpreter.c's native-miss page-CRC memo; pages outside MEM1
+ * take. Backs interpreter.c's native-miss page-CRC memo; pages outside RAM
  * always report stale. */
 bool gcn_native_code_page_content_stale_take(u32 pc);
 

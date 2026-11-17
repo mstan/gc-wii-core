@@ -6,9 +6,9 @@
 
 #define GCN_CODE_PAGE_SHIFT 12u
 #define GCN_CODE_PAGE_SIZE (1u << GCN_CODE_PAGE_SHIFT)
-#define GCN_MEM1_PAGE_COUNT (GC_MAIN_RAM_SIZE / GCN_CODE_PAGE_SIZE)
+#define GCN_RAM_PAGE_COUNT (GCN_NATIVE_RAM_LIMIT / GCN_CODE_PAGE_SIZE)
 
-static u8 s_invalid[(GCN_MEM1_PAGE_COUNT + 7u) / 8u];
+static u8 s_invalid[(GCN_RAM_PAGE_COUNT + 7u) / 8u];
 static u32 s_invalid_count;
 static u32 s_candidate_start, s_candidate_end;
 static GcnNativeCandidateFn s_candidate;
@@ -23,10 +23,10 @@ static bool s_candidate_full_watch = true;
  * the page could actually have changed -- identical identity semantics to
  * recomputing the CRC on every miss, without hashing 4 KiB per duplicate.
  * Unlike s_invalid (monotonic until reset), these bits are read-and-clear. */
-static u8 s_content_stale[(GCN_MEM1_PAGE_COUNT + 7u) / 8u];
-u8 gcn_native_store_pages[GCN_MEM1_PAGE_COUNT];
+static u8 s_content_stale[(GCN_RAM_PAGE_COUNT + 7u) / 8u];
+u8 gcn_native_store_pages[GCN_RAM_PAGE_COUNT];
 
-static bool mem1_offset(u32 address, u32* offset) {
+static bool ram_offset(u32 address, u32* offset) {
     if (address < GC_MAIN_RAM_SIZE) {
         *offset = address;
         return true;
@@ -41,8 +41,15 @@ static bool mem1_offset(u32 address, u32* offset) {
         *offset = address - GC_RAM_UNCACHED;
         return true;
     }
+    const u32 physical=address&0x1fffffffu;
+    if ((address>>29u==0 || address>>29u==4 || address>>29u==6) &&
+        physical>=0x10000000u && physical<GCN_NATIVE_RAM_LIMIT) {
+        *offset=physical;return true;
+    }
     return false;
 }
+
+static u32 bank_limit(u32 offset) {return offset>=0x10000000u?GCN_NATIVE_RAM_LIMIT:GC_MAIN_RAM_SIZE;}
 
 void gcn_native_code_reset(void) {
     gcn_rel_reset();
@@ -64,7 +71,7 @@ static void set_candidate(u32 start,u32 end,GcnNativeCandidateFn call,
                           GcnNativeCandidateInvalidateFn invalidate,bool full_watch) {
     s_candidate_start = start;
     s_candidate_end = end;
-    s_candidate = start < end && end <= GC_MAIN_RAM_SIZE ? call : NULL;
+    s_candidate = start < end && end <= GCN_NATIVE_RAM_LIMIT ? call : NULL;
     s_candidate_invalidate = s_candidate ? invalidate : NULL;
     s_candidate_full_watch = full_watch;
     if (s_candidate_invalidate) {
@@ -85,9 +92,12 @@ void gcn_native_code_set_candidate_scoped(u32 start,u32 end,
 
 void gcn_native_code_watch(u32 address,u32 size) {
     u32 offset;
-    if (!size || !mem1_offset(address,&offset)) return;
+    if (!size || !ram_offset(address,&offset)) return;
     u64 end=(u64)offset+size;
-    if (end>GC_MAIN_RAM_SIZE) end=GC_MAIN_RAM_SIZE;
+    if(offset<GC_MAIN_RAM_SIZE && end>0x10000000u)
+        gcn_native_code_watch((address&0xe0000000u)|0x10000000u,
+            (u32)((end>GCN_NATIVE_RAM_LIMIT?GCN_NATIVE_RAM_LIMIT:end)-0x10000000u));
+    if (end>bank_limit(offset)) end=bank_limit(offset);
     for (u32 page=offset>>GCN_CODE_PAGE_SHIFT; page<=(end-1u)>>GCN_CODE_PAGE_SHIFT; page++)
         gcn_native_store_pages[page] |= GCN_NATIVE_STORE_OBSERVED;
 }
@@ -100,14 +110,17 @@ int gcn_native_code_try_candidate(CPUState* cpu, u32 pc) {
 void gcn_native_code_invalidate(u32 address, u32 size) {
     gcn_rel_invalidate(address, size);
     u32 offset;
-    if (!size || !mem1_offset(address, &offset))
+    if (!size || !ram_offset(address, &offset))
         return;
 
     u64 end = (u64)offset + size;
-    if (end > GC_MAIN_RAM_SIZE)
-        end = GC_MAIN_RAM_SIZE;
+    if(offset<GC_MAIN_RAM_SIZE && end>0x10000000u)
+        gcn_native_code_invalidate((address&0xe0000000u)|0x10000000u,
+            (u32)((end>GCN_NATIVE_RAM_LIMIT?GCN_NATIVE_RAM_LIMIT:end)-0x10000000u));
+    if (end > bank_limit(offset))
+        end = bank_limit(offset);
     if (s_candidate_invalidate && offset < s_candidate_end && end > s_candidate_start)
-        s_candidate_invalidate(address, size);
+        s_candidate_invalidate(address, (u32)(end-offset));
     u32 first = offset >> GCN_CODE_PAGE_SHIFT;
     u32 last = (u32)(end - 1u) >> GCN_CODE_PAGE_SHIFT;
     for (u32 page = first; page <= last; page++) {
@@ -125,11 +138,14 @@ void gcn_native_code_invalidate(u32 address, u32 size) {
 void gcn_native_code_content_dirty(u32 address, u32 size) {
     gcn_rel_invalidate(address, size);
     u32 offset;
-    if (!size || !mem1_offset(address, &offset))
+    if (!size || !ram_offset(address, &offset))
         return;
     u64 end = (u64)offset + size;
-    if (end > GC_MAIN_RAM_SIZE)
-        end = GC_MAIN_RAM_SIZE;
+    if(offset<GC_MAIN_RAM_SIZE && end>0x10000000u)
+        gcn_native_code_content_dirty((address&0xe0000000u)|0x10000000u,
+            (u32)((end>GCN_NATIVE_RAM_LIMIT?GCN_NATIVE_RAM_LIMIT:end)-0x10000000u));
+    if (end > bank_limit(offset))
+        end = bank_limit(offset);
     u32 first = offset >> GCN_CODE_PAGE_SHIFT;
     u32 last = (u32)(end - 1u) >> GCN_CODE_PAGE_SHIFT;
     for (u32 page = first; page <= last; page++) {
@@ -141,8 +157,8 @@ void gcn_native_code_content_dirty(u32 address, u32 size) {
 
 bool gcn_native_code_page_content_stale_take(u32 pc) {
     u32 offset;
-    if (!mem1_offset(pc, &offset))
-        return true;   /* outside MEM1: no staleness tracking, always stale */
+    if (!ram_offset(pc, &offset))
+        return true;   /* outside RAM: no staleness tracking, always stale */
     u32 page = offset >> GCN_CODE_PAGE_SHIFT;
     u8 mask = (u8)(1u << (page & 7u));
     u8* byte = &s_content_stale[page >> 3];
@@ -156,7 +172,7 @@ bool gcn_native_code_page_content_stale_take(u32 pc) {
 
 bool gcn_native_code_is_invalid(u32 pc) {
     u32 offset;
-    if (!mem1_offset(pc, &offset))
+    if (!ram_offset(pc, &offset))
         return false;
     u32 page = offset >> GCN_CODE_PAGE_SHIFT;
     return (s_invalid[page >> 3] & (u8)(1u << (page & 7u))) != 0;
