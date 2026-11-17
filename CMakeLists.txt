@@ -245,6 +245,11 @@ add_executable(test_page_crc_memo tests/test_page_crc_memo.c)
 target_link_libraries(test_page_crc_memo PRIVATE gcn_runtime_core)
 add_test(NAME page_crc_memo_identity COMMAND test_page_crc_memo)
 
+add_executable(test_cp tests/test_cp.c src/cp.c)
+target_include_directories(test_cp PRIVATE include)
+target_compile_definitions(test_cp PRIVATE GCNLLR_GPU_DEVICE_ONLY=1)
+add_test(NAME cp_fifo_breakpoints COMMAND test_cp)
+
 add_executable(gcn_memcard_inspect tools/memcard_inspect.c src/memcard_image.c)
 target_include_directories(gcn_memcard_inspect PRIVATE include)
 
