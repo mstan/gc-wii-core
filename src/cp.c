@@ -45,6 +45,11 @@ static void cp_set_u32(GcnCp* cp, u32 lo_off, u32 v) {
  *      registers, gate INT_CAUSE_CP exactly as Dolphin does, and drive the
  *      PI line (level-pushed; transition-logged to the event ring). ---- */
 static void cp_update_interrupts(GcnCp* cp) {
+    /* SetCPStatusFromGPU: the synchronous consumer can already be sitting at
+     * the newly enabled breakpoint with an empty FIFO. Evaluate after pointer
+     * and control writes as well as consumption, so that case still raises the
+     * real CP interrupt and disabling/moving the breakpoint clears it. */
+    cp->breakpoint = gcn_cp_at_breakpoint(cp);
     u32 rwd    = cp_u32(cp, GCN_CP_FIFO_RW_DIST_LO);
     u32 hi_wm  = cp_u32(cp, GCN_CP_FIFO_HI_WM_LO);
     u32 lo_wm  = cp_u32(cp, GCN_CP_FIFO_LO_WM_LO);

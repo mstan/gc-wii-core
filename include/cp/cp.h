@@ -36,14 +36,10 @@
  * exactly as Dolphin gates it (GPReadEnable + the respective *IntEnable bits),
  * drive INT_CAUSE_CP into the PI. No GPU consumer is needed for this line.
  *
- * DELIBERATELY DEFERRED (diverges loudly if exercised, never silently faked):
- *   - No FIFO consumer: the read pointer does NOT advance and
- *     CPReadWriteDistance climbs unbounded. Dolphin ASSERTs on overflow
- *     (CommandProcessor.cpp:390-394); we do not auto-advance the read pointer.
- *     If the guest nears the hi-watermark or polls STATUS for idle it diverges
- *     loudly — the signal the FIFO interpreter is due (GX_PLAN deferral #2).
- *   - Breakpoint interrupt: bFF_Breakpoint is a GPU-side flag (SetCPStatusFromGPU
- *     :442-476); with no consumer it stays 0, so the BP interrupt is dormant.
+ * The synchronous FIFO consumer advances only after processing real chunks.
+ * Pointer/control writes and consumption evaluate the live breakpoint state
+ * (SetCPStatusFromGPU), including enabling a breakpoint at an already drained
+ * read pointer. Its status and interrupt clear when it is disabled or moved.
  */
 #ifndef GCN_CP_CP_H
 #define GCN_CP_CP_H
