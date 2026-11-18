@@ -171,8 +171,14 @@ extern "C" uint64_t gcnllr_aurora_retail_array(const void*,uint32_t);
     return prefix+text
 
 def compose_texture(text):
+    text=once(text, '  for (u8 i = 0; i < g_gxState.numTexGens; ++i) {',
+        '''  // Capture texgen count in a reserved shader-key byte. Disabled
+  // texturing differs without texgens; worker compilation must use captured
+  // state rather than the mutable machine state.
+  config.shaderConfig.pad2 = g_gxState.numTexGens;
+  for (u8 i = 0; i < g_gxState.numTexGens; ++i) {''')
     text=once(text,'      .msaaSamples = gfx::get_sample_count(),',
-        '      .version = GXPipelineConfigVersion+1,\n      .msaaSamples = gfx::get_sample_count(),')
+        '      .version = GXPipelineConfigVersion+2,\n      .msaaSamples = gfx::get_sample_count(),')
     for name,args in [('resolve_static_texture','const GXTexObj_& obj'),
                       ('resolve_static_palette_texture','const GXTexObj_& obj, const GXTlutObj_& tlut')]:
         marker='gfx::TextureHandle '+name+'('+args+') {'

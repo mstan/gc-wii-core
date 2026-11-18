@@ -52,4 +52,24 @@ if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
     PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/gx")
   set_source_files_properties("${_gcnllr_retail}" "${_gcnllr_texture}" TARGET_DIRECTORY aurora_gx
     PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/gx")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_LIST_DIR}/aurora_shader.py")
+  foreach(_shader_component shader shader_info)
+    set(_shader_origin "${GXRUNTIME_DIR}/graphics/aurora/lib/gx/${_shader_component}.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_shader_origin}")
+    set(_shader_derived "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/${_shader_component}.cpp")
+    execute_process(COMMAND "${GCNLLR_PYTHON_EXECUTABLE}" -B "${CMAKE_CURRENT_LIST_DIR}/aurora_shader.py"
+      --source "${_shader_origin}" --out "${_shader_derived}" --kind "${_shader_component}"
+      COMMAND_ERROR_IS_FATAL ANY)
+    get_target_property(_shader_sources aurora_gx SOURCES)
+    list(FIND _shader_sources "lib/gx/${_shader_component}.cpp" _shader_index)
+    if(_shader_index EQUAL -1)
+      message(FATAL_ERROR "Pinned Aurora shader target source differs")
+    endif()
+    list(REMOVE_ITEM _shader_sources "lib/gx/${_shader_component}.cpp")
+    list(APPEND _shader_sources "${_shader_derived}")
+    set_property(TARGET aurora_gx PROPERTY SOURCES "${_shader_sources}")
+    set_source_files_properties("${_shader_derived}" TARGET_DIRECTORY aurora_gx
+      PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/gx")
+  endforeach()
 endif()

@@ -160,9 +160,23 @@ def main():
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
                 raise RuntimeError(f'Maximum I4 texture {width}x{height}: {actual.hex()} != {expected.hex()}')
         if large_tile not in reads:raise RuntimeError('Maximum I4 texture was never resolved from MEM2')
+        # Legal disabled-texture TEV input still selects TEXC/TEXA. It must
+        # supply a constant, without registering NULL as texture sampler255.
+        for texgens,luma in ((1,235),(0,16),(1,235)):
+            before=len(reads)
+            # Actual failing menu equation: ZERO/RASC/TEXC/ZERO.
+            send(xf(0x103f,struct.pack('>I',texgens))+
+                 bp([(0,0x10|texgens),(0x28,0),
+                     (0xc0,15|(8<<4)|(10<<8)|(15<<12)|(1<<19))])+
+                 quad+bp([(0x52,1<<14),(0x45,2)]))
+            actual=bytes(mem2[at:at+4]);expected=bytes([luma,128,luma,128])
+            if any(abs(a-b)>3 for a,b in zip(actual,expected)):
+                raise RuntimeError(f'Disabled texture ({texgens} texgens): {actual.hex()} != {expected.hex()}')
+            if large_tile in reads[before:]:raise RuntimeError('Disabled texture sampled RAM')
         result=dict(result='passed',library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
                     abi=abi,mem2_texture=True,mem2_display_copy=True,cpu_rewrite=True,mem1_preserved=True,
-                    mem2_indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True,max_texture_dimensions=True)
+                    mem2_indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True,max_texture_dimensions=True,
+                    disabled_texture_tev=True,disabled_texture_texgen_key=True)
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result))
     finally:
