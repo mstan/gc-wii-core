@@ -73,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cpu", choices=("gekko","broadway","espresso"), default="gekko")
     p.add_argument("--preserve-pc", action="store_true",
                    help="Compile each captured execution namespace without alias rewriting")
+    p.add_argument("--page-range", nargs=3, action="append", default=[],
+                   type=lambda value: int(value, 0), metavar=("PAGE", "OFFSET", "BYTES"),
+                   help="Compile and verify only the specified executable range within a page")
     return p.parse_args()
 
 
@@ -115,7 +118,7 @@ def canonical(addr: int) -> int:
 
 def recompile(dolrecomp: Path, blob: Path, addr: int, suffix: str,
               workdir: Path, cpu: str = "gekko") -> Path | None:
-    """Recompile one captured page.
+    """Recompile one verified page range.
 
     `addr` MUST match the table's execution namespace. The generated body
     switches on ctx->pc against its own compile-time labels -- so if the page
@@ -185,23 +188,33 @@ def main() -> int:
         print("no journal scores available; taking all %d captured addresses"
               % len(selected))
 
+    ranges = {}
+    for page, offset, length in args.page_range:
+        if (page not in selected or page in ranges or offset < 0 or length <= 0 or
+                offset + length > PAGE_SIZE or offset % 4 or length % 4):
+            print("error: --page-range requires one aligned executable range per selected page")
+            return 1
+        ranges[page] = (offset, length)
+
     # (address, hash) -> unique variant. Two files can carry the same bytes;
     # hashing the content rather than trusting the filename de-duplicates them.
-    work: list[tuple[int, int, Path, str]] = []
+    work: list[tuple[int, int, Path, str, int, int]] = []
     seen: set[tuple[int, int]] = set()
     for addr in selected:
+        offset, length = ranges.get(addr, (0, PAGE_SIZE))
         for blob in sorted(blobs[addr]):
             data = blob.read_bytes()
             if len(data) != PAGE_SIZE:
                 continue
-            h = fnv1a64(data)
+            h = fnv1a64(data[offset:offset+length])
             # Canonical from here on: compile base, symbol, and table entry all
             # agree, which is the invariant the label check above enforces.
-            caddr = addr if args.preserve_pc else canonical(addr)
+            raw_pc = addr + offset
+            caddr = raw_pc if args.preserve_pc else canonical(raw_pc)
             if (caddr, h) in seen:
                 continue
             seen.add((caddr, h))
-            work.append((caddr, h, blob, "_h%016X" % h))
+            work.append((caddr, h, blob, "_h%016X" % h, offset, length))
 
     print("recompiling %d page variants across %d addresses..."
           % (len(work), len(selected)))
@@ -212,17 +225,21 @@ def main() -> int:
         shutil.rmtree(chunks_dir)
     chunks_dir.mkdir(parents=True)
 
-    produced: list[tuple[int, int, str]] = []
+    produced: list[tuple[int, int, str, int]] = []
     abi_copied = False
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
 
         def run_one(item):
-            addr, h, blob, suffix = item
-            return item, recompile(args.dolrecomp, blob, addr, suffix, tmpdir,args.cpu)
+            addr, _, blob, suffix, offset, length = item
+            if length < PAGE_SIZE:
+                code = tmpdir / ("%08X%s.bin" % (addr, suffix))
+                code.write_bytes(blob.read_bytes()[offset:offset+length])
+                blob = code
+            return item, recompile(args.dolrecomp, blob, addr, suffix, tmpdir, args.cpu)
 
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            for (addr, h, _blob, suffix), chunk in pool.map(run_one, work):
+            for (addr, h, _blob, suffix, _offset, length), chunk in pool.map(run_one, work):
                 if chunk is None:
                     continue
                 shutil.copyfile(
@@ -234,39 +251,44 @@ def main() -> int:
                         # static inline), so one shared copy serves them all.
                         shutil.copyfile(abi, args.output / "generated_abi.h")
                         abi_copied = True
-                produced.append((addr, h, "func_%08X%s" % (addr, suffix)))
+                produced.append((addr, h, "func_%08X%s" % (addr, suffix), length))
 
     if not produced:
         print("error: no variants were produced")
         return 1
 
     produced.sort(key=lambda t: (t[0], t[1]))
-    pages: list[tuple[int, int, int]] = []   # (start, first, count)
-    for i, (addr, _h, _fn) in enumerate(produced):
+    pages: list[tuple[int, int, int, int]] = []   # (start, end, first, count)
+    for i, (addr, _h, _fn, length) in enumerate(produced):
+        end = addr + length
         if pages and pages[-1][0] == addr:
-            pages[-1] = (addr, pages[-1][1], pages[-1][2] + 1)
+            _, previous_end, first, count = pages[-1]
+            if previous_end != end:
+                print("error: overlapping page variants have different verified lengths")
+                return 1
+            pages[-1] = (addr, end, first, count + 1)
         else:
-            pages.append((addr, i, 1))
+            pages.append((addr, end, i, 1))
 
     inc = args.output / "overlay_module_tables.inc"
     with inc.open("w", encoding="utf-8") as f:
         f.write("/* Generated by runtime/tools/gen_overlay_module.py -- do not edit.\n"
                 " *\n"
                 " * Content-keyed overlay variants recompiled from captured guest\n"
-                " * pages. Each entry's hash is the FNV-1a64 of the exact 4 KiB the\n"
+                " * pages. Each entry's hash is the FNV-1a64 of the exact bytes the\n"
                 " * function was compiled from, so the runtime can tell which overlay\n"
                 " * is resident before letting native code run. */\n\n")
-        for _addr, _h, fn in produced:
+        for _addr, _h, fn, _length in produced:
             f.write("void %s(CPUState* ctx);\n" % fn)
         f.write("\n#define GCN_OVERLAY_PAGE_COUNT %uu\n" % len(pages))
         f.write("#define GCN_OVERLAY_VARIANT_COUNT %uu\n\n" % len(produced))
         f.write("static const GcnOverlayVariant s_overlay_variants[] = {\n")
-        for _addr, h, fn in produced:
+        for _addr, h, fn, _length in produced:
             f.write("    { 0x%016XULL, %s },\n" % (h, fn))
         f.write("};\n\nstatic const GcnOverlayPage s_overlay_pages[] = {\n")
-        for start, first, count in pages:
+        for start, end, first, count in pages:
             f.write("    { 0x%08Xu, 0x%08Xu, %uu, %uu },\n"
-                    % (start, start + PAGE_SIZE, first, count))
+                    % (start, end, first, count))
         f.write("};\n")
 
     print("wrote %d chunks, %d pages, %d variants -> %s"
