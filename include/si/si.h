@@ -219,6 +219,7 @@ void gcn_si_reset_input(GcnSi* si);
 /* Set one controller's report and presence. NULL disconnects that port. */
 bool gcn_si_set_port(GcnSi* si, u32 port, const GcnSiPadInput* input);
 bool gcn_si_debug_set_port(u32 port, const GcnSiPadInput* input);
+bool gcn_si_host_set_port(u32 port, const GcnSiPadInput* input);
 
 /* ---- debug-server singleton accessors (mirrors vi.c's s_vi / gcn_vi_xfb_info:
  * the debug server has no other handle to the live SI instance boot.c owns) ---- */

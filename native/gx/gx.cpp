@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "gcnllr/native_gx.h"
+#include "gamecube_input.hpp"
 #include "memory.hpp"
 #include "texture_encode.hpp"
 #include "owned_texture.hpp"
@@ -183,6 +184,7 @@ std::array<uint8_t,64> fifo_tail{};
 std::vector<uint8_t> xfb;
 Clock::time_point last_events{};
 SDL_Gamepad* gamepad{};
+gcnllr::gamecube_input::ControllerPorts gamecube_pads;
 FILE* frame_times{};
 std::atomic<uint64_t> completion_service_ns{};
 uint64_t last_completion_service_ns{};
@@ -292,6 +294,11 @@ void pump(bool force=false) {
             size.native_fb_width,size.native_fb_height,size.fb_width,size.fb_height);
     }
     const bool* keys=SDL_GetKeyboardState(nullptr);
+    if (gamecube_pads.enabled()) {
+        gamecube_pads.poll(window && SDL_GetKeyboardFocus() == window ? keys : nullptr);
+        pad = gamecube_pads.input().ports[0];
+        return;
+    }
     pad={}; pad.stick_x=uint8_t(128+100*(int(keys[SDL_SCANCODE_RIGHT])-int(keys[SDL_SCANCODE_LEFT])));
     pad.stick_y=uint8_t(128+100*(int(keys[SDL_SCANCODE_UP])-int(keys[SDL_SCANCODE_DOWN])));
     pad.substick_x=uint8_t(128+100*(int(keys[SDL_SCANCODE_L])-int(keys[SDL_SCANCODE_J])));
@@ -786,6 +793,7 @@ void stop() {
     retail_active=false;retail_texture_ids.clear();aurora::gx::recomp::clear_guest_address_resolver();
 #endif
     if (gamepad) { SDL_CloseGamepad(gamepad);gamepad=nullptr; }
+    gamecube_pads.stop();
     if (initialized) { gcnllr::gpu_bridge::release();aurora_shutdown();initialized=false; }
     if (frame_times) {std::fclose(frame_times);frame_times=nullptr;}
     frame_open=false;
@@ -815,6 +823,10 @@ int start(const GcnllrNativeGxConfig* input) {
     incompatible_view_count=0;
     fifo_cost={};draw_cost={};copy_cost={};present_cost={};status_cost={};owner_effect_cost={};last_profile=Clock::now();
     try {
+        const char* controller_profile = std::getenv("GCNLLR_CONTROLLER_PROFILE");
+        if (!config.hidden && controller_profile && *controller_profile &&
+            !gamecube_pads.start(controller_profile))
+            throw std::runtime_error("Unable to load the GameCube controller profile");
         SDL_SetMainReady();
         SDL_SetHint("GCNLLR_RENDER_HIDDEN",input->hidden ? "1" : "0");
         SDL_SetHint("GCNLLR_VALIDATE_GPU",std::getenv("GCNLLR_GPU_VALIDATE") ? "1" : "0");
@@ -1261,4 +1273,10 @@ extern "C" bool gcnllr_aurora_retail_bp(uint32_t reg,uint32_t value) {
 #endif
 extern "C" GCNLLR_EXPORT const GcnllrNativeGxApi* gcnllr_native_gx_get_api(uint32_t abi) {
     return abi==GCNLLR_NATIVE_GX_ABI ? &api : nullptr;
+}
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_gamecube_input(uint32_t abi, GcnllrGameCubeInput* output) {
+    if (abi != GCNLLR_GAMECUBE_INPUT_ABI || !output || !gamecube_pads.enabled())
+        return 0;
+    *output = gamecube_pads.input();
+    return 1;
 }
