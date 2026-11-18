@@ -40,7 +40,7 @@ void gcn_si_debug_schedule_state(u64* field,u32* pending,u64* applied) {
  * real button bit, never gated by one; mode-3 GetData packs the low word as
  * substickX<<24 | substickY<<16 | triggerLeft<<8 | triggerRight. Single source
  * for both the polled channel registers and the CMD_DIRECT buffer so they
- * cannot drift. Reads the injected state (si->input) — neutral at init
+ * cannot drift. Reads the selected port's state — neutral at init
  * (buttons=0, sticks centered 0x80, triggers 0) until the debug-surface
  * set_input command (or a live client) changes it.
  *
@@ -58,8 +58,8 @@ void gcn_si_debug_schedule_state(u64* field,u32* pending,u64* applied) {
  * (CMD_ORIGIN returns centered constants; a real pad returns calibration the
  * PAD lib subtracts). Cross-check before building anything on stick-only
  * assumptions. */
-static void si_pad_report(const GcnSi* si, u32* hi, u32* lo) {
-    const GcnSiPadInput* in = &si->input;
+static void si_pad_report(const GcnSi* si, u32 port, u32* hi, u32* lo) {
+    const GcnSiPadInput* in = port == 0 ? &si->input : &si->other_inputs[port - 1];
     *hi = (u32)in->stick_y | ((u32)in->stick_x << 8) |
           (((u32)in->buttons | GCN_SI_PAD_USE_ORIGIN) << 16);
     *lo = (u32)in->trigger_r | ((u32)in->trigger_l << 8) |
@@ -76,7 +76,7 @@ static void si_poll(GcnSi* si) {
     for (u32 n = 0; n < GCN_SI_CHANNELS; n++) {
         if (si->ch[n].connected) {
             si->ch[n].rdst = 1;
-            si_pad_report(si, &si->ch[n].in_hi, &si->ch[n].in_lo);
+            si_pad_report(si, n, &si->ch[n].in_hi, &si->ch[n].in_lo);
         } else {
             si->ch[n].norep = 1;
         }
@@ -91,6 +91,8 @@ void gcn_si_init(GcnSi* si) {
      * only (MainSettings.cpp:171-172). */
     si->ch[0].connected = 1;
     si->input = (GcnSiPadInput)GCN_SI_PAD_INPUT_NEUTRAL;
+    for (u32 n = 0; n < GCN_SI_CHANNELS - 1; n++)
+        si->other_inputs[n] = (GcnSiPadInput)GCN_SI_PAD_INPUT_NEUTRAL;
     /* SI.cpp Init:275-276 default poll period (before the IPL ever writes
      * SIPOLL), and VideoInterface.cpp:175 "first sampling starts at vsync" —
      * seed the schedule from beam zero rather than a special-case poll here.
@@ -111,6 +113,20 @@ void gcn_si_set_input(GcnSi* si, const GcnSiPadInput* input) {
 
 void gcn_si_reset_input(GcnSi* si) {
     si->input = (GcnSiPadInput)GCN_SI_PAD_INPUT_NEUTRAL;
+}
+
+bool gcn_si_set_port(GcnSi* si, u32 port, const GcnSiPadInput* input) {
+    if (!si || port >= GCN_SI_CHANNELS) return false;
+    GcnSiPadInput* state = port == 0 ? &si->input : &si->other_inputs[port - 1];
+    *state = input ? *input : (GcnSiPadInput)GCN_SI_PAD_INPUT_NEUTRAL;
+    si->ch[port].connected = input != NULL;
+    return true;
+}
+
+bool gcn_si_debug_set_port(u32 port, const GcnSiPadInput* input) {
+    if (!gcn_si_set_port(s_si, port, input)) return false;
+    if (port == 0) s_input_head = s_input_count = 0;
+    return true;
 }
 
 int gcn_si_debug_set_input(int have_buttons, u32 buttons,
@@ -210,8 +226,7 @@ void gcn_si_beam_poll(void* user, u32 half_line_count, int is_at_field_boundary)
  * IPL kicks a transfer by writing TSTART; the device answers immediately into
  * the I/O buffer and TCINT latches. Controller command/response bytes are from
  * SI_DeviceGCController.cpp; the pad state reflects the Observability
- * input-injection surface (si->input, neutral/centered until set_input
- * changes it). Exact command responses are validated against the extended
+ * input-injection surface for the addressed channel. Exact command responses are validated against the extended
  * (post-sc) oracle. */
 static void si_run_buffer(GcnSi* si) {
     u32 chan = (si->comcsr & GCN_SI_CSR_CHANNEL) >> 1u;
@@ -237,7 +252,7 @@ static void si_run_buffer(GcnSi* si) {
         break;
     case 0x40: {                            /* CMD_DIRECT: 8-byte pad report */
         u32 hi, lo;
-        si_pad_report(si, &hi, &lo);         /* same report the VI poll deposits */
+        si_pad_report(si, chan, &hi, &lo);   /* same report the VI poll deposits */
         si->iobuf[0] = (u8)(hi >> 24); si->iobuf[1] = (u8)(hi >> 16);
         si->iobuf[2] = (u8)(hi >> 8);  si->iobuf[3] = (u8)hi;
         si->iobuf[4] = (u8)(lo >> 24); si->iobuf[5] = (u8)(lo >> 16);

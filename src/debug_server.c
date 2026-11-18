@@ -1003,6 +1003,29 @@ static void handle_line(Client* c, const char* line) {
             else n=snprintf(s_resp,GCN_DBG_RESP_CAP,"{\"ok\":true,\"field\":%u}\n",field);
         }
     }
+    else if (!strcmp(cmd, "set_controller")) {
+        u32 port = 0, connected = 0, buttons = 0;
+        u32 x = 128, y = 128, cx = 128, cy = 128, left = 0, right = 0;
+        if (!json_controller_uint(line, "port", GCN_SI_CHANNELS - 1, &port, 1) ||
+            !json_controller_uint(line, "connected", 1, &connected, 1) ||
+            !json_controller_uint(line, "buttons", 65535, &buttons, 0) ||
+            !json_controller_uint(line, "stick_x", 255, &x, 0) ||
+            !json_controller_uint(line, "stick_y", 255, &y, 0) ||
+            !json_controller_uint(line, "substick_x", 255, &cx, 0) ||
+            !json_controller_uint(line, "substick_y", 255, &cy, 0) ||
+            !json_controller_uint(line, "trigger_l", 255, &left, 0) ||
+            !json_controller_uint(line, "trigger_r", 255, &right, 0)) {
+            n = snprintf(s_resp, GCN_DBG_RESP_CAP,
+                "{\"ok\":false,\"error\":\"invalid controller port, presence, buttons or axes\"}\n");
+        } else {
+            const GcnSiPadInput input = {(u16)buttons, (u8)x, (u8)y, (u8)cx, (u8)cy, (u8)left, (u8)right};
+            if (gcn_si_debug_set_port(port, connected ? &input : NULL))
+                n = snprintf(s_resp, GCN_DBG_RESP_CAP,
+                    "{\"ok\":true,\"port\":%u,\"connected\":%u}\n", port, connected);
+            else
+                n = snprintf(s_resp, GCN_DBG_RESP_CAP, "{\"ok\":false,\"error\":\"SI not initialized\"}\n");
+        }
+    }
     else if (!strcmp(cmd, "set_input")) {
         /* Debug-surface pad injection (ROADMAP M3/M4): drives the menu through
          * the SI model instead of the hardcoded-neutral report. Every field is

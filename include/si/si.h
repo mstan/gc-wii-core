@@ -151,8 +151,7 @@ typedef struct CPUState CPUState;
  * real button bit above, it is never itself a "button pressed" signal. */
 #define GCN_SI_PAD_USE_ORIGIN 0x0080u
 
-/* Injectable pad state for one (the only currently-modeled) connected GC
- * controller — the Observability "input injection" surface (ROADMAP M3/M4).
+/* Injectable pad state for one GameCube controller.
  * Defaults to the power-on-neutral report: no buttons, sticks centered,
  * triggers released (GCPadStatus.h MAIN/C_STICK_CENTER = 0x80). si_pad_report
  * packs these into the SI_DeviceGCController mode-3 hi/lo words exactly as
@@ -196,6 +195,7 @@ typedef struct {
     GcnSiIrqFn irq;  /* sink for the SI interrupt line (boot.c -> PI) */
     void*      irq_user;
     GcnSiPadInput input; /* debug-surface-injected report (see gcn_si_set_input) */
+    GcnSiPadInput other_inputs[GCN_SI_CHANNELS - 1];
     u32 next_poll_halfline; /* beam halfline the next SI poll is scheduled for
                               * (Dolphin's m_half_line_of_next_si_poll, parked
                               * here — see the header's beam-schedule doc) */
@@ -216,6 +216,9 @@ void gcn_si_beam_poll(void* user, u32 half_line_count, int is_at_field_boundary)
 void gcn_si_set_input(GcnSi* si, const GcnSiPadInput* input);
 /* Reset the injected pad state to the power-on-neutral report. */
 void gcn_si_reset_input(GcnSi* si);
+/* Set one controller's report and presence. NULL disconnects that port. */
+bool gcn_si_set_port(GcnSi* si, u32 port, const GcnSiPadInput* input);
+bool gcn_si_debug_set_port(u32 port, const GcnSiPadInput* input);
 
 /* ---- debug-server singleton accessors (mirrors vi.c's s_vi / gcn_vi_xfb_info:
  * the debug server has no other handle to the live SI instance boot.c owns) ---- */
