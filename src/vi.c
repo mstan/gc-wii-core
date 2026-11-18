@@ -192,17 +192,20 @@ static void vi_advance_halfline(GcnVi* vi) {
         u32 fb_addr, fb_w, fb_h, fb_stride;
         if (gcn_vi_xfb_info(&fb_addr, &fb_w, &fb_h, &fb_stride) &&
             (u64)fb_addr + (u64)fb_stride * fb_h <= s_vi_cpu->ram_size) {
-            /* The guest reuses an XFB address, so GX may already be replacing
-             * its rows for the next field. Lock only the synchronous mailbox
-             * copy; unlike a pipeline drain this still permits all unrelated
-             * GX decode/render work to overlap the CPU. */
+            /* The LLE GX worker can rewrite the XFB during the host mailbox
+             * copy. Native GX completes pending RAM writes on this thread
+             * from inside present(), before sampling the framebuffer. Its
+             * write callback needs to be free to acquire the XFB lock. */
+#ifndef GCNLLR_NATIVE_GX
             gcn_gx_xfb_read_begin();
-            u64 generation = gcn_gx_xfb_generation();
-            if (generation != s_presented_xfb_generation) {
+#endif
+            if (gcn_gx_xfb_generation() != s_presented_xfb_generation) {
                 gcn_host_window_present(s_vi_cpu->ram + fb_addr, fb_w, fb_h, fb_stride);
-                s_presented_xfb_generation = generation;
+                s_presented_xfb_generation = gcn_gx_xfb_generation();
             }
+#ifndef GCNLLR_NATIVE_GX
             gcn_gx_xfb_read_end();
+#endif
         }
     }
 #endif
