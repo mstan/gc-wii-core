@@ -136,6 +136,15 @@ typedef struct {
                          uint32_t width,uint32_t height);
 } GcnllrNativeGxApi;
 typedef const GcnllrNativeGxApi* (*GcnllrNativeGxGetApi)(uint32_t abi);
+
+/* Optional GameCube input export. It does not change the renderer ABI used
+ * by hosts with their own controller stack. */
+#define GCNLLR_GAMECUBE_INPUT_ABI 1u
+typedef struct {
+    uint32_t connected;
+    GcnllrPad ports[4];
+} GcnllrGameCubeInput;
+typedef int (*GcnllrNativeGxGameCubeInput)(uint32_t abi, GcnllrGameCubeInput* output);
 #ifdef __cplusplus
 }
 #endif

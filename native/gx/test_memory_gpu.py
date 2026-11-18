@@ -166,6 +166,20 @@ def main():
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
                 raise RuntimeError(f'Maximum I4 texture {width}x{height}: {actual.hex()} != {expected.hex()}')
         if large_tile not in reads:raise RuntimeError('Maximum I4 texture was never resolved from RAM')
+        # XF can select a texture coordinate absent from the draw's CP vertex
+        # layout. The implicit (0, 0) must sample the left half of the tile.
+        send(xf(120,floats([1,0,0,0,0,1,0,0]))+
+             xf(0x1040,struct.pack('>I',(5<<7)|(1<<2)))+
+             bp([(0x88,(1<<20)|(3<<10)|7),(0x94,tile>>5),(0x30,7),(0x31,3)]))
+        textured_quad=b'\x80\0\4'+b''.join(
+            floats([x,y,.5])+bytes([255]*4)+floats([.75,.5]) for x,y in vertices)
+        for has_uv,luma in ((False,16),(True,235),(False,16)):
+            send(cp(0x60,int(has_uv))+cp(0x70,1|(4<<1)|(5<<14)|(1<<21)|(4<<22))+
+                 (textured_quad if has_uv else quad)+bp([(0x52,1<<14),(0x45,2)]))
+            actual=bytes(region[at:at+4]);expected=bytes([luma,128,luma,128])
+            if any(abs(a-b)>3 for a,b in zip(actual,expected)):
+                raise RuntimeError(f'Texgen source with UV enabled={has_uv}: {actual.hex()} != {expected.hex()}')
+        send(xf(0x1040,struct.pack('>I',4)))
         # Legal disabled-texture TEV input still selects TEXC/TEXA. It must
         # supply a constant, without registering NULL as texture sampler255.
         for texgens,luma in ((1,235),(0,16),(1,235)):
@@ -182,7 +196,7 @@ def main():
         result=dict(result='passed',library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
                     abi=abi,physical_base=hex(base),texture=True,display_copy=True,cpu_rewrite=True,mem1_preserved=True,
                     indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True,max_texture_dimensions=True,
-                    disabled_texture_tev=True,disabled_texture_texgen_key=True)
+                    disabled_texture_tev=True,disabled_texture_texgen_key=True,missing_vertex_uv=True)
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result))
     finally:

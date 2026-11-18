@@ -129,6 +129,10 @@ bool gcn_si_debug_set_port(u32 port, const GcnSiPadInput* input) {
     return true;
 }
 
+bool gcn_si_host_set_port(u32 port, const GcnSiPadInput* input) {
+    return gcn_si_set_port(s_si, port, input);
+}
+
 int gcn_si_debug_set_input(int have_buttons, u32 buttons,
                             int have_stick_x, u32 stick_x,
                             int have_stick_y, u32 stick_y,

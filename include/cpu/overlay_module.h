@@ -11,8 +11,8 @@
  * 204 distinct content hashes in one session. Address no longer identifies
  * code; only content does.
  *
- * So a page here carries N variants, each keyed by the FNV-1a64 of its 4 KiB
- * of guest bytes, and dispatch picks the variant whose hash matches live RAM.
+ * A page range carries N variants, each keyed by the FNV-1a64 of the guest
+ * bytes in that range. Dispatch picks the variant whose hash matches live RAM.
  * A page with no matching variant falls through to the interpreter exactly as
  * before -- an unknown overlay is a miss, never a guess.
  *
@@ -28,7 +28,7 @@
 
 typedef void (*GcnOverlayFn)(CPUState* ctx);
 
-/* One 4 KiB guest page that has at least one recompiled variant. `first` and
+/* One guest page or executable prefix with a recompiled variant. `first` and
  * `count` slice the shared variant array. Pages are sorted by `start` and do
  * not overlap, so lookup is a binary search. */
 typedef struct {

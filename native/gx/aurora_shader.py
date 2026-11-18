@@ -26,6 +26,14 @@ def shader_info(text):
 
 
 def shader(text):
+    text = once(text,
+        '    UNLIKELY FATAL("unmapped vtx attr {}", underlying(attr));',
+        '''    // XF can read a texture source absent from the CP vertex layout.
+    // Its default ST is zero; the texgen supplies the homogeneous components.
+    if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+      return "vec2f(0.0, 0.0)"s;
+    }
+    UNLIKELY FATAL("unmapped vtx attr {}", underlying(attr));''')
     texture_check = '''    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
     CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);'''

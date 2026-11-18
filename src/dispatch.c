@@ -526,6 +526,9 @@ static inline void gcn_dispatch_pc_trigger_check(CPUState* ctx) {
  * content-validated module: the real IPL/apploader must have placed the exact
  * expected bytes in MEM1 before its dispatcher is allowed to run. */
 static inline int gcn_dispatch_native(CPUState* ctx) {
+#ifdef GCN_TITLE_DIRECT_DISPATCH
+    if (gcn_title_module_direct(ctx, ctx->pc)) return 1;
+#endif
 #ifdef GCNLLR_FAST_TITLE
     if (gcn_fast_title_call(ctx,ctx->pc)) return 1;
 #endif

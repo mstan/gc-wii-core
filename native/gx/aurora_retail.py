@@ -124,6 +124,10 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
           std::memcpy(machine_viewport,captured,sizeof(captured));
           machine_viewport_valid=true;machine_raster_dirty=true;
           f32 width = sx * 2.0f;''')
+    text=once(text,'.znear = (oz - sz) / 1.6777215e7f,',
+        '.znear = gcnllr::normalized_viewport_depth(oz - sz),')
+    text=once(text,'.zfar = oz / 1.6777215e7f,',
+        '.zfar = gcnllr::normalized_viewport_depth(oz),')
     text=once(text,'''          g_gxState.stateDirty = true;
         }
         break;

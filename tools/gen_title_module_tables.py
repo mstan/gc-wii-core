@@ -49,6 +49,31 @@ def dol_reader(path: Path):
     return read
 
 
+def write_native_dispatch(output, chunks):
+    runs = []
+    for index, (start, end) in enumerate(chunks):
+        size = end - start
+        if runs and start == runs[-1][1] and size == runs[-1][2]:
+            first, _, stride, initial = runs[-1]
+            runs[-1] = (first, end, stride, initial)
+        else:
+            runs.append((start, end, size, index))
+    output.write("#if GCN_TITLE_DIRECT_DISPATCH\n")
+    output.write("static const DolRecompFunction s_title_functions[] = {\n")
+    for start, _ in chunks:
+        output.write(f"    func_{start:08X},\n")
+    output.write("};\n")
+    output.write("static inline int title_direct_index(u32 address) {\n")
+    output.write("    if (address & 3u) return -1;\n")
+    for start, end, stride, initial in runs:
+        expression = str(initial)
+        if end - start > stride:
+            expression += f" + (int)((address - 0x{start:08X}u) / {stride}u)"
+        output.write(f"    if (address >= 0x{start:08X}u && address < 0x{end:08X}u)\n"
+                     f"        return {expression};\n")
+    output.write("    return -1;\n}\n#endif\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated-header", type=Path, required=True)
@@ -104,6 +129,7 @@ def main() -> None:
             output.write(f"    0x{fnv1a64(read_dol(start, end)):016X}ull,\n")
         output.write("};\n")
         output.write(f"#define GCN_TITLE_CHUNK_COUNT {len(chunks)}u\n")
+        write_native_dispatch(output, chunks)
     print(f"title module: {len(chunks)} content-validated chunks -> {args.output}")
 
 
