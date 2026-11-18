@@ -6,6 +6,15 @@
 
 namespace gcnllr {
 struct RasterOrigin { int x=342,y=342; };
+
+// The SDK can specify 2^24 at the end of a GX depth range. EFB depth
+// saturates at 0xFFFFFF, so that endpoint must map to exactly 1.0 before
+// Aurora inverts the depth range. A sky pass may use it at both endpoints.
+inline constexpr float normalized_viewport_depth(float depth) {
+    constexpr float max_depth=16777215.f;
+    return std::clamp(depth,0.f,max_depth)/max_depth;
+}
+
 // XF positions use the raster origin selected by the wrapped BP scissor,
 // which need not be GXSetViewport's customary 342. The IPL renders two
 // vertical bands with different origins into its smaller EFB region.

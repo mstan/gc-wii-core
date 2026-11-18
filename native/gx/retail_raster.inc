@@ -22,6 +22,7 @@ static void machine_raster() {
     const int bottom=std::clamp(int(bp[0x21]&2047)+1-origin.y,top,480);
     set_logical_scissor({left,top,right-left,bottom-top});
     set_logical_viewport({0,0,640,480,
-        (machine_viewport[5]-machine_viewport[2])/1.6777215e7f,machine_viewport[5]/1.6777215e7f});
+        gcnllr::normalized_viewport_depth(machine_viewport[5]-machine_viewport[2]),
+        gcnllr::normalized_viewport_depth(machine_viewport[5])});
     g_gxState.stateDirty=true;
 }
