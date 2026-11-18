@@ -8,13 +8,25 @@
 #ifdef _WIN32
 #define COBJMACROS
 #include <windows.h>
-#include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <avrt.h>
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
+
+/* The SDK declares the WASAPI IDs in headers but does not supply them in
+ * every C toolchain's UUID library. Keep this translation unit self-contained. */
+static const CLSID mm_device_enumerator_class =
+    {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
+static const IID mm_device_enumerator_interface =
+    {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
+static const IID audio_client_interface =
+    {0x1cb9ad4c, 0xdbfa, 0x4c32, {0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2}};
+static const IID audio_render_client_interface =
+    {0xf294acfc, 0x3146, 0x4483, {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}};
+static const IID simple_audio_volume_interface =
+    {0x87ce5498, 0x68d6, 0x44e5, {0x92, 0x15, 0x6d, 0xa4, 0x7e, 0xf8, 0x83, 0xd8}};
 
 #define GCN_AUDIO_FRAME_BYTES 4u
 #define GCN_AUDIO_RING_FRAMES 16384u
@@ -226,13 +238,13 @@ static DWORD WINAPI audio_worker_main(void* unused) {
         return 0;
     }
 
-    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-                          &IID_IMMDeviceEnumerator, (void**)&enumerator);
+    hr = CoCreateInstance(&mm_device_enumerator_class, NULL, CLSCTX_ALL,
+                          &mm_device_enumerator_interface, (void**)&enumerator);
     if (FAILED(hr)) goto init_failed;
     hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(
         enumerator, eRender, eConsole, &device);
     if (FAILED(hr)) goto init_failed;
-    hr = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL,
+    hr = IMMDevice_Activate(device, &audio_client_interface, CLSCTX_ALL, NULL,
                             (void**)&client);
     if (FAILED(hr)) goto init_failed;
 
@@ -256,12 +268,12 @@ static DWORD WINAPI audio_worker_main(void* unused) {
     if (FAILED(hr)) goto init_failed;
     hr = IAudioClient_SetEventHandle(client, s_audio_event);
     if (FAILED(hr)) goto init_failed;
-    hr = IAudioClient_GetService(client, &IID_IAudioRenderClient,
+    hr = IAudioClient_GetService(client, &audio_render_client_interface,
                                  (void**)&render);
     if (FAILED(hr)) goto init_failed;
     /* Automated pacing QA must exercise the real device clock without sound.
      * Fail before submitting any samples if the session mute cannot be set. */
-    hr = IAudioClient_GetService(client, &IID_ISimpleAudioVolume, (void**)&volume);
+    hr = IAudioClient_GetService(client, &simple_audio_volume_interface, (void**)&volume);
     if (FAILED(hr)) goto init_failed;
     hr = ISimpleAudioVolume_SetMute(volume,s_stats.output_muted,NULL);
     if (FAILED(hr)) goto init_failed;
