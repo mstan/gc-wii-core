@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 static unsigned presents;
-static u64 generation = 1;
+static u64 publications = 1;
 
 void gcn_ring_event(u16 kind, u32 detail, u32 aux, u32 pc) {
     (void)kind; (void)detail; (void)aux; (void)pc;
@@ -18,11 +18,12 @@ void gcn_gx_xfb_read_begin(void) {
     exit(1);
 }
 void gcn_gx_xfb_read_end(void) {}
-u64 gcn_gx_xfb_generation(void) { return generation; }
+u64 gcn_gx_xfb_generation(void) { return 1; }
+u64 gcn_gx_xfb_pub_count(void) { return publications; }
 void gcn_host_window_present(const u8* xfb, u32 width, u32 height, u32 stride) {
     (void)xfb; (void)width; (void)height; (void)stride;
     ++presents;
-    ++generation; /* Pending copy completed during the present. */
+    ++publications; /* Pending copy completed during the present. */
 }
 
 int main(void) {
@@ -38,6 +39,12 @@ int main(void) {
     gcn_vi_tick(100000u);
     if (presents != 1) {
         fprintf(stderr, "Expected one completed XFB generation, saw %u\n", presents);
+        return 1;
+    }
+    ++publications;
+    gcn_vi_tick(200000u);
+    if (presents != 2) {
+        fprintf(stderr, "Expected a new present after the next XFB copy, saw %u\n", presents);
         return 1;
     }
     return 0;

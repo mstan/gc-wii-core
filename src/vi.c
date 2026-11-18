@@ -29,10 +29,17 @@ static GcnVi* s_vi = NULL;
  * simply never fires; every other VI behavior is unaffected. */
 #ifndef GCNLLR_VI_DEVICE_ONLY
 static CPUState* s_vi_cpu = NULL;
-/* Last GXSetDrawDone generation copied into the host mailbox. Repeated VI
- * fields retain the last complete texture instead of republishing an XFB
- * while the guest is still building its successor. */
+/* The host retains the last completed scanout across repeated VI fields. */
 static u64 s_presented_xfb_generation = 0;
+
+static u64 xfb_presentation_generation(void) {
+#ifdef GCNLLR_NATIVE_GX
+    /* Display copies can complete without a GXDrawDone command. */
+    return gcn_gx_xfb_pub_count();
+#else
+    return gcn_gx_xfb_generation();
+#endif
+}
 #endif
 
 /* ---- opt-in VI field-cadence counter (GCN_PRESENT_STATS=1) ----
@@ -199,9 +206,9 @@ static void vi_advance_halfline(GcnVi* vi) {
 #ifndef GCNLLR_NATIVE_GX
             gcn_gx_xfb_read_begin();
 #endif
-            if (gcn_gx_xfb_generation() != s_presented_xfb_generation) {
+            if (xfb_presentation_generation() != s_presented_xfb_generation) {
                 gcn_host_window_present(s_vi_cpu->ram + fb_addr, fb_w, fb_h, fb_stride);
-                s_presented_xfb_generation = gcn_gx_xfb_generation();
+                s_presented_xfb_generation = xfb_presentation_generation();
             }
 #ifndef GCNLLR_NATIVE_GX
             gcn_gx_xfb_read_end();
