@@ -33,3 +33,9 @@ point retains GameCube masks. Gather bursts resolve main-memory banks through
 the shared bus, and consumers may supply an ordered drain hook. The extracted
 audio-DMA register/pump functions serve both the legacy DSP wrapper and native
 consumers, with explicit transfer periods and optional multi-bank CPU memory.
+
+CPU DMAU/DMAL transfers use the locked-L1 backing and the ordinary memory bus,
+including MEM2 when supplied by a Wii consumer. Split block lengths, the
+zero-length 128-line encoding, direction and the self-clearing trigger are
+modeled. Transfers complete synchronously; hardware queue latency is not
+modeled. Writes retain native-code invalidation and reservation handling.
