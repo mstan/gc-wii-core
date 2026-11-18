@@ -829,6 +829,7 @@ int start(const GcnllrNativeGxConfig* input) {
             throw std::runtime_error("Unable to load the GameCube controller profile");
         SDL_SetMainReady();
         SDL_SetHint("GCNLLR_RENDER_HIDDEN",input->hidden ? "1" : "0");
+        SDL_SetHint("GCNLLR_GX_FILL_WINDOW",std::getenv("GCNLLR_DISPLAY_PIXEL_ASPECT") ? "1" : "0");
         SDL_SetHint("GCNLLR_VALIDATE_GPU",std::getenv("GCNLLR_GPU_VALIDATE") ? "1" : "0");
 #ifdef _WIN32
         HMODULE module{};char path[32768]{};
@@ -1279,4 +1280,18 @@ extern "C" GCNLLR_EXPORT int gcnllr_native_gx_gamecube_input(uint32_t abi, Gcnll
         return 0;
     *output = gamecube_pads.input();
     return 1;
+}
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_output_size(uint32_t* width,uint32_t* height) {
+    int w=0,h=0;
+    if(!initialized || !width || !height ||
+       !SDL_GetWindowSizeInPixels(aurora::window::get_sdl_window(),&w,&h) || w<=0 || h<=0)
+        return 0;
+    *width=uint32_t(w);
+    *height=uint32_t(h);
+    return 1;
+}
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_resize_window(uint32_t width,uint32_t height) {
+    auto* window=initialized ? aurora::window::get_sdl_window():nullptr;
+    return window && width>=64 && height>=64 && width<=16384 && height<=16384 &&
+        SDL_SetWindowSize(window,int(width),int(height));
 }

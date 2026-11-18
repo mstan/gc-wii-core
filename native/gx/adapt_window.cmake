@@ -40,6 +40,26 @@ endif()
 string(REPLACE "${_gcnllr_power}"
   ".powerPreference = SDL_GetHintBoolean(\"GCNLLR_GPU_LOW_POWER\", false) ? wgpu::PowerPreference::LowPower : wgpu::PowerPreference::HighPerformance,"
   _gcnllr_gpu "${_gcnllr_gpu}")
+# Only the final scanout pass follows the surface aspect. The EFB and the
+# selected VI copy retain their original dimensions and guest coordinates.
+set(_gcnllr_present "  uint32_t viewport_width = surface_width;")
+string(FIND "${_gcnllr_gpu}" "${_gcnllr_present}" _gcnllr_present_offset)
+if(_gcnllr_present_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned native GPU presentation viewport differs")
+endif()
+string(REPLACE "${_gcnllr_present}"
+  "  if (SDL_GetHintBoolean(\"GCNLLR_GX_FILL_WINDOW\", false))\n    return {0.f, 0.f, static_cast<float>(surface_width), static_cast<float>(surface_height), 0.f, 1.f};\n\n${_gcnllr_present}"
+  _gcnllr_gpu "${_gcnllr_gpu}")
+set(_gcnllr_resize "void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force) {\n  const gfx::render_worker::Pause pause{gfx::flush_deferred_presents};")
+string(FIND "${_gcnllr_gpu}" "${_gcnllr_resize}" _gcnllr_resize_offset)
+if(_gcnllr_resize_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned native GPU surface resize differs")
+endif()
+# Hand a window-only resize to the same worker that acquires and presents
+# surface textures. Matching EFB dimensions keep the current render targets.
+string(REPLACE "${_gcnllr_resize}"
+  "void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force) {\n  if (!force && width == g_frameBuffer.size.width && height == g_frameBuffer.size.height) {\n    set_follow_size(nativeWidth, nativeHeight);\n    return;\n  }\n  const gfx::render_worker::Pause pause{gfx::flush_deferred_presents};"
+  _gcnllr_gpu "${_gcnllr_gpu}")
 set(_gcnllr_instance "dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;")
 string(REPLACE "${_gcnllr_instance}"
   "${_gcnllr_instance}\n    const char* nativeRuntimePaths[] = {SDL_GetHint(\"GCNLLR_NATIVE_RUNTIME_DIR\"), SDL_GetHint(\"GCNLLR_SYSTEM_RUNTIME_DIR\")};\n    Log.info(\"Native GPU runtime paths: {} | {}\", nativeRuntimePaths[0] ? nativeRuntimePaths[0] : \"unset\", nativeRuntimePaths[1] ? nativeRuntimePaths[1] : \"unset\");\n    if (nativeRuntimePaths[0] && nativeRuntimePaths[1]) {\n      dawnInstanceDescriptor.additionalRuntimeSearchPathsCount = 2;\n      dawnInstanceDescriptor.additionalRuntimeSearchPaths = nativeRuntimePaths;\n    }"
