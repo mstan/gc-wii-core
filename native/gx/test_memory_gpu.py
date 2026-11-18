@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Real FIFO texture reads and EFB writes across separate consumer banks.
 
-Run manually against the GC_WII_GX_WII build. No firmware/game assets required.
+The default exercises Wii MEM2. Pass --gamecube for the single-bank build.
+No firmware or game assets required.
 The test is hidden, does not activate a desktop window, and has no audio output.
 """
 import argparse
@@ -38,6 +39,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library',type=Path,required=True)
     parser.add_argument('--work-root',type=Path,required=True)
+    parser.add_argument('--gamecube',action='store_true')
     args=parser.parse_args()
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True)
     (work/'cache').mkdir(exist_ok=True)
@@ -51,8 +53,12 @@ def main():
     pointer=dll.gcnllr_native_gx_get_api(abi)
     if not pointer:raise RuntimeError('GPU ABI mismatch')
     api=pointer.contents
-    mem1=(c.c_uint8*(24*1024*1024))();mem2=(c.c_uint8*(1024*1024))()
-    banks=((0,mem1),(0x10000000,mem2));reads=[];writes=[]
+    mem1=(c.c_uint8*(24*1024*1024))()
+    base=0x01000000 if args.gamecube else 0x10000000
+    region_type=c.c_uint8*(1024*1024)
+    region=region_type.from_buffer(mem1,base) if args.gamecube else region_type()
+    banks=((0,mem1),) if args.gamecube else ((0,mem1),(base,region))
+    reads=[];writes=[]
     def mapping(address,size):
         address&=0x1fffffff
         for base,bank in banks:
@@ -90,9 +96,9 @@ def main():
     def xf(reg,values):return b'\x10'+struct.pack('>I',((len(values)//4-1)<<16)|reg)+values
     if not api.start(c.byref(config)):raise RuntimeError('GPU start failed')
     try:
-        tile=0x10000100;destination=0x10010000
+        tile=base+0x100;destination=base+0x10000
         c.memset(c.addressof(mem1)+0x10000,0xa5,640*480*2)
-        c.memmove(c.addressof(mem2)+0x100,bytes([0]*4+[255]*4)*4,32)
+        c.memmove(c.addressof(region)+0x100,bytes([0]*4+[255]*4)*4,32)
         raw=cp(0x50,(1<<9)|(1<<13))+cp(0x60,0)+cp(0x70,1|(4<<1)|(5<<14))+cp(0x80,0)+cp(0x90,0)
         raw+=xf(0,floats([1,0,0,0,0,1,0,0,0,0,1,0]))
         raw+=xf(0x1018,struct.pack('>I',30<<6))+xf(0x101a,floats([320,-240,16777215,662,582,16777215]))
@@ -109,31 +115,31 @@ def main():
         send(raw)
         quad=b'\x80\0\4'+b''.join(floats([x,y,.5])+bytes([255]*4) for x,y in [(-1,-1),(1,-1),(1,1),(-1,1)])
         for black,expected in ((False,bytes([235,128,235,128])),(True,bytes([16,128,16,128]))):
-            if black:c.memset(c.addressof(mem2)+0x100,0,32)
+            if black:c.memset(c.addressof(region)+0x100,0,32)
             send(quad+bp([(0x52,1<<14),(0x45,2)]))
             at=0x10000+240*1280+640
-            actual=bytes(mem2[at:at+4])
+            actual=bytes(region[at:at+4])
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
-                raise RuntimeError(f'MEM2 texture/copy mismatch: {actual.hex()} != {expected.hex()}')
+                raise RuntimeError(f'GPU texture/copy mismatch: {actual.hex()} != {expected.hex()}')
         if tile not in reads or writes!=[destination,destination]:raise RuntimeError('Physical bank identities were lost')
         if bytes(mem1[0x10000:0x10000+640*480*2])!=bytes([0xa5])*(640*480*2):
-            raise RuntimeError('MEM2 copy overwrote MEM1')
+            raise RuntimeError('GPU copy overwrote low MEM1')
         # Indexed arrays retain their address while the CPU changes vertex
         # colors. A missing epoch callback must hash the real array bytes.
-        positions=0x10000200;colors=0x10000400
-        c.memmove(c.addressof(mem2)+0x100,bytes([0]*4+[255]*4)*4,32)
+        positions=base+0x200;colors=base+0x400
+        c.memmove(c.addressof(region)+0x100,bytes([0]*4+[255]*4)*4,32)
         vertices=[(-1,-1),(1,-1),(1,1),(-1,1)]
-        c.memmove(c.addressof(mem2)+0x200,b''.join(floats([x,y,.5]) for x,y in vertices),48)
-        c.memmove(c.addressof(mem2)+0x400,bytes([255,255,255,0])*4,16)
+        c.memmove(c.addressof(region)+0x200,b''.join(floats([x,y,.5]) for x,y in vertices),48)
+        c.memmove(c.addressof(region)+0x400,bytes([255,255,255,0])*4,16)
         send(cp(0x50,(2<<9)|(2<<13))+cp(0xa0,positions)+cp(0xb0,12)+cp(0xa2,colors)+cp(0xb2,4)+
              bp([(0x41,1|0x18|(4<<8)|(5<<5))]))
         indexed=b'\x80\0\4'+bytes([0,0,1,1,2,2,3,3])
         send(indexed+bp([(0x52,1<<14),(0x45,2)]))
-        c.memmove(c.addressof(mem2)+0x400,bytes([255])*16,16)
+        c.memmove(c.addressof(region)+0x400,bytes([255])*16,16)
         send(indexed+bp([(0x52,1<<14),(0x45,2)]))
-        actual=bytes(mem2[at:at+4]);expected=bytes([235,128,235,128])
+        actual=bytes(region[at:at+4]);expected=bytes([235,128,235,128])
         if any(abs(a-b)>3 for a,b in zip(actual,expected)):
-            raise RuntimeError(f'MEM2 indexed vertex rewrite mismatch: {actual.hex()} != {expected.hex()}')
+            raise RuntimeError(f'GPU indexed vertex rewrite mismatch: {actual.hex()} != {expected.hex()}')
         # 2D menus put XY geometry exactly on an orthographic near plane.
         # Compare explicit XYZ(z=0) and the hardware's implicit XY z=0.
         for xy in (False,True):
@@ -142,24 +148,24 @@ def main():
                  xf(0x1020,floats([1,0,1,0,-.002,-1])+struct.pack('>I',1)))
             flat=b'\x80\0\4'+b''.join(floats([x,y] if xy else [x,y,0])+bytes([255]*4) for x,y in vertices)
             send(flat+bp([(0x52,1<<14),(0x45,2)]))
-            actual=bytes(mem2[at:at+4])
+            actual=bytes(region[at:at+4])
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
                 raise RuntimeError(f'Orthographic near-plane {"XY" if xy else "XYZ"} mismatch: {actual.hex()} != {expected.hex()}')
         # Ten-bit texture dimensions encode size minus one. Maximum-size I4
         # atlases must still resolve and sample real MEM2 data in either axis.
-        large_tile=0x100c0000
+        large_tile=base+0xc0000
         for width,height in ((1024,8),(8,1024),(128,1024)):
-            c.memset(c.addressof(mem2)+0xc0000,0xff,width*height//2)
+            c.memset(c.addressof(region)+0xc0000,0xff,width*height//2)
             send(bp([(0x4f,0),(0x50,0),(0x51,0xffffff),(0x52,(1<<14)|(1<<11))]))
             send(cp(0x50,(1<<9)|(1<<13))+cp(0x70,1|(4<<1)|(5<<14))+
                  xf(0x1020,floats([1,0,1,0,-1,0])+struct.pack('>I',1))+
                  bp([(0x88,((height-1)<<10)|(width-1)),(0x94,large_tile>>5),
                      (0x30,width-1),(0x31,height-1)]))
             send(quad+bp([(0x52,1<<14),(0x45,2)]))
-            actual=bytes(mem2[at:at+4])
+            actual=bytes(region[at:at+4])
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
                 raise RuntimeError(f'Maximum I4 texture {width}x{height}: {actual.hex()} != {expected.hex()}')
-        if large_tile not in reads:raise RuntimeError('Maximum I4 texture was never resolved from MEM2')
+        if large_tile not in reads:raise RuntimeError('Maximum I4 texture was never resolved from RAM')
         # Legal disabled-texture TEV input still selects TEXC/TEXA. It must
         # supply a constant, without registering NULL as texture sampler255.
         for texgens,luma in ((1,235),(0,16),(1,235)):
@@ -169,13 +175,13 @@ def main():
                  bp([(0,0x10|texgens),(0x28,0),
                      (0xc0,15|(8<<4)|(10<<8)|(15<<12)|(1<<19))])+
                  quad+bp([(0x52,1<<14),(0x45,2)]))
-            actual=bytes(mem2[at:at+4]);expected=bytes([luma,128,luma,128])
+            actual=bytes(region[at:at+4]);expected=bytes([luma,128,luma,128])
             if any(abs(a-b)>3 for a,b in zip(actual,expected)):
                 raise RuntimeError(f'Disabled texture ({texgens} texgens): {actual.hex()} != {expected.hex()}')
             if large_tile in reads[before:]:raise RuntimeError('Disabled texture sampled RAM')
         result=dict(result='passed',library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
-                    abi=abi,mem2_texture=True,mem2_display_copy=True,cpu_rewrite=True,mem1_preserved=True,
-                    mem2_indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True,max_texture_dimensions=True,
+                    abi=abi,physical_base=hex(base),texture=True,display_copy=True,cpu_rewrite=True,mem1_preserved=True,
+                    indexed_vertices=True,cpu_vertex_rewrite=True,near_plane_xy=True,max_texture_dimensions=True,
                     disabled_texture_tev=True,disabled_texture_texgen_key=True)
         (work/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result))
