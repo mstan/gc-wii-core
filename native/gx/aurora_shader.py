@@ -18,8 +18,8 @@ def shader_info(text):
     texture_input = '    CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound");'
     if text.count(texture_input) != 2:
         raise ValueError('Pinned Aurora texture dependency source differs')
-    # A disabled TEV texture contributes white, including when its input is
-    # still selected by the combiner. It has no sampler/texcoord dependency.
+    # A disabled TEV texture contributes a constant without a sampler or
+    # texcoord dependency, even when the combiner selects that texture input.
     text = text.replace(texture_input,
         '    if (stage.texMapId == GX_TEXMAP_NULL) break;\n' + texture_input)
     return once(text, '  info.uniformSize += info.loadsTevReg.count() * sizeof(Vec4<float>);', '''  // Color-source texgens consume the lit XF color channels even when TEV
@@ -35,6 +35,15 @@ def shader_info(text):
 
 
 def shader(text):
+    texture_check = '''    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
+    CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
+          underlying(stage.texMapId), stageIdx);'''
+    if text.count(texture_check) != 3:
+        raise ValueError('Pinned Aurora texture argument checks differ')
+    text = text.replace(texture_check,
+        '''    CHECK(stage.texMapId == GX_TEXMAP_NULL ||
+              (stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7),
+          "invalid texture {} for stage {}", underlying(stage.texMapId), stageIdx);''')
     text = once(text,
         '    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", i);',
         '''    // Disabled texturing supplies a constant to the TEV combiner. Keep this
@@ -43,8 +52,7 @@ def shader(text):
       // Match the functional no-texgen case in Dolphin's PixelShaderGen.
       fragmentFnPre += fmt::format("\\n    var sampled{} = vec4f({});", i, config.pad2 ? "1.0" : "0.0");
       continue;
-    }
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", i);''')
+    }''')
     first = text.index('auto lighting_func(')
     last = text.index('\nstd::string build_shader_source(', first)
     lighting = text[first:last]
