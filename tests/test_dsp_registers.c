@@ -2,6 +2,7 @@
 #include "dsp/dsp.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CHECK(expr) do { \
@@ -69,6 +70,26 @@ int main(void) {
     gcn_dsp_reg_write16(&dsp,GCN_DSP_AR_ARADDR+2,64);
     CHECK(!gcn_dsp_aram_transfer(&dsp,&cpu,aram,sizeof aram));
     CHECK(!dsp.dma_active && aram[63]==0);
+
+    /* Retail ARChecksize uses real DMA in both directions above 16 MiB. */
+    u8* gamecube_aram = calloc(1, GCN_DSP_ARAM_GAMECUBE_SIZE);
+    CHECK(gamecube_aram);
+    gcn_dsp_reset_registers(&dsp);
+    gcn_dsp_reg_write16(&dsp, GCN_DSP_AR_MMADDR + 2u, 0x1000u);
+    gcn_dsp_reg_write16(&dsp, GCN_DSP_AR_ARADDR, 0x0100u);
+    gcn_dsp_reg_write16(&dsp, GCN_DSP_AR_CNT_LO, 32u);
+    CHECK(gcn_dsp_aram_transfer(&dsp, &cpu, gamecube_aram, GCN_DSP_ARAM_GAMECUBE_SIZE));
+    CHECK(gamecube_aram[0] == 0u && gamecube_aram[GCN_DSP_ARAM_GAMECUBE_SIZE - 1u] == 0u);
+    CHECK(!gcn_dsp_aram_advance(&dsp, 245u));
+    CHECK(gcn_dsp_aram_advance(&dsp, 1u) && (dsp.csr & GCN_DSP_CSR_ARINT));
+    dsp.csr = 0u;
+    cpu.reserve_valid = true;
+    gcn_dsp_reg_write16(&dsp, GCN_DSP_AR_CNT, 0x8000u);
+    CHECK(gcn_dsp_aram_transfer(&dsp, &cpu, gamecube_aram, GCN_DSP_ARAM_GAMECUBE_SIZE));
+    CHECK(cpu.ram[0x1000] == 0x3cu && cpu.reserve_valid);
+    CHECK(!gcn_dsp_aram_advance(&dsp, 245u));
+    CHECK(gcn_dsp_aram_advance(&dsp, 1u) && (dsp.csr & GCN_DSP_CSR_ARINT));
+    free(gamecube_aram);
     cpu_free(&cpu);
 
     puts("dsp registers: PASS");

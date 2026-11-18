@@ -91,6 +91,7 @@
 /* Measured Flipper ARAM transfer rate used by RecompCore/Dolphin:
  * 246 Gekko ticks per 32-byte hardware transfer unit. */
 #define GCN_DSP_ARAM_TICKS_PER_32B  246u
+#define GCN_DSP_ARAM_GAMECUBE_SIZE  0x01000000u
 
 /* Level change on the DSP->PI interrupt line (level: 1 assert, 0 deassert). */
 typedef void (*GcnDspIrqFn)(void* user, int level);
@@ -130,8 +131,9 @@ void gcn_dsp_reg_write16(GcnDsp* dsp, u32 off, u16 value);
 /* Advance the CPU-side ARAM engine. Returns true exactly when this call
  * completes an active transfer and latches ARINT. */
 bool gcn_dsp_aram_advance(GcnDsp* dsp, u32 ppc_cycles);
-/* Real bytes plus deferred completion. Consumers provide their ARAM backing;
- * Wii aliases this view onto MEM2. Invalid ranges fail without claiming DMA. */
+/* Real bytes plus deferred completion. Wii aliases this view onto MEM2.
+ * On GameCube, probes of an empty ARAM expansion port complete without a
+ * copy. Invalid host memory ranges fail without claiming DMA. */
 bool gcn_dsp_aram_transfer(GcnDsp* dsp, CPUState* cpu, u8* aram, u32 aram_size);
 u16 gcn_dsp_aid_read16(const GcnDsp*,u32 off);
 void gcn_dsp_aid_write16(GcnDsp*,u32 off,u16 value,bool wii);

@@ -421,7 +421,8 @@ static void aram_dma_kick(GcnDsp* dsp, CPUState* cpu) {
         (u64)araddr+len<=aram_size)
         gcn_ring_watch_check_span(mmaddr,len,0xD5BD5B00u);
     if (!gcn_dsp_aram_transfer(dsp,cpu,aram,aram_size)) {
-        fprintf(stderr,"gcn DSP: invalid ARAM DMA range at pc=%08x\n",cpu->pc);
+        fprintf(stderr, "gcn DSP: invalid ARAM DMA at pc=%08x, MEM1=%08x ARAM=%08x length=%08x direction=%s\n",
+                cpu->pc, mmaddr, araddr, len, to_aram ? "to ARAM" : "from ARAM");
         cpu->halted=true;
         return;
     }
