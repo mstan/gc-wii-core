@@ -170,6 +170,11 @@ add_executable(test_vi_xfb tests/test_vi_xfb.c src/vi.c)
 target_link_libraries(test_vi_xfb PRIVATE gcn_runtime_core)
 add_test(NAME vi_xfb_geometry COMMAND test_vi_xfb)
 
+add_executable(test_vi_native_xfb tests/test_vi_native_xfb.c src/vi.c)
+target_compile_definitions(test_vi_native_xfb PRIVATE GCNLLR_NATIVE_GX=1)
+target_link_libraries(test_vi_native_xfb PRIVATE gcn_runtime_core)
+add_test(NAME vi_native_xfb_presentation COMMAND test_vi_native_xfb)
+
 # M4: EXI memcard device model + GCMemcard image module. Both are standalone
 # (only libc + their own headers), so they build/test without the generated C.
 add_executable(test_memcard tests/test_memcard.c src/memcard.c)
