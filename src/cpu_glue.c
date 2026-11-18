@@ -293,6 +293,30 @@ u32 ppc_mfspr(CPUState* cpu, u16 spr, u32 cia) {
     return 0;
 }
 
+/* Functional locked-cache DMA, with synchronous completion as in Dolphin's
+ * Interpreter_SystemRegisters.cpp / MMU DMA helpers (GPL-2.0-or-later).
+ * DMAU carries the RAM address and high five length bits; DMAL carries the
+ * cache address, low two length bits, direction and self-clearing trigger.
+ * Zero length denotes 128 cache lines. This provider does not model queue
+ * latency. Use the real bus for every word: MMIO ordering, native-code writes
+ * and reservations must follow the same contracts as ordinary memory access.
+ * The existing locked-L1 backing and its snapshot ownership remain unchanged. */
+static void ppc_locked_dma(CPUState* cpu, u32 lower, u32 cia) {
+    const u32 upper = cpu->spr[922];
+    u32 lines = ((upper & 31u) << 2) | ((lower >> 2) & 3u);
+    if (!lines) lines = 128;
+    const u32 memory = upper & ~31u;
+    const u32 cache = lower & ~31u;
+    const bool load = (lower & 16u) != 0;
+    for (u32 offset = 0; offset < lines * 32u && !cpu->halted; offset += 4) {
+        const u32 local = GCN_L1_CACHE_BASE |
+            ((cache + offset) & (GCN_L1_CACHE_SIZE - 1u));
+        const u32 value = mem_read32(cpu, load ? memory + offset : local, cia);
+        if (cpu->halted) break;
+        mem_write32(cpu, load ? local : memory + offset, value, cia);
+    }
+}
+
 void ppc_mtspr(CPUState* cpu, u16 spr, u32 value, u32 cia) {
     switch (spr) {
     case 1:   cpu->xer = value; return;
@@ -322,6 +346,10 @@ void ppc_mtspr(CPUState* cpu, u16 spr, u32 value, u32 cia) {
     case 916: case 917: case 918: case 919:
         cpu->gqr[spr - 912] = value; return;
     case 920: cpu->hid2 = value; return;
+    case 923:
+        cpu->spr[923] = value & ~2u;
+        if (value & 2u) ppc_locked_dma(cpu, value, cia);
+        return;
     default:  break;
     }
     if (ppc_spr_permissions(cpu, spr) & SPR_WRITE) {

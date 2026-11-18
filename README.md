@@ -39,3 +39,9 @@ The portable row/token ownership manager in `resident_memory.h` and
 `97d2d4ea96d21a52319b7d45c9f504a496dd2596`, with its MIT notices retained.
 Consumers own memory-access guards and physical-bank normalization; merely
 publishing a retained generation does not make stale RAM safe to access.
+
+CPU DMAU/DMAL transfers use the locked-L1 backing and the ordinary memory bus,
+including MEM2 when supplied by a Wii consumer. Split block lengths, the
+zero-length 128-line encoding, direction and the self-clearing trigger are
+modeled. Transfers complete synchronously; hardware queue latency is not
+modeled. Writes retain native-code invalidation and reservation handling.
