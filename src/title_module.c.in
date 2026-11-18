@@ -7,6 +7,7 @@
  */
 #include "@GCN_TITLE_GENERATED_HEADER@"
 #include "cpu/aot_module.h"
+#cmakedefine01 GCN_TITLE_DIRECT_DISPATCH
 #include "cpu/title_module.h"
 #ifdef GCNLLR_FAST_TITLE
 #include "cpu/fast_title.h"
@@ -17,6 +18,11 @@
 
 #include "title_module_tables.inc"
 
+#cmakedefine GCN_TITLE_NATIVE_HOOK "@GCN_TITLE_NATIVE_HOOK@"
+#ifdef GCN_TITLE_NATIVE_HOOK
+#include GCN_TITLE_NATIVE_HOOK
+#endif
+
 static u8 s_states[GCN_TITLE_CHUNK_COUNT];
 static GcnAotModule s_module = {
     s_title_chunks,
@@ -25,6 +31,32 @@ static GcnAotModule s_module = {
     GCN_TITLE_CHUNK_COUNT,
 };
 static int s_started;
+
+#if GCN_TITLE_DIRECT_DISPATCH
+static bool s_direct_started;
+
+bool gcn_title_module_direct(CPUState* cpu, u32 address) {
+    if (!s_started || cpu->host_call)
+        return false;
+    int index = title_direct_index(address);
+    if (index < 0 || s_states[index] != GCN_AOT_VERIFIED)
+        return false;
+    if (!s_direct_started) {
+        s_direct_started = true;
+        fputs("[aot-title] direct verified dispatch active\n", stderr);
+    }
+#ifdef GCN_TITLE_NATIVE_HOOK
+    if (gcn_title_native_hook(cpu, address)) {
+        s_module.native_dispatches++;
+        return true;
+    }
+#endif
+    cpu->pc = address;
+    s_title_functions[index](cpu);
+    s_module.native_dispatches++;
+    return true;
+}
+#endif
 
 static void print_summary(void) {
     fprintf(stderr,
@@ -57,6 +89,12 @@ bool gcn_title_module_call(CPUState* cpu, u32 address) {
                 "(%u chunks available)\n",
                 address, GCN_TITLE_CHUNK_COUNT);
     }
+#ifdef GCN_TITLE_NATIVE_HOOK
+    if (gcn_title_native_hook(cpu, address)) {
+        s_module.native_dispatches++;
+        return true;
+    }
+#endif
     if (!dolrecomp_call(cpu, address))
         return false;
     s_module.native_dispatches++;

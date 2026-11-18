@@ -288,6 +288,9 @@ if(GCN_WITH_GENERATED)
   # Optional per-title DOL module. Its generated dispatcher is linked beside,
   # never instead of, the IPL dispatcher. Live MEM1 bytes must match the
   # generated content hashes before any title chunk can execute natively.
+  set(GCN_TITLE_NATIVE_HOOK "" CACHE FILEPATH
+      "Optional title-owned include for a verified native CPU override")
+  option(GCN_TITLE_DIRECT_DISPATCH "Dispatch verified DOL chunks by their generated index" OFF)
   set(GCN_TITLE_GENERATED_DIR "" CACHE PATH
       "DolRecomp output directory for an optional content-validated title DOL")
   set(GCN_TITLE_DOL "" CACHE FILEPATH
@@ -427,6 +430,9 @@ if(GCN_WITH_GENERATED)
     "${GCN_GENERATED_DIR}/generated.c"
     ${GCN_GENERATED_CHUNKS}
   )
+  if(GCN_TITLE_DIRECT_DISPATCH AND GCN_TITLE_GENERATED_DIR)
+    set_property(SOURCE src/dispatch.c APPEND PROPERTY COMPILE_DEFINITIONS GCN_TITLE_DIRECT_DISPATCH=1)
+  endif()
   # The late IPL menus spend most of their time in the exact R/S raster setup
   # paths.  Optimize that translation unit independently of stale whole-boot
   # PGO weights.  FP contraction must stay off: fused multiply-add changed
