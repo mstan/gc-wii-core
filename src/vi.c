@@ -62,6 +62,15 @@ void gcn_vi_set_si_poll_hook(GcnVi* vi, GcnViSiPollFn fn, void* user) {
     vi->si_poll_user = user;
 }
 
+void gcn_vi_set_si_poll_schedule(GcnVi* vi, const u32* next_poll) {
+    vi->si_poll_next = next_poll;
+}
+
+void gcn_vi_acknowledge_sources(GcnVi* vi) {
+    if (vi->si_poll_next)
+        vi->reassert_sources = true;
+}
+
 void gcn_vi_set_field_hook(GcnVi* vi, GcnViFieldFn fn, void* user) {
     vi->field_hook = fn;
     vi->field_hook_user = user;
@@ -239,6 +248,47 @@ static void vi_advance_halfline(GcnVi* vi) {
     vi_update_interrupts(vi);
 }
 
+/* Steps are counted from the current halfline. SI and field callbacks
+ * consume the pre-increment position. Display interrupt comparators consume
+ * the post-increment position. A wrap is itself a boundary for the beam. */
+static u32 vi_next_event(const GcnVi* vi) {
+    if (!vi->si_poll_next || vi->reassert_sources)
+        return 1;
+    const u32 current = vi->half_line_count;
+    const u32 odd = vi_halflines_field(vi, GCN_VI_VTO_HI, GCN_VI_VTO_LO);
+    const u32 total = odd + vi_halflines_field(vi, GCN_VI_VTE_HI, GCN_VI_VTE_LO);
+    if (!current || current >= total)
+        return 1;
+    u32 next = total - current;
+    const u32 si = *vi->si_poll_next;
+    if (odd >= current && odd < total && odd-current+1u < next)
+        next = odd-current+1u;
+    if (si >= current && si < total && si-current+1u < next)
+        next = si-current+1u;
+
+    const u32 hlw = vi_hlw(vi);
+    for (u32 i = 0; i < 4; ++i) {
+        const u16 hi = vi->reg[(GCN_VI_DI0+4u*i) >> 1];
+        const u16 lo = vi->reg[(GCN_VI_DI0+4u*i+2u) >> 1];
+        const u32 vct = hi & GCN_VI_DI_VCT_MASK;
+        if (!vct || (hi & GCN_VI_DI_IR_INT))
+            continue;
+        const u32 target = 2u*(vct-1u) + ((lo & GCN_VI_DI_HCT_MASK) > hlw);
+        if (target > current && target-current < next)
+            next = target-current;
+    }
+    return next;
+}
+
+static void vi_skip_beam(GcnVi* vi, u64 period, u32 edges) {
+    vi->last_cycles += period * edges;
+    vi->half_line_count += edges;
+    if (!(vi->half_line_count & 1u))
+        vi->ticks_last_line_start = vi->last_cycles;
+    else if (edges > 1)
+        vi->ticks_last_line_start = vi->last_cycles - period;
+}
+
 /* Advance the beam state to `cycles_now` (the monotonic device clock). While
  * the IPL has not yet written a halfline width the beam is frozen (and time
  * must not accumulate, or the backlog would replay as a burst the moment HLW
@@ -260,8 +310,24 @@ static void vi_update(GcnVi* vi, u64 cycles_now) {
         vi->ticks_last_line_start = cycles_now;
         return;
     }
+    if (!vi->si_poll_next) {
+        while (cycles_now - vi->last_cycles >= tphl) {
+            vi->last_cycles += tphl;
+            vi_advance_halfline(vi);
+        }
+        return;
+    }
     while (cycles_now - vi->last_cycles >= tphl) {
+        const u64 available = (cycles_now - vi->last_cycles) / tphl;
+        const u32 next = vi_next_event(vi);
+        if (available < next) {
+            vi_skip_beam(vi, tphl, (u32)available);
+            break;
+        }
+        if (next > 1)
+            vi_skip_beam(vi, tphl, next-1u);
         vi->last_cycles += tphl;
+        vi->reassert_sources = false;
         vi_advance_halfline(vi);
     }
 }
@@ -273,8 +339,9 @@ void gcn_vi_tick(u64 core_cycles) {
 u64 gcn_vi_deadline_distance(GcnVi* vi,u64 cycles) {
     const u64 period=vi_ticks_per_halfline(vi);
     if(!period)return UINT64_MAX;
-    if(cycles<vi->last_cycles || cycles-vi->last_cycles>=period)return 1u;
-    return period-(cycles-vi->last_cycles);
+    const u64 event = period * vi_next_event(vi);
+    if(cycles<vi->last_cycles || cycles-vi->last_cycles>=event)return 1u;
+    return event-(cycles-vi->last_cycles);
 }
 
 int gcn_vi_xfb_info(u32* addr, u32* width, u32* height, u32* stride) {

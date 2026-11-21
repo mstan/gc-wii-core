@@ -146,6 +146,8 @@ typedef struct {
     void*      irq_user;
     GcnViSiPollFn si_poll_hook;    /* sink for the per-halfline SI poll schedule (boot.c -> si.c) */
     void*         si_poll_user;
+    const u32*    si_poll_next;   /* owner-thread SI comparator, optional */
+    bool          reassert_sources;
     GcnViFieldFn  field_hook;      /* sink for GCN_THROTTLE field-boundary pacing (boot.c -> dispatch.c) */
     void*         field_hook_user;
 } GcnVi;
@@ -155,6 +157,11 @@ void gcn_vi_init_model(GcnVi* vi, bool is_wii);
 void gcn_vi_set_irq(GcnVi* vi, GcnViIrqFn fn, void* user);
 /* Register the per-halfline SI-poll scheduling hook fired from vi_advance_halfline. */
 void gcn_vi_set_si_poll_hook(GcnVi* vi, GcnViSiPollFn fn, void* user);
+/* With a shared live SI comparator, the owner can skip unobserved beam edges.
+ * A PI acknowledgement can still require re-publishing active source levels
+ * at the next edge. NULL retains the per-halfline interface. */
+void gcn_vi_set_si_poll_schedule(GcnVi* vi, const u32* next_poll);
+void gcn_vi_acknowledge_sources(GcnVi* vi);
 /* Register the field-boundary pacing hook (GcnViFieldFn doc above). */
 void gcn_vi_set_field_hook(GcnVi* vi, GcnViFieldFn fn, void* user);
 /* Register the guest CPU (for its RAM pointer) so vi.c can hand the host

@@ -11,7 +11,7 @@
 #include "fifo_worker.hpp"
 #include "ordered_effects.hpp"
 #include "gfx/gxcore_draw.hpp"
-#if GCNLLR_ASYNC_COPIES
+#if GCNLLR_ASYNC_COPIES || GCNLLR_GPU_OWNED_TEXTURES
 #include "gfx/texture.hpp"
 #endif
 #include "gfx/thread_cpu.hpp"
@@ -27,6 +27,7 @@
 #include "gx/recomp.hpp"
 #include "gx/gx.hpp"
 extern "C" void gcnllr_aurora_retail_reset();
+extern "C" void gcnllr_aurora_retail_overlay(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
 #else
 #include <gxruntime/aurora_recomp/retail_gx_frontend.hpp>
 #include <gxruntime/gxcore/gxcore.hpp>
@@ -141,13 +142,29 @@ bool flush_commands() {
 }
 struct MemoryEpoch {uint32_t address,size;uint64_t epoch;bool valid;};
 std::vector<MemoryEpoch> memory_epochs;
+#if GCNLLR_RETAIL_PIPELINE
+uint64_t array_read_scope{};
+bool array_writers_stopped{};
+// The synchronous FIFO owns MEM1 until it returns or publishes an effect.
+// Worker translation and deferred materialization use their regular observers.
+struct StoppedArrayWriters {
+    StoppedArrayWriters() { array_writers_stopped=!config.pending_read && !config.memory_epoch; }
+    ~StoppedArrayWriters() { array_writers_stopped=false; }
+};
+#endif
+void invalidate_memory_observations() {
+    memory_epochs.clear();
+#if GCNLLR_RETAIL_PIPELINE
+    if (++array_read_scope==0) { retail_texture_ids.clear(); ++array_read_scope; }
+#endif
+}
 bool observe_pending_memory(uint32_t address,uint32_t size) {
     if(!config.pending_read || !config.pending_read(config.user,address,size))return true;
     bool ready=false;
     machine_effect([&]{ready=config.prepare_read && config.prepare_read(config.user,address,size);});
     // Cached host pointers remain valid addresses, but their bytes may just
     // have changed. Observe before an epoch hit or actual-content hash too.
-    memory_epochs.clear();sink->memory_boundary();
+    invalidate_memory_observations();sink->memory_boundary();
     return ready;
 }
 bool memory_epoch(uint32_t address,uint32_t size,uint64_t* epoch) {
@@ -438,7 +455,7 @@ void retire_streams(bool wait) {
     if(GCNLLR_OWNED_COMPLETION)gcnllr::gpu_bridge::acknowledge_submission();
     if(wait)++streamed_barriers;else ++streamed_polls;
     streamed_effects.drain(wait,[](bool block){aurora::gfx::poll_async_readbacks(block);});
-    memory_epochs.clear();sink->memory_boundary();
+    invalidate_memory_observations();sink->memory_boundary();
     completion_service_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start).count(),std::memory_order_relaxed);
 #else
     (void)wait;
@@ -473,6 +490,22 @@ struct RetainedCopy {
     GcnllrNativeGxCopy copy;
     gcnllr::gpu_bridge::EncodedImageHandle image;
     aurora::gfx::gxcore::OwnedTexture texture;
+#if GCNLLR_GPU_OWNED_TEXTURES
+    struct TextureView {
+        uint32_t format,width,height;
+        std::shared_ptr<aurora::gfx::TextureRef> texture;
+    };
+    std::vector<TextureView> views{};
+    struct PaletteKey {
+        const void* data{};
+        uint32_t object{}, version{};
+        GXTlutFmt format{};
+        uint32_t entries{};
+        bool operator==(const PaletteKey&) const = default;
+    };
+    PaletteKey palette_key{};
+    std::shared_ptr<aurora::gfx::TextureRef> palette_view;
+#endif
 #if GCNLLR_ASYNC_COPIES
     std::shared_ptr<StreamedBytes> stream;
 #endif
@@ -494,29 +527,77 @@ void release_copy(uint64_t token) {
     if(current!=texture_producers.end() && current->second==token)texture_producers.erase(current);
     retained_copies.erase(found);
 }
+// The caller holds retained_mutex. Only the newest writer of the exact guest
+// base can supply a decoded or reinterpreted view.
+auto find_texture_producer(uint32_t address) {
+    const auto current = texture_producers.find(address & 0x1fffffffu);
+    return current == texture_producers.end() ? retained_copies.end() : retained_copies.find(current->second);
+}
+bool is_intensity8_copy(uint32_t format) {
+    // The converter replicates this single stored channel across RGBA.
+    // Each format uses the same 8x4, one-byte-per-texel guest tile.
+    switch (format) {
+    case 1: case 0x11: case 0x27: case 0x28: case 0x29: case 0x2A: case 0x39: case 0x3A:
+        return true;
+    default:
+        return false;
+    }
+}
+bool dense_texture_copy(const RetainedCopy& retained, uint32_t size, uint32_t width, uint32_t height) {
+    const auto& t = retained.texture;
+    const auto& c = retained.copy;
+    return t.texture && t.width == width && t.height == height &&
+        c.stride == c.row_bytes && uint64_t(c.row_bytes) * c.rows == size;
+}
 std::shared_ptr<aurora::gfx::TextureRef> owned_texture(uint32_t address,uint32_t size,
     uint32_t format,uint32_t width,uint32_t height) {
-    const uint32_t offset=address&0x1fffffffu;
     std::lock_guard lock(retained_mutex);
-    const auto current=texture_producers.find(offset);
-    if(current==texture_producers.end())return {};
-    const auto found=retained_copies.find(current->second);
+    const auto found=find_texture_producer(address);
     if(found==retained_copies.end())return {};
-    const auto& retained=found->second;
+    auto& retained=found->second;
     const auto& c=retained.copy;const auto& t=retained.texture;
-    // Qualified views preserve this converter's exact packed-byte decode:
-    // I4 keeps both nibbles, while Z16's [Zmid,Zhi] bytes decode as IA8
-    // (RGB=Zhi, alpha=Zmid). Other reinterpretations use the RAM decoder.
-    // Dense addressing cannot stand in for stride gaps or interior bases.
+    const bool dense=dense_texture_copy(retained,size,width,height);
+    const bool scalar_alias=format==1u && t.format!=format && is_intensity8_copy(t.format);
+#if GCNLLR_GPU_OWNED_TEXTURES
+    // Viewing a copy-typed scalar as I8 replaces the guest byte decoder.
+    // Keep its logical texel spacing when the producer retained subpixels.
+    const bool logical_scalar=scalar_alias && dense &&
+        (t.texture->size.width!=width || t.texture->size.height!=height);
+#else
+    constexpr bool logical_scalar=false;
+#endif
+    // Direct bindings preserve the converter's packed-byte decode. I4
+    // keeps both nibbles, and Z16's [Zmid,Zhi] bytes decode as IA8.
     const bool compatible_format=
         ((format==0u || format==1u || format==4u || format==6u) && t.format==format) ||
+        (scalar_alias && !logical_scalar) ||
         (format==3u && t.format==0x13u);
-    if(compatible_format && t.texture &&
-       t.width==width && t.height==height && c.stride==c.row_bytes &&
-       uint64_t(c.row_bytes)*c.rows==size) {
+    if(compatible_format && dense) {
         resident_texture_hits.fetch_add(1,std::memory_order_relaxed);
         return t.texture;
     }
+#if GCNLLR_GPU_OWNED_TEXTURES
+    const bool padded_rgb565=format==4u && t.format==format && (t.width&1u) &&
+        width==t.width+1u && height==t.height;
+    const bool tiled_view=(format==0u || format==3u) && format!=t.format;
+    // Views address the original dense tile payload, including its edge
+    // padding. Stride gaps and interior bases remain explicit observers.
+    if(t.texture && (padded_rgb565 || tiled_view || logical_scalar) &&
+       c.stride==c.row_bytes && uint64_t(c.row_bytes)*c.rows==size) {
+        const auto cached=std::find_if(retained.views.begin(),retained.views.end(),[&](const auto& view) {
+            return view.format==format && view.width==width && view.height==height;
+        });
+        if(cached!=retained.views.end()) {
+            resident_texture_hits.fetch_add(1,std::memory_order_relaxed);
+            return cached->texture;
+        }
+        if(auto view=gcnllr::gpu_bridge::reinterpret_texture(t,format,width,height)) {
+            retained.views.push_back({format,width,height,view});
+            resident_texture_hits.fetch_add(1,std::memory_order_relaxed);
+            return view;
+        }
+    }
+#endif
     resident_texture_incompatible.fetch_add(1,std::memory_order_relaxed);
     if(profile) {
         const std::array<uint32_t,10> key{format,width,height,size,t.format,t.width,t.height,c.row_bytes,c.rows,c.stride};
@@ -547,7 +628,10 @@ int materialize_copy(uint64_t token) {
             if(image.width*2!=c.row_bytes || image.height!=c.rows)
                 throw std::runtime_error("Resident XFB geometry changed");
             bytes=image.yuy2;
-        } else bytes=aurora::gfx::gxcore::materialize_owned_texture(retained.texture);
+        } else {
+            if(GCNLLR_GPU_FRAME_PACKETS)gcnllr::gpu_bridge::submit_copies();
+            bytes=aurora::gfx::gxcore::materialize_owned_texture(retained.texture);
+        }
         if(bytes.size()!=size_t(c.row_bytes)*c.rows)
             throw std::runtime_error("Resident copy byte geometry changed");
         // Called by the machine owner. No FIFO wait or owner round-trip is
@@ -570,6 +654,22 @@ int materialize_copy(uint64_t token) {
         return 1;
     } catch(const std::exception& e) {fail(e.what());return 0;}
 }
+int materialize_copy_range(uint64_t token,uint32_t offset,uint32_t size) {
+    if(!initialized || failed.load())return -1;
+    const auto retained=retained_copy(token);
+    const auto& copy=retained.copy;
+    if(!retained.image || !size || copy.stride!=copy.row_bytes)return 0;
+    const auto begin=Clock::now();
+    try {
+        const auto image=gcnllr::gpu_bridge::materialize_display_copy(retained.image,offset,size);
+        if(!config.write_copy(config.user,copy.address+offset,image.yuy2.data(),size,
+                GCNLLR_NATIVE_GX_COPY_MATERIALIZING,0,0,0))
+            throw std::runtime_error("Machine rejected observed GPU byte range");
+        ++state.resident_materializations;
+        readback_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-begin).count(),std::memory_order_relaxed);
+        return 1;
+    } catch(const std::exception& e) {fail(e.what());return -1;}
+}
 void display_readback(const gxruntime::gxcore::EfbCopyCommand& copy) {
     if (pending_displays.size()>=16) flush_display_copies();
     const auto& bp=sink->bp;
@@ -584,16 +684,16 @@ void display_readback(const gxruntime::gxcore::EfbCopyCommand& copy) {
     // A programmed (or reset) all-zero filter is black, not identity.
     const gcnllr::gpu_bridge::DisplayCopyFilter filter{
         bp[0x53],bp[0x54],(bp[0x52]&1u)!=0,(bp[0x52]&2u)!=0};
-    gcnllr::gpu_bridge::record_display_copy(copy,filter);
+    gcnllr::gpu_bridge::record_display_copy(copy,filter,!config.own_copy,h,yscale);
     pending_displays.push_back({(bp[0x4B]&guest_gpu_address_mask)<<5,w,h,stride,yscale});
     ++state.display_copies;
 }
 void flush_display_copies() {
     if (pending_displays.empty()) return;
-    // Native row scaling remains the eager provider until a resident encoded
-    // layout implements it. This is a format capability, not a title check.
-    if(config.own_copy && std::all_of(pending_displays.begin(),pending_displays.end(),
-            [](const PendingDisplay& copy){return copy.yscale==1.f;})) {
+    const bool resident=config.own_copy && (GCNLLR_GPU_OWNED_DISPLAY ||
+        std::all_of(pending_displays.begin(),pending_displays.end(),
+            [](const PendingDisplay& copy){return copy.yscale==1.f;}));
+    if(resident) {
         auto images=gcnllr::gpu_bridge::retain_display_copies();
         if(images.size()!=pending_displays.size())throw std::runtime_error("Resident copy fence mismatch");
         for(size_t i=0;i<images.size();i++) {
@@ -628,7 +728,7 @@ void flush_display_copies() {
 #endif
             ++state.resident_copies;
         }
-        pending_displays.clear();memory_epochs.clear();sink->memory_boundary();
+        pending_displays.clear();invalidate_memory_observations();sink->memory_boundary();
         return;
     }
     retire_streams(true); // Unsupported resident row scaling uses eager floor.
@@ -650,7 +750,7 @@ void flush_display_copies() {
             if (!config.write_copy(config.user,copy.destination,xfb.data(),uint32_t(xfb.size()),1,w,h,stride))
                 throw std::runtime_error("Machine rejected completed GPU XFB write");
         });
-        memory_epochs.clear();
+        invalidate_memory_observations();
         sink->memory_boundary();
     }
     pending_displays.clear();
@@ -671,11 +771,12 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
     if (!stride || extent>UINT32_MAX ||
         !gcnllr::gx_memory(config,command.dest_address,uint32_t(extent),destination))
         throw std::runtime_error("Invalid native texture-copy memory layout");
-    if(config.own_copy && stride>=row_bytes) {
+    if((!GCNLLR_GPU_OWNED_DISPLAY || GCNLLR_GPU_OWNED_TEXTURES) && config.own_copy && stride>=row_bytes) {
 #if GCNLLR_ASYNC_COPIES
         if(streamed_readbacks>=16)retire_streams(true);
 #endif
-        auto texture=aurora::gfx::gxcore::capture_owned_efb_copy(command);
+        auto texture=aurora::gfx::gxcore::capture_owned_efb_copy(command,!GCNLLR_GPU_FRAME_PACKETS);
+        if(GCNLLR_GPU_FRAME_PACKETS)gcnllr::gpu_bridge::note_recorded_copy();
 #if GCNLLR_ASYNC_COPIES
         auto stream=std::make_shared<StreamedBytes>();stream->texture=texture;
 #if GCNLLR_COMPOSED_SCANOUT
@@ -705,7 +806,7 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
 #endif
         resident_textures.fetch_add(1,std::memory_order_relaxed);
         ++state.texture_copies;
-        memory_epochs.clear();sink->memory_boundary();
+        invalidate_memory_observations();sink->memory_boundary();
         return;
     }
     retire_streams(true);
@@ -722,7 +823,7 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
     if(stride==row_bytes)
         aurora::gfx::gxcore::publish_efb_copy_memory(command.dest_address,bytes.data(),uint32_t(bytes.size()),
             command.destination_width,command.destination_height,command.format);
-    memory_epochs.clear();
+    invalidate_memory_observations();
     sink->memory_boundary();
     ++state.texture_copies;
 }
@@ -751,6 +852,11 @@ void stop() {
         (unsigned long long)state.presents,double(readback_ns.load(std::memory_order_relaxed))/1e6);
     if (initialized && frontend) std::fprintf(stderr,"[native-gx-fifo] bytes=%llu pending=%zu\n",
         (unsigned long long)state.fifo_bytes,frontend->pending_fifo_size());
+#if GCNLLR_GX_ONE_COPY
+    if(initialized && frontend)
+        std::fprintf(stderr,"[native-gx-parser] borrowed=%llu copied-input=%llu\n",
+            (unsigned long long)frontend->borrowed_bytes(),(unsigned long long)frontend->copied_bytes());
+#endif
     if (initialized && std::getenv("GCNLLR_GPU_TRACE")) {
         std::fprintf(stderr,"[native-gx-fifo-tail] ");
         for(auto b:fifo_tail)std::fprintf(stderr,"%02X",b);
@@ -788,8 +894,9 @@ void stop() {
     aurora::gfx::gxcore::set_owned_texture_lookup(nullptr);
     frontend.reset(); sink.reset();
 #if GCNLLR_RETAIL_PIPELINE
-    std::fprintf(stderr,"[native-retail-textures] queries=%llu reused=%llu\n",
-        (unsigned long long)retail_texture_ids.queries,(unsigned long long)retail_texture_ids.reused);
+    std::fprintf(stderr,"[native-retail-textures] queries=%llu reused=%llu stable_array_hits=%llu\n",
+        (unsigned long long)retail_texture_ids.queries,(unsigned long long)retail_texture_ids.reused,
+        (unsigned long long)retail_texture_ids.scope_hits);
     retail_active=false;retail_texture_ids.clear();aurora::gx::recomp::clear_guest_address_resolver();
 #endif
     if (gamepad) { SDL_CloseGamepad(gamepad);gamepad=nullptr; }
@@ -863,7 +970,13 @@ int start(const GcnllrNativeGxConfig* input) {
         initialized=true;
         if (!info.window) throw std::runtime_error("Aurora did not create a native GPU window");
         if (info.backend==BACKEND_NULL) throw std::runtime_error("A real GPU backend is required");
-        if (info.backend!=settings.desiredBackend) throw std::runtime_error("Requested native GPU backend is unavailable");
+        bool compatible=info.backend==settings.desiredBackend;
+#if defined(_WIN32) && !defined(GCNLLR_GPU_VULKAN)
+        // Dawn can open the hardware Vulkan adapter when D3D12 device
+        // creation fails, including under Proton on Steam Deck.
+        compatible=compatible || info.backend==BACKEND_VULKAN;
+#endif
+        if (!compatible) throw std::runtime_error("Requested native GPU backend is unavailable");
         if (input->hidden) SDL_HideWindow(info.window);
         else place_playtest_window(info.window);
         gcnllr::gpu_bridge::initialize();
@@ -872,7 +985,7 @@ int start(const GcnllrNativeGxConfig* input) {
         GXRenderModeObj mode{};mode.viTVmode=VI_TVMODE_NTSC_PROG;
         mode.fbWidth=mode.viWidth=640;mode.efbHeight=mode.xfbHeight=mode.viHeight=480;
         VIConfigure(&mode);
-        aurora_set_frame_buffer_scale(1.0f);
+        aurora_set_frame_buffer_scale(float(gcnllr::gpu_bridge::efb_scale(std::getenv("GCNLLR_EFB_SCALE"))));
         /* The machine owns a 640x480 EFB; resizing the presentation window
          * must not expand its raster grid to the host window's aspect. */
         aurora::window::set_frame_buffer_aspect_fit(true);
@@ -895,7 +1008,7 @@ int start(const GcnllrNativeGxConfig* input) {
         sink->core.set_guest_resolver(&resolver);sink->core.set_plan_observer(plan,nullptr);sink->core.set_copy_observer(copy,nullptr);
 #endif
         aurora::gfx::gxcore::reset_texture_cache();
-        memory_epochs.clear();
+        invalidate_memory_observations();
         aurora::gfx::gxcore::set_texture_dirty_epoch_observer(texture_epoch);
         aurora::gfx::gxcore::set_efb_copy_epoch_observer(memory_epoch);
         aurora::gfx::gxcore::set_owned_texture_lookup(config.own_copy ? owned_texture:nullptr);
@@ -939,7 +1052,7 @@ int start(const GcnllrNativeGxConfig* input) {
             (void)registered;
             RecordingBatch recording;
             Measure measurement(fifo_cost);
-            memory_epochs.clear();sink->memory_boundary();
+            invalidate_memory_observations();sink->memory_boundary();
             // The pinned donor's drain mode emits trace events at command
             // boundaries before its bounded ring fills. Keep the handoff as
             // one stream, including partial-command carry, instead of forcing
@@ -985,8 +1098,11 @@ int fifo(const uint8_t* bytes,uint32_t size) {
     try {
         if(fifo_worker)fifo_worker->append({bytes,size});
         else {
+#if GCNLLR_RETAIL_PIPELINE
+            StoppedArrayWriters stopped;
+#endif
             Measure measurement(fifo_cost);
-            memory_epochs.clear();sink->memory_boundary();
+            invalidate_memory_observations();sink->memory_boundary();
             if (!frontend->write_fifo({bytes,size}) || !flush_commands())
                 throw std::runtime_error(frontend->last_error() ? frontend->last_error() : "Native FIFO resource validation failed");
 #if GCNLLR_ASYNC_COPIES
@@ -1007,7 +1123,7 @@ int drain() {
         gcnllr::gpu_bridge::validate_submission();
         if(fifo_worker)fifo_worker->wait(true);
         else {
-            memory_epochs.clear();sink->memory_boundary();
+            invalidate_memory_observations();sink->memory_boundary();
             if (!flush_commands())
                 throw std::runtime_error(frontend->last_error() ? frontend->last_error() : "Native FIFO resource validation failed");
             flush_geometry();flush_display_copies();retire_streams(true);
@@ -1057,6 +1173,8 @@ int service() {
         }
 #if GCNLLR_ASYNC_COPIES
         else service_streams();
+#elif GCNLLR_GPU_OWNED_DISPLAY
+        else flush_display_copies();
 #endif
         return !failed.load();
     }
@@ -1189,8 +1307,10 @@ const GcnllrNativeGxApi api={GCNLLR_NATIVE_GX_ABI,start,fifo,drain,status,peek,s
     GCNLLR_NATIVE_GX_RESIDENT_COPY|(GCNLLR_GX_COOPERATIVE_VI ? GCNLLR_NATIVE_GX_COMPLETED_SCANOUT : 0u)
         |(GCNLLR_ASYNC_COPIES ? GCNLLR_NATIVE_GX_STREAMED_COPY : 0u)
         |(GCNLLR_COMPOSED_SCANOUT ? GCNLLR_NATIVE_GX_DEFERRED_RETIREMENT : 0u)
-        |(GCNLLR_GX_COOPERATIVE_VI ? GCNLLR_NATIVE_GX_COMPOSED_SCANOUT : 0u),
-    materialize_copy,release_copy,present_copy,present_spans};
+        |(GCNLLR_GPU_OWNED_DISPLAY ? GCNLLR_NATIVE_GX_DISPLAY_COLOR|GCNLLR_NATIVE_GX_COPY_RANGE : 0u)
+        |(GCNLLR_GPU_OWNED_TEXTURES ? GCNLLR_NATIVE_GX_TEXTURE_VIEWS : 0u)
+        |(GCNLLR_GX_COOPERATIVE_VI && !GCNLLR_GPU_OWNED_DISPLAY ? GCNLLR_NATIVE_GX_COMPOSED_SCANOUT : 0u),
+    materialize_copy,release_copy,present_copy,present_spans,materialize_copy_range};
 }
 #ifdef _WIN32
 #define GCNLLR_EXPORT __declspec(dllexport)
@@ -1198,13 +1318,23 @@ const GcnllrNativeGxApi api={GCNLLR_NATIVE_GX_ABI,start,fifo,drain,status,peek,s
 #define GCNLLR_EXPORT __attribute__((visibility("default")))
 #endif
 #if GCNLLR_RETAIL_PIPELINE
+#if GCNLLR_PERSISTENT_GEOMETRY
+extern "C" bool gcnllr_aurora_geometry_epoch(const void* data,uint32_t size,uint32_t* address,uint64_t* epoch) {
+    if(!retail_active || !config.texture_epoch || !data || !size ||
+       !gcnllr::gx_address(config,data,size,*address))return false;
+    return texture_epoch(*address,size,epoch);
+}
+#endif
 extern "C" uint64_t gcnllr_aurora_retail_array(const void* data,uint32_t bytes) {
     if(!retail_active || !data || !bytes)return 0;
     uint32_t address;
     if(!gcnllr::gx_address(config,data,bytes,address))
         throw std::runtime_error("Native retail array exceeds consumer memory");
-    const auto identity=retail_texture_ids.identify({address,bytes,0,0,UINT32_MAX,0},
-        static_cast<const uint8_t*>(data),[&](uint64_t* epoch){return memory_epoch(address,bytes,epoch);});
+    const auto* begin=static_cast<const uint8_t*>(data);
+    const auto identity=array_writers_stopped
+        ? retail_texture_ids.array_prefix(address,begin,bytes,array_read_scope)
+        : retail_texture_ids.identify({address,bytes,0,0,UINT32_MAX,0},begin,
+              [&](uint64_t* epoch){return memory_epoch(address,bytes,epoch);});
     return (uint64_t(identity.first)<<32)|identity.second;
 }
 extern "C" bool gcnllr_aurora_retail_texture(const void* data,uint32_t bytes,uint32_t width,
@@ -1234,6 +1364,44 @@ std::shared_ptr<aurora::gfx::TextureRef> gcnllr_aurora_retail_owned(
     uint32_t address;
     if(!gcnllr::gx_address(config,data,bytes,address))return {};
     return owned_texture(address,bytes,format,width,height);
+}
+std::shared_ptr<aurora::gfx::TextureRef> gcnllr_aurora_retail_owned_ci8(
+    [[maybe_unused]] const GXTexObj_& input, [[maybe_unused]] const GXTlutObj_& tlut) {
+#if GCNLLR_GPU_OWNED_TEXTURES
+    if (!retail_active || !config.own_copy || !input.data || input.mip_count() != 1 ||
+        !tlut.data || !tlut.numEntries) return {};
+    const auto size = aurora::gx::recomp::texture_byte_size(input);
+    uint32_t address;
+    if (!size || !gcnllr::gx_address(config, input.data, size, address)) return {};
+    std::unique_lock lock(retained_mutex);
+    auto found = find_texture_producer(address);
+    if (found == retained_copies.end() || !is_intensity8_copy(found->second.texture.format) ||
+        !dense_texture_copy(found->second, size, input.width(), input.height())) return {};
+    const RetainedCopy::PaletteKey key{
+        tlut.data, tlut.tlutObjId, tlut.tlutDataVersion, tlut.format, tlut.numEntries};
+    const bool cacheable = tlut.tlutObjId && !tlut.no_cache();
+    if (cacheable && found->second.palette_view && found->second.palette_key == key) {
+        resident_texture_hits.fetch_add(1, std::memory_order_relaxed);
+        return found->second.palette_view;
+    }
+    const uint64_t token = found->first;
+    lock.unlock();
+    // Palette bytes remain guest memory and the read may itself have to wait
+    // on an owned copy. Observe them without re-entering the retained mutex.
+    gcnllr_aurora_retail_observe(tlut.data, std::min<uint32_t>(tlut.numEntries, 256) * 2);
+    lock.lock();
+    found = find_texture_producer(address);
+    if (found == retained_copies.end() || found->first != token) return {};
+    auto view = gcnllr::gpu_bridge::colorize_ci8(found->second.texture.texture, tlut);
+    if (cacheable) {
+        found->second.palette_key = key;
+        found->second.palette_view = view;
+    }
+    resident_texture_hits.fetch_add(1, std::memory_order_relaxed);
+    return view;
+#else
+    return {};
+#endif
 }
 extern "C" bool gcnllr_aurora_retail_bp(uint32_t reg,uint32_t value) {
     if(!retail_active)return false;
@@ -1281,6 +1449,25 @@ extern "C" GCNLLR_EXPORT int gcnllr_native_gx_gamecube_input(uint32_t abi, Gcnll
     *output = gamecube_pads.input();
     return 1;
 }
+extern "C" GCNLLR_EXPORT void gcnllr_native_gx_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows) {
+    gcnllr::gpu_bridge::set_scanout_view(x,y,columns,rows);
+}
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_overlay_layout(uint32_t columns,uint32_t rows,uint32_t tiles,
+                                                            uint32_t width,uint32_t height) {
+#if GCNLLR_RETAIL_PIPELINE
+    if(!retail_active || !frontend)return 0;
+    if(tiles && (!columns || columns>2 || rows!=2 || !width || !height || width>640 || height>480))return 0;
+    if(!flush_commands())return 0;
+    flush_geometry();
+    gcnllr_aurora_retail_overlay(columns,rows,tiles,width,height);
+    return 1;
+#else
+    (void)columns;(void)rows;(void)tiles;(void)width;(void)height;
+    return 0;
+#endif
+}
+
 extern "C" GCNLLR_EXPORT int gcnllr_native_gx_output_size(uint32_t* width,uint32_t* height) {
     int w=0,h=0;
     if(!initialized || !width || !height ||
@@ -1294,4 +1481,19 @@ extern "C" GCNLLR_EXPORT int gcnllr_native_gx_resize_window(uint32_t width,uint3
     auto* window=initialized ? aurora::window::get_sdl_window():nullptr;
     return window && width>=64 && height>=64 && width<=16384 && height<=16384 &&
         SDL_SetWindowSize(window,int(width),int(height));
+}
+
+namespace aurora::gfx::efb_readback { bool request_surface() noexcept; }
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_request_present(void) {
+    return initialized && aurora::gfx::efb_readback::request_surface();
+}
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_take_present(const uint8_t** rgba,uint32_t* w,uint32_t* h) {
+    return initialized && aurora_take_framebuffer_readback(rgba,w,h);
+}
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_fullscreen(int enabled) {
+    auto* window=initialized ? aurora::window::get_sdl_window():nullptr;
+    return window && SDL_SetWindowFullscreen(window,enabled!=0);
 }

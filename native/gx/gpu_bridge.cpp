@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: MIT
 #include "gpu_bridge.hpp"
+#if GCNLLR_GPU_OWNED_TEXTURES
+#include "owned_texture.hpp"
+#include "texture_encode.hpp"
+#include "gfx/tex_palette_conv.hpp"
+#include "gfx/texture_convert.hpp"
+#endif
 #include <gxruntime/gxcore/shader.hpp>
 #include <aurora/aurora.h>
 #include "gfx/common.hpp"
@@ -10,13 +16,17 @@
 #include "gfx/render_worker.hpp"
 #include "gfx/efb_readback.hpp"
 #include "gfx/depth_peek.hpp"
+#include "gfx/post_fx.hpp"
 #include "gx/gx.hpp"
 #include "imgui.hpp"
 #include "window.hpp"
 #include "webgpu/gpu.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <charconv>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <exception>
@@ -24,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -35,16 +46,36 @@
 namespace aurora::gfx {
 void machine_copy_clear(const wgpu::RenderPipeline&,ClipRect,wgpu::Color,float);
 void machine_encode_after_resolve(std::function<void(wgpu::CommandEncoder&)>);
+void machine_seal_display_source(ClipRect);
 void machine_encode_tail(std::function<void(wgpu::CommandEncoder&)>);
+void machine_interpolate_next_scanout(uint32_t targetFps);
+void machine_encode_before_draw(std::function<void(wgpu::CommandEncoder&)>);
 }
 
 namespace gcnllr::gpu_bridge {
 namespace gfx=aurora::gfx;
 namespace gpu=aurora::webgpu;
 namespace worker=aurora::gfx::render_worker;
+unsigned efb_scale(const char* setting) {
+    if (!setting || !*setting) return 1;
+    unsigned scale{};
+    const char* end=setting+std::strlen(setting);
+    const auto parsed=std::from_chars(setting,end,scale);
+    wgpu::Limits limits{};
+    if (!gpu::g_device.GetLimits(&limits))
+        throw std::runtime_error("Unable to query GPU limits for the requested EFB size");
+    if (parsed.ec!=std::errc{} || parsed.ptr!=end || !scale ||
+        scale>limits.maxTextureDimension2D/640u)
+        throw std::runtime_error("EFB scale must be a positive integer within the GPU texture size limit");
+    return scale;
+}
+struct DisplayBand;
 struct EncodedImage {
     uint32_t width{},height{};
     wgpu::Buffer buffer;
+#if GCNLLR_GPU_OWNED_DISPLAY
+    std::unique_ptr<const DisplayBand> color;
+#endif
 };
 static gpu::TextureWithSampler scanout;
 #if GCNLLR_QUEUED_PRESENT
@@ -52,6 +83,8 @@ static gpu::TextureWithSampler scanout;
 // Keep one stable object per geometry until a resize/shutdown drain, rather
 // than letting a worker clear destroy it concurrently with that caller read.
 static std::shared_ptr<gpu::TextureWithSampler> queued_scanout;
+static std::shared_ptr<gpu::TextureWithSampler> local_scanout;
+static std::array<uint32_t,4> scanout_view{0,0,1,1};
 #endif
 static std::array<wgpu::RenderPipeline,8> clear_pipelines;
 static std::vector<uint8_t> pixels;
@@ -63,16 +96,31 @@ static wgpu::ComputePipeline display_encoder;
 static wgpu::Buffer scanout_input;
 static uint64_t scanout_input_capacity{};
 static wgpu::ComputePipeline scanout_decoder;
+#if GCNLLR_GPU_OWNED_DISPLAY
+static wgpu::ComputePipeline scanout_color;
+static std::vector<gfx::TextureHandle> display_surfaces;
+static uint64_t color_copies{},color_scanouts{},color_observations{};
+#endif
 struct DisplayBand {
     gfx::TextureHandle texture;
-    uint32_t width{},height{},first_row{};
+    uint32_t width{},height{},first_row{},capture_rows{},scale{},source_x{},source_y{};
+    uint32_t source_rows{};
+    float yscale{1.f};
     std::array<uint32_t,3> weights{};
     EncodedImageHandle encoded;
+    uint64_t offset{};
+    bool direct{};
 };
+static uint64_t band_bytes(const DisplayBand& band) {
+    return uint64_t(band.width) * band.height * 2;
+}
 static std::vector<DisplayBand> display_bands;
 static bool recorded_copies{};
 static uint64_t recorded_encodes{},observation_submissions{},publication_joins{};
 static uint64_t scanout_frames{},scanout_joins{};
+#if GCNLLR_DIRECT_DISPLAY_COPY
+static uint64_t direct_display_bands{}, direct_display_batches{};
+#endif
 static std::mutex submission_mutex;
 static std::exception_ptr submission_error;
 void validate_submission() {
@@ -83,6 +131,7 @@ void acknowledge_submission() {
     worker::synchronize();
     validate_submission();
 }
+void note_recorded_copy() {recorded_copies=true;}
 void submit_copies() {
 #if GCNLLR_BATCHED_SUBMISSION
     validate_submission();
@@ -92,29 +141,96 @@ void submit_copies() {
     }
 #endif
 }
-static wgpu::Buffer display_parameters(const DisplayBand& band) {
-    const std::array<uint32_t,8> values{band.weights[0],band.weights[1],band.weights[2],band.first_row,
-        band.width,band.height,0,0};
+static constexpr size_t display_param_words=GCNLLR_GPU_OWNED_DISPLAY ? 12 : 8;
+
+static wgpu::Buffer display_parameters(const DisplayBand& band,[[maybe_unused]] uint32_t first_pair=0,
+                                       [[maybe_unused]] uint32_t pair_count=0) {
+    const std::array<uint32_t,display_param_words> values{band.weights[0],band.weights[1],band.weights[2],
+        band.first_row | (band.capture_rows << 16),
+        band.width,band.height,band.scale,band.source_x | (band.source_y << 16)
+#if GCNLLR_GPU_OWNED_DISPLAY
+        ,band.source_rows,std::bit_cast<uint32_t>(band.yscale),first_pair,pair_count
+#endif
+    };
     const wgpu::BufferDescriptor descriptor{.label="Immutable GameCube copy filter",
         .usage=wgpu::BufferUsage::Uniform|wgpu::BufferUsage::CopyDst,.size=sizeof(values)};
     auto buffer=gpu::g_device.CreateBuffer(&descriptor);
     gpu::g_queue.WriteBuffer(buffer,0,values.data(),sizeof(values));
     return buffer;
 }
+static void reserve_display_storage(uint64_t bytes) {
+    if (display_encoded && display_encoded_capacity >= bytes) return;
+    const wgpu::BufferDescriptor descriptor{.label="GameCube encoded XFB bands",
+        .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopySrc,.size=bytes};
+    display_encoded=gpu::g_device.CreateBuffer(&descriptor);
+    display_encoded_capacity=bytes;
+}
+static void reserve_display_readback(uint64_t bytes) {
+    if (readback_buffer && readback_capacity >= bytes) return;
+    const wgpu::BufferDescriptor descriptor{.label="GameCube completed display copies",
+        .usage=wgpu::BufferUsage::MapRead|wgpu::BufferUsage::CopyDst,.size=bytes};
+    readback_buffer=gpu::g_device.CreateBuffer(&descriptor);
+    readback_capacity=bytes;
+}
+static void encode_display_band(const wgpu::ComputePassEncoder& pass, const DisplayBand& band,
+                                const wgpu::TextureView& source, const wgpu::Buffer& output,
+                                uint64_t offset,uint32_t first_pair=0,uint32_t pair_count=0) {
+    const auto parameters=display_parameters(band,first_pair,pair_count);
+    const std::array entries{
+        wgpu::BindGroupEntry{.binding=0,.textureView=source},
+        wgpu::BindGroupEntry{.binding=1,.buffer=output,.offset=offset,.size=pair_count?uint64_t(pair_count)*4:band_bytes(band)},
+        wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=display_param_words*sizeof(uint32_t)}};
+    const wgpu::BindGroupDescriptor descriptor{.layout=display_encoder.GetBindGroupLayout(0),
+        .entryCount=entries.size(),.entries=entries.data()};
+    pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&descriptor));
+    if(pair_count)pass.DispatchWorkgroups((pair_count+127)/128,1);
+    else pass.DispatchWorkgroups((band.width/2+15)/16,(band.height+7)/8);
+}
 static size_t pending_displays{};
-// Same integer BT.601 conversion as the portable CPU copy. The storage word
-// represents the actual four YUY2 bytes, not a presentation-only approximation.
-static constexpr char display_encode_shader[]=R"(
+static constexpr char display_sampling_shader[]=R"(
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+)"
+#if GCNLLR_GPU_OWNED_DISPLAY
+R"(
+struct CopyParameters { weights: vec4<u32>, geometry: vec4<u32>, stretch: vec4<u32> };
+)"
+#else
+R"(
 struct CopyParameters { weights: vec4<u32>, geometry: vec4<u32> };
+)"
+#endif
+R"(
 @group(0) @binding(2) var<uniform> parameters: CopyParameters;
 fn rgb(x: i32,y: i32) -> vec3<i32> {
-    let size=textureDimensions(src);
-    return vec3<i32>(textureLoad(src,vec2<i32>(x,clamp(y,0,i32(size.y)-1)),0).rgb*255.0+0.5);
+    let scale=i32(parameters.geometry.z);
+    let source=parameters.geometry.w;
+    let height=i32(parameters.weights.w>>16u);
+    let origin=(vec2<i32>(x,clamp(y,0,height-1))+
+                vec2<i32>(i32(source&65535u),i32(source>>16u)))*scale;
+    if (scale==1) {
+        return vec3<i32>(textureLoad(src,origin,0).rgb*255.0+0.5);
+    }
+    var sum=vec3<f32>(0.0);
+    for (var dy=0;dy<scale;dy++) {
+        for (var dx=0;dx<scale;dx++) {
+            sum+=textureLoad(src,origin+vec2<i32>(dx,dy),0).rgb;
+        }
+    }
+    return vec3<i32>(sum*(255.0/f32(scale*scale))+0.5);
 }
 fn filtered(x: i32,y: i32) -> vec3<i32> {
-    let row=y+i32(parameters.weights.w);
+)"
+#if GCNLLR_GPU_OWNED_DISPLAY
+R"(
+    let source_y=min(i32(parameters.stretch.x)-1,i32(f32(y)/bitcast<f32>(parameters.stretch.y)+0.5));
+)"
+#else
+R"(
+    let source_y=y;
+)"
+#endif
+R"(
+    let row=source_y+i32(parameters.weights.w&65535u);
     let middle=rgb(x,row);
     let weights=parameters.weights.xyz;
     // The SDK's middle-only taps sum to64. Preserve the fast identity path;
@@ -123,6 +239,11 @@ fn filtered(x: i32,y: i32) -> vec3<i32> {
     let sum=rgb(x,row-1)*i32(weights.x)+middle*i32(weights.y)+rgb(x,row+1)*i32(weights.z);
     return min(sum>>vec3<u32>(6u),vec3<i32>(255));
 }
+)";
+// Same integer BT.601 conversion as the portable CPU copy. The storage word
+// represents the four actual guest bytes for an observation of MEM1.
+static constexpr char display_encode_shader[]=R"(
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
 fn yuv(rgb: vec3<i32>) -> vec3<i32> {
     let y=((66*rgb.r+129*rgb.g+25*rgb.b+128)>>8u)+16;
     let u=((-38*rgb.r-74*rgb.g+112*rgb.b+128)>>8u)+128;
@@ -131,14 +252,39 @@ fn yuv(rgb: vec3<i32>) -> vec3<i32> {
 }
 @compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size=parameters.geometry.xy;
-    if (id.x>=size.x/2u || id.y>=size.y) { return; }
-    let a=yuv(filtered(i32(id.x*2u),i32(id.y)));
-    let b=yuv(filtered(i32(id.x*2u+1u),i32(id.y)));
+    let cols=size.x/2u;
+    var position=id.xy;
+    var pair_index=id.y*cols+id.x;
+)"
+#if GCNLLR_GPU_OWNED_DISPLAY
+R"(
+    if (parameters.stretch.w!=0u) {
+        pair_index=id.x*8u+id.y;
+        if (pair_index>=parameters.stretch.w) { return; }
+        let pair=parameters.stretch.z+pair_index;
+        position=vec2<u32>(pair%cols,pair/cols);
+    } else
+)"
+#endif
+R"(
+    if (id.x>=cols || id.y>=size.y) { return; }
+    let a=yuv(filtered(i32(position.x*2u),i32(position.y)));
+    let b=yuv(filtered(i32(position.x*2u+1u),i32(position.y)));
     let y0=u32(clamp(a.x,0,255));let y1=u32(clamp(b.x,0,255));
     let u=u32(clamp((a.y+b.y)/2,0,255));let v=u32(clamp((a.z+b.z)/2,0,255));
-    dst[id.y*(size.x/2u)+id.x]=y0|(u<<8u)|(y1<<16u)|(v<<24u);
+    dst[pair_index]=y0|(u<<8u)|(y1<<16u)|(v<<24u);
 }
 )";
+#if GCNLLR_GPU_OWNED_DISPLAY
+static constexpr char display_color_shader[]=R"(
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id.xy>=parameters.geometry.xy)) { return; }
+    let color=filtered(i32(id.x),i32(id.y));
+    textureStore(dst,vec2<i32>(id.xy),vec4<f32>(vec3<f32>(color)/255.0,1.0));
+}
+)";
+#endif
 static constexpr char scanout_decode_shader[]=R"(
 @group(0) @binding(0) var<storage, read> src: array<u32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
@@ -159,11 +305,44 @@ static constexpr char scanout_decode_shader[]=R"(
 static HANDLE main_schedule{},render_schedule{};
 #endif
 
+#if GCNLLR_GPU_OWNED_TEXTURES
+#include "texture_copy_view.inc"
+
+gfx::TextureHandle colorize_ci8(const gfx::TextureHandle& source, const GXTlutObj_& tlut) {
+    // CI8 addresses at most 256 entries. The software decoder emits
+    // transparent black for indices outside a short TLUT.
+    const auto entries = std::min<uint32_t>(tlut.numEntries, 256);
+    auto palette = gfx::convert_tlut(gfx::tlut_texture_format(tlut.format), entries,
+        {static_cast<const uint8_t*>(tlut.data), size_t(entries) * sizeof(uint16_t)});
+    if (palette.data.size() != size_t(entries) * 4) {
+        throw std::runtime_error("Retained CI8 palette decode failed");
+    }
+    palette.data.append_zeroes(size_t(256 - entries) * 4);
+    auto table = gfx::new_static_texture_2d(256, 1, 1, GX_TF_RGBA8_PC,
+        {palette.data.data(), palette.data.size()}, false, "Retained CI8 TLUT");
+    auto result = gfx::new_conv_texture(source->size.width, source->size.height, GX_TF_RGBA8,
+        "Retained CI8 texture");
+    gfx::machine_encode_before_draw([
+        request = gfx::tex_palette_conv::ConvRequest{
+            gfx::tex_palette_conv::Variant::FromFloat8, source, result, std::move(table)}
+    ](wgpu::CommandEncoder& encoder) {
+        gfx::tex_palette_conv::run(encoder, request);
+    });
+    return result;
+}
+#endif
 void initialize() {
+#if GCNLLR_GPU_OWNED_TEXTURES
+    texture_view_count=0;
+#endif
     recorded_copies=false;recorded_encodes=observation_submissions=publication_joins=0;
     scanout_frames=scanout_joins=0;
+#if GCNLLR_DIRECT_DISPLAY_COPY
+    direct_display_bands=direct_display_batches=0;
+#endif
     {std::lock_guard lock(submission_mutex);submission_error={};}
-    wgpu::ShaderSourceWGSL source{};source.code=display_encode_shader;
+    const auto encode_source=std::string(display_sampling_shader)+display_encode_shader;
+    wgpu::ShaderSourceWGSL source{};source.code=encode_source.c_str();
     const wgpu::ShaderModuleDescriptor module_descriptor{.nextInChain=&source,.label="GameCube exact YUY2 encode"};
     const auto module=gpu::g_device.CreateShaderModule(&module_descriptor);
     const wgpu::ComputePipelineDescriptor pipeline_descriptor{.label="GameCube exact YUY2 encode",
@@ -174,6 +353,15 @@ void initialize() {
     const wgpu::ComputePipelineDescriptor decode_descriptor{.label="GameCube exact VI decode",
         .compute={.module=decode_module,.entryPoint="main"}};
     scanout_decoder=gpu::g_device.CreateComputePipeline(&decode_descriptor);
+#if GCNLLR_GPU_OWNED_DISPLAY
+    color_copies=color_scanouts=color_observations=0;
+    const auto color_source=std::string(display_sampling_shader)+display_color_shader;
+    source.code=color_source.c_str();
+    const auto color_module=gpu::g_device.CreateShaderModule(&module_descriptor);
+    const wgpu::ComputePipelineDescriptor color_descriptor{.label="GameCube retained display color",
+        .compute={.module=color_module,.entryPoint="main"}};
+    scanout_color=gpu::g_device.CreateComputePipeline(&color_descriptor);
+#endif
 #ifdef _WIN32
     // Real-time media work must not compete as a background batch job.
     // MMCSS scopes the scheduling request to the two deadline-bearing threads
@@ -204,9 +392,24 @@ bool settle_framebuffer() {
     // native framebuffer resize. Start a continuation on the settled target
     // before any retail copy or draw can reference the obsolete attachment.
     finish();
-    return gfx::begin_frame(false);
+    if (!gfx::begin_frame(false)) return false;
+    const auto size=gpu::g_frameBuffer.size;
+    std::fprintf(stderr,"[native-gx] EFB render target %ux%u\n",size.width,size.height);
+    return true;
 }
-void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter) {
+#if GCNLLR_GPU_OWNED_DISPLAY
+static gfx::TextureHandle acquire_display_surface(uint32_t width,uint32_t height) {
+    for(const auto& surface:display_surfaces)
+        if(surface.use_count()==1 && surface->size.width==width && surface->size.height==height)return surface;
+    std::erase_if(display_surfaces,[](const gfx::TextureHandle& s){return s.use_count()==1;});
+    auto surface=gfx::new_render_texture(width,height,GX_TF_RGBA8,"Immutable GameCube display source");
+    display_surfaces.push_back(surface);
+    return surface;
+}
+#endif
+void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter,
+                         [[maybe_unused]] bool eager,[[maybe_unused]] uint32_t output_rows,
+                         [[maybe_unused]] float yscale) {
     if (!copy.width || !copy.height || copy.src_x+copy.width>640 || copy.src_y+copy.height>480)
         throw std::runtime_error("Display copy outside supported EFB");
     const auto tap=[](uint32_t word,unsigned index){return (word>>(index*6u))&63u;};
@@ -219,16 +422,55 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     const uint32_t below=weights[2] && !filter.clamp_bottom && copy.src_y+copy.height<480 ? 1u:0u;
     const uint32_t capture_y=copy.src_y-above,capture_height=copy.height+above+below;
     if (pending_displays==display_bands.size()) display_bands.emplace_back();
+    uint64_t offset=0;
+    if (pending_displays) {
+        const auto& previous=display_bands[pending_displays-1];
+        offset=(previous.offset+band_bytes(previous)+255u)&~uint64_t(255u);
+    }
     auto& band=display_bands[pending_displays++];
     band.width=copy.width;band.height=copy.height;band.first_row=above;band.weights=weights;
-    if (!band.texture || band.texture->size.width!=copy.width || band.texture->size.height!=capture_height)
-        band.texture=gfx::new_render_texture(copy.width,capture_height,GX_TF_RGBA8,"GameCube display band and filter halo");
+    band.source_rows=copy.height;band.yscale=1.f;
     const auto& fb=gpu::g_frameBuffer;
     const gfx::ClipRect capture_rect{int(copy.src_x*fb.size.width/640),int(capture_y*fb.size.height/480),
         int(copy.width*fb.size.width/640),int(capture_height*fb.size.height/480)};
-    if (capture_rect.width!=int(copy.width) || capture_rect.height!=int(capture_height))
-        throw std::runtime_error("Display-band GPU scaling is unsupported");
-    gfx::resolve_pass(band.texture,capture_rect,false,false,false,{},0,GX_TF_RGBA8);
+    if (fb.size.width%640 || fb.size.height%480 || fb.size.width/640!=fb.size.height/480)
+        throw std::runtime_error("Display copy requires an integer-scaled GameCube EFB");
+    band.capture_rows=capture_height;band.scale=fb.size.width/640;
+    band.source_x=band.source_y=0;band.offset=offset;band.direct=false;
+#if GCNLLR_DIRECT_DISPLAY_COPY
+    const auto& resolved=gpu::g_graphicsConfig.msaaSamples>1 ? gpu::g_frameBufferResolved : fb;
+    const auto format=resolved.texture.GetFormat();
+    // Shared with the machine's flush limit. Retain a stable slice for every
+    // pending copy until the real guest-memory observation consumes the batch.
+    constexpr uint64_t maximum_batch_bytes=16*640*480*2;
+    band.direct=eager && !gfx::is_offscreen() && !gfx::post_fx::any_enabled() &&
+        (format==wgpu::TextureFormat::RGBA8Unorm || format==wgpu::TextureFormat::BGRA8Unorm) &&
+        offset+band_bytes(band)<=maximum_batch_bytes;
+    if (band.direct) {
+        ++direct_display_bands;
+        reserve_display_storage(maximum_batch_bytes);
+        band.source_x=copy.src_x;band.source_y=capture_y;
+        // Seal and resolve the preceding EFB pass without allocating a crop
+        // texture. This compute observes the source before any following clear.
+        gfx::machine_seal_display_source(capture_rect);
+        gfx::machine_encode_after_resolve([band,source=resolved.view,output=display_encoded](wgpu::CommandEncoder& encoder) {
+            auto pass=encoder.BeginComputePass();
+            pass.SetPipeline(display_encoder);
+            encode_display_band(pass,band,source,output,band.offset);
+            pass.End();
+        });
+    } else
+#endif
+    {
+        const auto width=uint32_t(capture_rect.width),height=uint32_t(capture_rect.height);
+#if GCNLLR_GPU_OWNED_DISPLAY
+        if(!eager)band.texture=acquire_display_surface(width,height);
+        else
+#endif
+        if (!band.texture || band.texture->size.width!=width || band.texture->size.height!=height)
+            band.texture=gfx::new_render_texture(width,height,GX_TF_RGBA8,"GameCube display band and filter halo");
+        gfx::resolve_pass(band.texture,capture_rect,false,false,false,{},0,GX_TF_RGBA8);
+    }
     if (copy.clear && (copy.color_update || copy.alpha_update || copy.depth_update)) {
         const gfx::ClipRect clear_rect{int(copy.src_x*fb.size.width/640),int(copy.src_y*fb.size.height/480),
             int(copy.width*fb.size.width/640),int(copy.height*fb.size.height/480)};
@@ -241,6 +483,18 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     }
     // The GPU snapshot and filter metadata are immutable before publication.
     // Encoding may happen later; it never samples the mutable EFB again.
+#if GCNLLR_GPU_OWNED_DISPLAY
+    if(!eager) {
+        band.height=output_rows;band.yscale=yscale;
+        auto image=std::make_shared<EncodedImage>();
+        image->width=band.width;image->height=band.height;
+        band.encoded.reset();
+        image->color=std::make_unique<DisplayBand>(band);
+        band.encoded=std::move(image);band.texture.reset();
+        recorded_copies=true;++color_copies;
+        return;
+    }
+#endif
 #if GCNLLR_BATCHED_SUBMISSION
     auto image=std::make_shared<EncodedImage>();
     image->width=band.width;image->height=band.height;
@@ -251,21 +505,14 @@ void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const Dis
     band.encoded=image;
     gfx::machine_encode_after_resolve([band,image,bytes](wgpu::CommandEncoder& encoder) {
       try {
-        const auto parameters=display_parameters(band);
-        const std::array entries{
-            wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->texture.CreateView()},
-            wgpu::BindGroupEntry{.binding=1,.buffer=image->buffer,.size=bytes},
-            wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=32}};
-        const wgpu::BindGroupDescriptor binding{.layout=display_encoder.GetBindGroupLayout(0),
-            .entryCount=entries.size(),.entries=entries.data()};
         auto pass=encoder.BeginComputePass();pass.SetPipeline(display_encoder);
-        pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
-        pass.DispatchWorkgroups((image->width/2+15)/16,(image->height+7)/8);pass.End();
+        encode_display_band(pass,band,band.texture->texture.CreateView(),image->buffer,0);
+        pass.End();
       }catch(...) {std::lock_guard lock(submission_mutex);if(!submission_error)submission_error=std::current_exception();}
     });
     recorded_copies=true;++recorded_encodes;
 #else
-    if (!gfx::segment_frame()) throw std::runtime_error("Display band submission failed");
+    if (!band.direct && !gfx::segment_frame()) throw std::runtime_error("Display band submission failed");
 #endif
 }
 
@@ -277,64 +524,52 @@ std::vector<CopiedImage> take_display_copies() {
     for(const auto& image:encoded)images.push_back(materialize_display_copy(image));
     return images;
 #endif
-    if (!gfx::segment_frame()) throw std::runtime_error("Display fence submission failed");
-    struct Result {std::vector<CopiedImage> images;};
-    auto result=std::make_shared<Result>();
     std::vector<DisplayBand> bands(display_bands.begin(),display_bands.begin()+pending_displays);
-    worker::enqueue_work([bands=std::move(bands),result] {
-        uint64_t total=0;std::vector<uint64_t> offsets;
-        for (const auto& band:bands) {
-            // Storage bindings require 256-byte aligned offsets. Row data is
-            // tightly packed; the unused inter-image alignment is never copied.
-            total=(total+255u)&~uint64_t(255u);
-            offsets.push_back(total);total+=uint64_t(band.width)*2*band.height;
+    const uint64_t total=bands.back().offset+band_bytes(bands.back());
+    const bool direct=std::all_of(bands.begin(),bands.end(),[](const DisplayBand& band){return band.direct;});
+    if (direct) {
+#if GCNLLR_DIRECT_DISPLAY_COPY
+        ++direct_display_batches;
+#endif
+        reserve_display_readback(total);
+        // The encodes have already been ordered at the corresponding EFB
+        // boundaries. Copy their packed bytes in the same submission.
+        gfx::machine_encode_after_resolve([source=display_encoded,target=readback_buffer,total](wgpu::CommandEncoder& encoder) {
+            encoder.CopyBufferToBuffer(source,0,target,0,total);
+        });
+    }
+    if (!gfx::segment_frame()) throw std::runtime_error("Display fence submission failed");
+    auto result=std::make_shared<std::vector<CopiedImage>>();
+    worker::enqueue_work([bands=std::move(bands),result,total,direct] {
+        if (!direct) {
+            reserve_display_readback(total);
+            reserve_display_storage(total);
+            auto encoder=gpu::g_device.CreateCommandEncoder();
+            auto pass=encoder.BeginComputePass();pass.SetPipeline(display_encoder);
+            for (const auto& band:bands) {
+                if (!band.direct) encode_display_band(pass,band,band.texture->texture.CreateView(),display_encoded,band.offset);
+            }
+            pass.End();encoder.CopyBufferToBuffer(display_encoded,0,readback_buffer,0,total);
+            const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
         }
-        if (!readback_buffer || readback_capacity<total) {
-            const wgpu::BufferDescriptor descriptor{.label="GameCube completed display copies",
-                .usage=wgpu::BufferUsage::MapRead|wgpu::BufferUsage::CopyDst,.size=total};
-            readback_buffer=gpu::g_device.CreateBuffer(&descriptor);readback_capacity=total;
-        }
-        if (!display_encoded || display_encoded_capacity<total) {
-            const wgpu::BufferDescriptor descriptor{.label="GameCube encoded XFB bands",
-                .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopySrc,.size=total};
-            display_encoded=gpu::g_device.CreateBuffer(&descriptor);display_encoded_capacity=total;
-        }
-        auto encoder=gpu::g_device.CreateCommandEncoder();
-        auto pass=encoder.BeginComputePass();pass.SetPipeline(display_encoder);
-        for (size_t i=0;i<bands.size();i++) {
-            const auto& band=bands[i];
-            const auto parameters=display_parameters(band);
-            const std::array entries{
-                wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->texture.CreateView()},
-                wgpu::BindGroupEntry{.binding=1,.buffer=display_encoded,.offset=offsets[i],
-                    .size=uint64_t(band.width)*2*band.height},
-                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=32}};
-            const wgpu::BindGroupDescriptor descriptor{.layout=display_encoder.GetBindGroupLayout(0),
-                .entryCount=entries.size(),.entries=entries.data()};
-            pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&descriptor));
-            pass.DispatchWorkgroups((band.width/2+15)/16,(band.height+7)/8);
-        }
-        pass.End();encoder.CopyBufferToBuffer(display_encoded,0,readback_buffer,0,total);
-        const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
         auto buffer=readback_buffer;
         const auto future=buffer.MapAsync(wgpu::MapMode::Read,0,total,wgpu::CallbackMode::WaitAnyOnly,
-            [buffer,total,bands,offsets,result](wgpu::MapAsyncStatus status,wgpu::StringView) {
+            [buffer,total,bands,result](wgpu::MapAsyncStatus status,wgpu::StringView) {
                 if (status!=wgpu::MapAsyncStatus::Success) return;
                 const auto* mapped=static_cast<const uint8_t*>(buffer.GetConstMappedRange(0,total));
-                if (mapped) for (size_t i=0;i<bands.size();i++) {
-                    const auto& band=bands[i];const auto w=band.width,h=band.height;
-                    CopiedImage image{w,h,std::vector<uint8_t>(size_t(w)*h*2)};
-                    std::memcpy(image.yuy2.data(),mapped+offsets[i],image.yuy2.size());
-                    result->images.push_back(std::move(image));
+                if (mapped) for (const auto& band:bands) {
+                    CopiedImage image{band.width,band.height,std::vector<uint8_t>(band_bytes(band))};
+                    std::memcpy(image.yuy2.data(),mapped+band.offset,image.yuy2.size());
+                    result->push_back(std::move(image));
                 }
                 buffer.Unmap();
             });
         gpu::g_instance.WaitAny(future,5000000000ull);
     });
     worker::synchronize();
-    if (result->images.size()!=pending_displays) throw std::runtime_error("Display fence readback failed");
+    if (result->size()!=pending_displays) throw std::runtime_error("Display fence readback failed");
     pending_displays=0;
-    return std::move(result->images);
+    return std::move(*result);
 }
 
 std::vector<EncodedImageHandle> retain_display_copies() {
@@ -359,15 +594,7 @@ std::vector<EncodedImageHandle> retain_display_copies() {
             const wgpu::BufferDescriptor descriptor{.label="Immutable GameCube XFB generation",
                 .usage=wgpu::BufferUsage::Storage|wgpu::BufferUsage::CopySrc,.size=bytes};
             image->buffer=gpu::g_device.CreateBuffer(&descriptor);
-            const auto parameters=display_parameters(band);
-            const std::array entries{
-                wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->texture.CreateView()},
-                wgpu::BindGroupEntry{.binding=1,.buffer=image->buffer,.size=bytes},
-                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=32}};
-            const wgpu::BindGroupDescriptor binding{.layout=display_encoder.GetBindGroupLayout(0),
-                .entryCount=entries.size(),.entries=entries.data()};
-            pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));
-            pass.DispatchWorkgroups((image->width/2+15)/16,(image->height+7)/8);
+            encode_display_band(pass,band,band.texture->texture.CreateView(),image->buffer,0);
             result->images.push_back(std::move(image));
         }
         pass.End();const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
@@ -389,21 +616,44 @@ gfx::AsyncReadback queue_display_readback(const EncodedImageHandle& image) {
     return gfx::queue_buffer_readback(image->buffer,uint64_t(image->width)*image->height*2u);
 }
 #endif
-CopiedImage materialize_display_copy(const EncodedImageHandle& image) {
+CopiedImage materialize_display_copy(const EncodedImageHandle& image,uint32_t offset,uint32_t size) {
     submit_copies();
-    if(!image || !image->buffer)throw std::runtime_error("Unknown resident XFB generation");
+    if(!image || (!image->buffer
+#if GCNLLR_GPU_OWNED_DISPLAY
+                 && !image->color
+#endif
+                 ))throw std::runtime_error("Unknown resident XFB generation");
+#if GCNLLR_GPU_OWNED_DISPLAY
+    if(image->color)++color_observations;
+#endif
+    const uint64_t total=uint64_t(image->width)*image->height*2;
+    const uint64_t bytes=size?size:total;
+    if(((offset|bytes)&3u) || offset>total || bytes>total-offset)
+        throw std::runtime_error("Resident XFB byte range outside generation");
     struct Result {CopiedImage image;std::exception_ptr error;bool done{};};
     auto result=std::make_shared<Result>();
-    worker::enqueue_work([image,result] {
+    worker::enqueue_work([image,result,offset,bytes,size] {
       try {
-        const uint64_t bytes=uint64_t(image->width)*image->height*2;
         if(!readback_buffer || readback_capacity<bytes) {
             const wgpu::BufferDescriptor descriptor{.label="Observed GameCube XFB bytes",
                 .usage=wgpu::BufferUsage::MapRead|wgpu::BufferUsage::CopyDst,.size=bytes};
             readback_buffer=gpu::g_device.CreateBuffer(&descriptor);readback_capacity=bytes;
         }
         auto encoder=gpu::g_device.CreateCommandEncoder();
-        encoder.CopyBufferToBuffer(image->buffer,0,readback_buffer,0,bytes);
+        auto source=image->buffer;
+        uint32_t source_offset=offset;
+#if GCNLLR_GPU_OWNED_DISPLAY
+        if(image->color) {
+            reserve_display_storage(bytes);
+            source=display_encoded;
+            auto pass=encoder.BeginComputePass();
+            pass.SetPipeline(display_encoder);
+            encode_display_band(pass,*image->color,image->color->texture->sampleTextureView,source,0,
+                                offset/4,size/4);
+            pass.End();source_offset=0;
+        }
+#endif
+        encoder.CopyBufferToBuffer(source,source_offset,readback_buffer,0,bytes);
         const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
         auto buffer=readback_buffer;
         const auto future=buffer.MapAsync(wgpu::MapMode::Read,0,bytes,wgpu::CallbackMode::WaitAnyOnly,
@@ -432,7 +682,7 @@ CopiedImage materialize_display_copy(const EncodedImageHandle& image) {
     worker::synchronize();
     validate_submission();
     if(result->error)std::rethrow_exception(result->error);
-    if(!result->done || result->image.yuy2.size()!=size_t(image->width)*image->height*2)
+    if(!result->done || result->image.yuy2.size()!=bytes)
         throw std::runtime_error("Resident XFB materialization failed");
     return std::move(result->image);
 }
@@ -556,35 +806,89 @@ static void decode_scanout(wgpu::CommandEncoder& encoder,const wgpu::Buffer& buf
     pass.DispatchWorkgroups((width/2+15)/16,(height+7)/8);pass.End();
 }
 #if GCNLLR_QUEUED_PRESENT
-static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t height,
-        std::vector<DisplaySpan> spans={},std::vector<uint8_t> cpu={}) {
+static std::shared_ptr<gpu::TextureWithSampler> local_scanout_target(const wgpu::Extent3D& extent) {
+    if(local_scanout && local_scanout->size.width==extent.width &&
+       local_scanout->size.height==extent.height)return local_scanout;
+    auto target=std::make_shared<gpu::TextureWithSampler>();
+    target->size=extent;
+    target->format=scanout.format;
+    target->sampler=scanout.sampler;
+    const wgpu::TextureDescriptor descriptor{.label="Local multiplayer scanout",
+        .usage=wgpu::TextureUsage::CopySrc|wgpu::TextureUsage::CopyDst|wgpu::TextureUsage::TextureBinding,
+        .size=extent,.format=target->format};
+    target->texture=gpu::g_device.CreateTexture(&descriptor);
+    target->view=target->texture.CreateView();
+    local_scanout=target;
+    return target;
+}
+
+static bool queue_scanout_packet(std::function<void(wgpu::CommandEncoder&,const gpu::TextureWithSampler&)> encode) {
+    static const uint32_t interpolationTarget = [] {
+        const char* setting = std::getenv("GCNLLR_FRAME_INTERPOLATION");
+        if (!setting) return 0u;
+        if (std::strcmp(setting,"1")==0) return 60u;
+        uint32_t target{};
+        const char* end=setting+std::strlen(setting);
+        const auto parsed=std::from_chars(setting,end,target);
+        return parsed.ec==std::errc{} && parsed.ptr==end && target>=31 &&
+            target<=360 ? target : 0u;
+    }();
     // The override API borrows a pointer. Retain the exact texture generation
     // through the queued clear, even if the caller changes geometry meanwhile.
     const auto target=queued_scanout;++scanout_frames;
-    gfx::machine_encode_tail([buffer,target,width,height,spans=std::move(spans),cpu=std::move(cpu)]
-            (wgpu::CommandEncoder& encoder) {
+    auto display=target;
+    wgpu::Origin3D offset{};
+    const auto [column,row,columns,rows]=scanout_view;
+    if(columns>1 || rows>1) {
+        const auto width=target->size.width,height=target->size.height;
+        offset={width*column/columns,height*row/rows,0};
+        display=local_scanout_target({width*(column+1)/columns-offset.x,
+                                      height*(row+1)/rows-offset.y,1});
+    }
+    gfx::machine_encode_tail([target,display,offset,encode=std::move(encode)](wgpu::CommandEncoder& encoder) {
         try {
-            // Upload on this same FIFO worker. A later caller must not update a
-            // reusable input buffer before the previous frame has been submitted.
-            if(!cpu.empty())gpu::g_queue.WriteBuffer(buffer,0,cpu.data(),cpu.size());
-            for(const auto& span:spans)if(span.image)
-                encoder.CopyBufferToBuffer(span.image->buffer,span.source,buffer,span.destination,span.size);
-            decode_scanout(encoder,buffer,*target,width,height);
+            encode(encoder,*target);
+            if(display!=target) {
+                const wgpu::TexelCopyTextureInfo from{.texture=target->texture,.origin=offset};
+                const wgpu::TexelCopyTextureInfo to{.texture=display->texture};
+                encoder.CopyTextureToTexture(&from,&to,&display->size);
+            }
         }catch(...) {
             std::lock_guard lock(submission_mutex);
             if(!submission_error)submission_error=std::current_exception();
         }
     });
-    worker::enqueue_work([target] {gpu::set_present_source_override(target.get());});
+    worker::enqueue_work([display] {gpu::set_present_source_override(display.get());});
+    if (interpolationTarget) gfx::machine_interpolate_next_scanout(interpolationTarget);
     aurora_end_frame();
-    worker::enqueue_work([target] {gpu::set_present_source_override(nullptr);});
+    worker::enqueue_work([display] {gpu::set_present_source_override(nullptr);});
     recorded_copies=false;
     aurora::imgui::new_frame(aurora::window::get_window_size());
     // Aurora's bounded frame packets provide backpressure. Real CPU/PE reads,
     // screenshot observations and shutdown still wait for their required data.
     return gfx::begin_frame(true);
 }
+static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t height,
+        std::vector<DisplaySpan> spans={},std::vector<uint8_t> cpu={}) {
+    return queue_scanout_packet([buffer,width,height,spans=std::move(spans),cpu=std::move(cpu)]
+            (wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& target) {
+        // One worker orders uploads and submitted draws that share this input.
+        if(!cpu.empty())gpu::g_queue.WriteBuffer(buffer,0,cpu.data(),cpu.size());
+        for(const auto& span:spans)if(span.image)
+            encoder.CopyBufferToBuffer(span.image->buffer,span.source,buffer,span.destination,span.size);
+        decode_scanout(encoder,buffer,target,width,height);
+    });
+}
 #endif
+
+void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows) {
+#if GCNLLR_QUEUED_PRESENT
+    if(columns && rows && x<columns && y<rows)
+        scanout_view={x,y,columns,rows};
+#else
+    (void)x;(void)y;(void)columns;(void)rows;
+#endif
+}
 static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32_t height) {
 #if GCNLLR_QUEUED_PRESENT
     return queue_scanout(buffer,width,height);
@@ -605,6 +909,26 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
 bool present_display_copy(const EncodedImageHandle& image,uint32_t width,uint32_t height) {
     if(!image || image->width!=width || image->height!=height)return false;
     prepare_scanout(width,height);
+#if GCNLLR_GPU_OWNED_DISPLAY
+    if(image->color) {
+        ++color_scanouts;
+        return queue_scanout_packet([image](wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& target) {
+            const auto& band=*image->color;
+            const auto parameters=display_parameters(band);
+            const std::array entries{
+                wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->sampleTextureView},
+                wgpu::BindGroupEntry{.binding=1,.textureView=target.view},
+                wgpu::BindGroupEntry{.binding=2,.buffer=parameters,.size=display_param_words*sizeof(uint32_t)}};
+            const wgpu::BindGroupDescriptor descriptor{.layout=scanout_color.GetBindGroupLayout(0),
+                .entryCount=entries.size(),.entries=entries.data()};
+            auto pass=encoder.BeginComputePass();
+            pass.SetPipeline(scanout_color);
+            pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&descriptor));
+            pass.DispatchWorkgroups((band.width+15)/16,(band.height+7)/8);
+            pass.End();
+        });
+    }
+#endif
     return show_encoded_buffer(image->buffer,width,height);
 }
 bool present_display_spans(const std::vector<DisplaySpan>& spans,uint32_t width,uint32_t height) {
@@ -691,6 +1015,19 @@ bool peek_scanout(uint16_t x,uint16_t y,uint32_t* value) {
     return true;
 }
 void release() {
+#if GCNLLR_GPU_OWNED_TEXTURES
+    std::fprintf(stderr,"[native-gpu-texture-views] reinterpreted=%llu\n",(unsigned long long)texture_view_count);
+    texture_view_pipeline={};
+#endif
+#if GCNLLR_GPU_OWNED_DISPLAY
+    std::fprintf(stderr,"[native-gpu-display] copies=%llu scanouts=%llu byte-observations=%llu pooled=%zu\n",
+        (unsigned long long)color_copies,(unsigned long long)color_scanouts,
+        (unsigned long long)color_observations,display_surfaces.size());
+#endif
+#if GCNLLR_DIRECT_DISPLAY_COPY
+    std::fprintf(stderr,"[native-direct-display] encoded=%llu combined_submissions=%llu\n",
+        (unsigned long long)direct_display_bands,(unsigned long long)direct_display_batches);
+#endif
     std::fprintf(stderr,"[native-vi-submission] queued=%u frames=%llu worker_joins=%llu\n",
         unsigned(GCNLLR_QUEUED_PRESENT),(unsigned long long)scanout_frames,(unsigned long long)scanout_joins);
     std::fprintf(stderr,"[native-gx-submission] batched=%u encodes=%llu observation_submissions=%llu publication_joins=%llu\n",
@@ -700,10 +1037,15 @@ void release() {
     worker::synchronize();scanout={};clear_pipelines={};pixels.clear();readback_buffer={};readback_capacity=0;
 #if GCNLLR_QUEUED_PRESENT
     queued_scanout.reset();
+    local_scanout.reset();
+    scanout_view={0,0,1,1};
 #endif
     display_encoded={};display_encoded_capacity=0;display_encoder={};
     scanout_input={};scanout_input_capacity=0;scanout_decoder={};
     display_bands.clear();pending_displays=0;
+#if GCNLLR_GPU_OWNED_DISPLAY
+    scanout_color={};display_surfaces.clear();
+#endif
 #ifdef _WIN32
     worker::enqueue_work([] {if (render_schedule) {AvRevertMmThreadCharacteristics(render_schedule);render_schedule=nullptr;}});
     worker::synchronize();

@@ -7,10 +7,14 @@ if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_LIST_DIR}/aurora_retail.py"
     "${CMAKE_CURRENT_LIST_DIR}/retail_command.hpp")
+  set(_gcnllr_material_args)
+  if(GCNLLR_GPU_FRAME_PACKETS)
+    list(APPEND _gcnllr_material_args --packet-draw-state --draw-packet-header "${_gcnllr_draw_packet_header}")
+  endif()
   set(_gcnllr_retail "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/command_processor.cpp")
   execute_process(COMMAND "${GCNLLR_PYTHON_EXECUTABLE}" -B "${CMAKE_CURRENT_LIST_DIR}/aurora_retail.py"
     --source "${GXRUNTIME_DIR}/graphics/aurora/lib/gx/command_processor.cpp"
-    --out "${_gcnllr_retail}" --root "${CMAKE_CURRENT_LIST_DIR}"
+    --out "${_gcnllr_retail}" --root "${CMAKE_CURRENT_LIST_DIR}" ${_gcnllr_material_args}
     COMMAND_ERROR_IS_FATAL ANY)
   get_target_property(_gcnllr_retail_sources aurora_gx SOURCES)
   list(REMOVE_ITEM _gcnllr_retail_sources lib/gx/command_processor.cpp)
@@ -54,12 +58,17 @@ if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
     PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/gx")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_LIST_DIR}/aurora_shader.py")
+  set(_gcnllr_shader_args)
+  if(GCNLLR_GPU_FRAME_PACKETS)
+    list(APPEND _gcnllr_shader_args --packet-uniform --packet-shader-cache
+      --retail-uniform-matrices "${CMAKE_CURRENT_LIST_DIR}/retail_uniform_matrices.hpp")
+  endif()
   foreach(_shader_component shader shader_info)
     set(_shader_origin "${GXRUNTIME_DIR}/graphics/aurora/lib/gx/${_shader_component}.cpp")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_shader_origin}")
     set(_shader_derived "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/${_shader_component}.cpp")
     execute_process(COMMAND "${GCNLLR_PYTHON_EXECUTABLE}" -B "${CMAKE_CURRENT_LIST_DIR}/aurora_shader.py"
-      --source "${_shader_origin}" --out "${_shader_derived}" --kind "${_shader_component}"
+      --source "${_shader_origin}" --out "${_shader_derived}" --kind "${_shader_component}" ${_gcnllr_shader_args}
       COMMAND_ERROR_IS_FATAL ANY)
     get_target_property(_shader_sources aurora_gx SOURCES)
     list(FIND _shader_sources "lib/gx/${_shader_component}.cpp" _shader_index)

@@ -10,10 +10,20 @@ namespace gcnllr {
 // A native layout's invariant work belongs to its CP format lifetime. Draws
 // inspect only index bytes; all-direct geometry has no array-sizing work.
 class RetailVertexPlan {
-    struct Field {uint32_t offset,attribute,width,components;};
+    struct Field {
+        uint32_t offset,attribute,width,components;
+        bool operator==(const Field& rhs) const {
+            return offset==rhs.offset && attribute==rhs.attribute && width==rhs.width && components==rhs.components;
+        }
+    };
     std::array<Field,32> fields_{};
     uint32_t stride_{},count_{};
 public:
+    bool operator==(const RetailVertexPlan& rhs) const {
+        if (stride_!=rhs.stride_ || count_!=rhs.count_) return false;
+        for (uint32_t i=0;i<count_;++i) if (!(fields_[i]==rhs.fields_[i])) return false;
+        return true;
+    }
     uint32_t stride() const {return stride_;}
     void direct(uint32_t bytes) {
         if(bytes>UINT32_MAX-stride_)throw std::runtime_error("Vertex layout overflow");

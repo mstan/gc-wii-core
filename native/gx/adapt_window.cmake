@@ -66,6 +66,17 @@ string(REPLACE "${_gcnllr_instance}"
   _gcnllr_gpu "${_gcnllr_gpu}")
 set(_gcnllr_gpu_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gpu.cpp")
 string(PREPEND _gcnllr_gpu "#include <algorithm>\n#include <cstring>\n")
+set(_gcnllr_surface_usage ".usage = wgpu::TextureUsage::RenderAttachment,\n              .width = size.native_fb_width,")
+string(FIND "${_gcnllr_gpu}" "${_gcnllr_surface_usage}" _gcnllr_surface_usage_offset)
+if(_gcnllr_surface_usage_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned Aurora surface usage differs")
+endif()
+string(REPLACE "${_gcnllr_surface_usage}" [=[
+.usage = wgpu::TextureUsage::RenderAttachment |
+                  (SDL_GetHintBoolean("GCNLLR_TEST_CAPTURE_PRESENT", false) &&
+                           bool(g_surfaceCapabilities.usages & wgpu::TextureUsage::CopySrc)
+                       ? wgpu::TextureUsage::CopySrc : wgpu::TextureUsage::None),
+              .width = size.native_fb_width,]=] _gcnllr_gpu "${_gcnllr_gpu}")
 string(REPLACE "constexpr std::array enableToggles{" "std::vector<const char*> enableToggles{"
   _gcnllr_gpu "${_gcnllr_gpu}")
 string(REPLACE "wgpu::DawnTogglesDescriptor togglesDescriptor(" [=[if (SDL_GetHintBoolean("GCNLLR_VALIDATE_GPU", false)) {
@@ -86,9 +97,80 @@ list(APPEND _gcnllr_core_sources "${_gcnllr_gpu_path}")
 set_property(TARGET aurora_core PROPERTY SOURCES "${_gcnllr_core_sources}")
 target_include_directories(aurora_core PRIVATE "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu")
 
+# Reuse Aurora's readback queue for an opt-in capture of the actual composed
+# backbuffer. The ordinary debugger screenshot still reads the guest XFB.
+file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/efb_readback.cpp" _gcnllr_readback)
+string(REPLACE "std::atomic_bool g_requested{false};"
+  "std::atomic_bool g_requested{false};\nstd::atomic_bool g_surface_requested{false};"
+  _gcnllr_readback "${_gcnllr_readback}")
+set(_gcnllr_readback_after "void after_submit() noexcept {\n  if (!g_requested.load(std::memory_order_acquire)) {")
+string(FIND "${_gcnllr_readback}" "${_gcnllr_readback_after}" _gcnllr_readback_offset)
+if(_gcnllr_readback_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned Aurora framebuffer readback differs")
+endif()
+string(REPLACE "${_gcnllr_readback_after}" [=[
+static void read_after_submit(const wgpu::Texture& texture, std::atomic_bool& requested) noexcept {
+  if (!requested.load(std::memory_order_acquire)) {]=] _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE "    const auto& src = webgpu::present_source();\n    if (!src.texture) {"
+  "    if (!texture) {" _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE "src.format" "texture.GetFormat()" _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE "src.size.width" "texture.GetWidth()" _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE "src.size.height" "texture.GetHeight()" _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE ".texture = src.texture," ".texture = texture," _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE "g_requested.store(false," "requested.store(false," _gcnllr_readback "${_gcnllr_readback}")
+string(REPLACE "bool take(const std::uint8_t** rgba," [=[
+void after_submit() noexcept {
+  read_after_submit(webgpu::present_source().texture, g_requested);
+}
+
+bool request_surface() noexcept {
+  if (!bool(webgpu::g_graphicsConfig.surfaceConfiguration.usage & wgpu::TextureUsage::CopySrc))
+    return false;
+  g_surface_requested.store(true, std::memory_order_release);
+  return true;
+}
+
+void after_surface_submit(const wgpu::Texture& texture) noexcept {
+  read_after_submit(texture, g_surface_requested);
+}
+
+bool take(const std::uint8_t** rgba,]=] _gcnllr_readback "${_gcnllr_readback}")
+set(_gcnllr_readback_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/efb_readback.cpp")
+file(CONFIGURE OUTPUT "${_gcnllr_readback_path}" CONTENT "${_gcnllr_readback}" @ONLY)
+
+file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/aurora.cpp" _gcnllr_surface)
+set(_gcnllr_surface_submit "    if (canPresent && g_surface) {\n      ZoneScopedN(\"Present\");")
+string(FIND "${_gcnllr_surface}" "${_gcnllr_surface_submit}" _gcnllr_surface_offset)
+if(_gcnllr_surface_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned Aurora composed surface submission differs")
+endif()
+string(REPLACE "${_gcnllr_surface_submit}"
+  "    if (canPresent && g_surface) {\n      gfx::efb_readback::after_surface_submit(currentTexture);\n      ZoneScopedN(\"Present\");"
+  _gcnllr_surface "${_gcnllr_surface}")
+string(PREPEND _gcnllr_surface
+  "#include <webgpu/webgpu_cpp.h>\nnamespace aurora::gfx::efb_readback { void after_surface_submit(const wgpu::Texture&) noexcept; }\n")
+set(_gcnllr_surface_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/aurora.cpp")
+file(CONFIGURE OUTPUT "${_gcnllr_surface_path}" CONTENT "${_gcnllr_surface}" @ONLY)
+get_target_property(_gcnllr_core_sources aurora_core SOURCES)
+list(REMOVE_ITEM _gcnllr_core_sources lib/aurora.cpp)
+list(APPEND _gcnllr_core_sources "${_gcnllr_surface_path}")
+set_property(TARGET aurora_core PROPERTY SOURCES "${_gcnllr_core_sources}")
+get_target_property(_gcnllr_readback_sources aurora_gx SOURCES)
+list(REMOVE_ITEM _gcnllr_readback_sources lib/gfx/efb_readback.cpp)
+list(APPEND _gcnllr_readback_sources "${_gcnllr_readback_path}")
+set_property(TARGET aurora_gx PROPERTY SOURCES "${_gcnllr_readback_sources}")
+target_include_directories(aurora_gx PRIVATE "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx")
+
 # Release live-device owners during shutdown, before Windows' loader lock is
 # held by FreeLibrary. The unmodified donor executable never tested DLL unload.
+if(GCNLLR_RENDER_PIPELINE STREQUAL "retail" AND GCNLLR_GPU_FRAME_PACKETS)
+  include("${CMAKE_CURRENT_LIST_DIR}/retail_draw_packet.cmake")
+endif()
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gx/gx.cpp" _gcnllr_gx)
+if(_gcnllr_draw_packet_header)
+  gcnllr_draw_packet_replace(_gcnllr_gx "#include \"pipeline.hpp\""
+    "#include \"${_gcnllr_draw_packet_header}\"")
+endif()
 set(_gcnllr_shutdown "void shutdown() noexcept {\n  // TODO we should probably store this all in g_state.gx instead")
 string(FIND "${_gcnllr_gx}" "${_gcnllr_shutdown}" _gcnllr_shutdown_offset)
 if(_gcnllr_shutdown_offset EQUAL -1)
@@ -97,6 +179,11 @@ endif()
 string(REPLACE "${_gcnllr_shutdown}"
   "void shutdown() noexcept {\n  sPipelineLayout = {};\n  g_emptyTextureBindGroup = {};\n  sEmptyTextureView = {};\n  sEmptyTexture = {};\n  sEmptySampler = {};"
   _gcnllr_gx "${_gcnllr_gx}")
+if(_gcnllr_draw_packet_header)
+  string(PREPEND _gcnllr_gx "namespace aurora::gx { void reset_retail_uniforms() noexcept; }\n")
+  gcnllr_draw_packet_replace(_gcnllr_gx "void shutdown() noexcept {\n  sPipelineLayout"
+    "void shutdown() noexcept {\n  reset_retail_uniforms();\n  sPipelineLayout")
+endif()
 set(_gcnllr_gx_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gx.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_gx_path}" CONTENT "${_gcnllr_gx}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
@@ -110,7 +197,31 @@ set_source_files_properties("${_gcnllr_gx_path}" TARGET_DIRECTORY aurora_gx
 # can draw the frame. The donor also queued that fallback asynchronously,
 # losing first-use draws. Wait for the fallback (or the specialized shader on
 # a backend without fallback support) instead of omitting guest geometry.
-file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/pipeline_cache.cpp" _gcnllr_pipeline)
+set(_gcnllr_pipeline_original "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/pipeline_cache.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_gcnllr_pipeline_original}")
+file(READ "${_gcnllr_pipeline_original}" _gcnllr_pipeline)
+if(_gcnllr_draw_packet_header)
+  gcnllr_draw_packet_replace(_gcnllr_pipeline "#include \"../gx/pipeline.hpp\""
+    "#include \"${_gcnllr_draw_packet_header}\"")
+endif()
+if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
+  # Retail keys include captured texgen state. Use their version for both
+  # loading and pruning, so persisted keys can be compiled before first use.
+  set(_gcnllr_retail_key_version 3)
+  if(_gcnllr_draw_packet_header)
+    set(_gcnllr_retail_key_version 5)
+  endif()
+  target_compile_definitions(aurora_gx PRIVATE GCNLLR_RETAIL_GX_CONFIG_VERSION_OFFSET=${_gcnllr_retail_key_version})
+  set(_gcnllr_gx_version "gx::GXPipelineConfigVersion")
+  string(REGEX MATCHALL "gx::GXPipelineConfigVersion" _gcnllr_gx_versions "${_gcnllr_pipeline}")
+  list(LENGTH _gcnllr_gx_versions _gcnllr_gx_version_count)
+  if(NOT _gcnllr_gx_version_count EQUAL 2)
+    message(FATAL_ERROR "Pinned native GX pipeline cache version checks differ")
+  endif()
+  string(REPLACE "${_gcnllr_gx_version}"
+    "(${_gcnllr_gx_version} + GCNLLR_RETAIL_GX_CONFIG_VERSION_OFFSET)"
+    _gcnllr_pipeline "${_gcnllr_pipeline}")
+endif()
 set(_gcnllr_hash "const PipelineRef hash = xxh3_hash(config, static_cast<HashType>(type));")
 string(FIND "${_gcnllr_pipeline}" "${_gcnllr_hash}" _gcnllr_pipeline_offset)
 if(_gcnllr_pipeline_offset EQUAL -1)
@@ -119,7 +230,77 @@ endif()
 string(REPLACE "${_gcnllr_hash}"
   "if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {\n    if (priority == PipelinePriority::Normal) priority = PipelinePriority::Blocking;\n  }\n#ifdef AURORA_ENABLE_GXCORE\n  if constexpr (std::is_same_v<PipelineConfig, gxcore::PipelineConfig>) {\n    if (priority == PipelinePriority::Normal && (config.depthOnly == 2u || ubershader_mode() == 0))\n      priority = PipelinePriority::Blocking;\n  }\n#endif\n  ${_gcnllr_hash}"
   _gcnllr_pipeline "${_gcnllr_pipeline}")
-string(PREPEND _gcnllr_pipeline "#include <type_traits>\n")
+string(PREPEND _gcnllr_pipeline "#include <cstring>\n#include <type_traits>\n")
+if(GCNLLR_GPU_FRAME_PACKETS)
+  string(REPLACE "${_gcnllr_hash}" [=[// The machine owns creation and ordered draw recording.
+  // Reuse only an exact key that the blocking path has already made ready.
+  struct ReadyPipeline {
+    PipelineConfig config{};
+    PipelineRef ref{};
+    ShaderType type{};
+    uint64_t generation{};
+    bool valid{};
+  };
+  static thread_local ReadyPipeline ready;
+  const bool canReuse = std::is_same_v<PipelineConfig, gx::PipelineConfig> &&
+                        priority == PipelinePriority::Blocking && !firstFrameUsedOverride && !queuedNew;
+  const auto cacheGeneration = pipeline_cache_generation();
+  if (canReuse && ready.valid && ready.generation == cacheGeneration && ready.type == type &&
+      std::memcmp(&ready.config, &config, sizeof(config)) == 0)
+    return ready.ref;
+  const PipelineRef hash = xxh3_hash(config, static_cast<HashType>(type));]=]
+    _gcnllr_pipeline "${_gcnllr_pipeline}")
+  set(_gcnllr_pipeline_cv "    g_pipelineReadyCv.wait(lock, [=] { return g_pipelines.contains(hash) || g_pipelineThreadEnd; });")
+  string(FIND "${_gcnllr_pipeline}" "${_gcnllr_pipeline_cv}" _gcnllr_pipeline_cv_at)
+  if(_gcnllr_pipeline_cv_at EQUAL -1)
+    message(FATAL_ERROR "Pinned blocking pipeline wait differs")
+  endif()
+  string(REPLACE "${_gcnllr_pipeline_cv}" [=[    static const bool profileWait = std::getenv("GCNLLR_GX_PROFILE") != nullptr;
+    const auto waitBegin = profileWait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    g_pipelineReadyCv.wait(lock, [=] { return g_pipelines.contains(hash) || g_pipelineThreadEnd; });
+    if (profileWait) {
+      const auto waitEnd = std::chrono::steady_clock::now();
+      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitBegin).count();
+      if (elapsed >= 2000)
+        Log.info("Blocking pipeline frame={} key={:x} time_us={} stamp_ns={}", current_frame(), hash, elapsed,
+                 std::chrono::duration_cast<std::chrono::nanoseconds>(waitEnd.time_since_epoch()).count());
+    }]=] _gcnllr_pipeline "${_gcnllr_pipeline}")
+  set(_gcnllr_pipeline_wait [=[    auto pipelineIt = g_pipelines.find(hash);
+    if (pipelineIt != g_pipelines.end() && persist && firstFrameUsed < pipelineIt->second.firstFrameUsed) {]=])
+  string(FIND "${_gcnllr_pipeline}" "${_gcnllr_pipeline_wait}" _gcnllr_pipeline_wait_at)
+  if(_gcnllr_pipeline_wait_at EQUAL -1)
+    message(FATAL_ERROR "Pinned native pipeline readiness boundary differs")
+  endif()
+  string(REPLACE "${_gcnllr_pipeline_wait}" [=[    auto pipelineIt = g_pipelines.find(hash);
+    pipelineReady = pipelineIt != g_pipelines.end();
+    if (pipelineReady && persist && firstFrameUsed < pipelineIt->second.firstFrameUsed) {]=]
+    _gcnllr_pipeline "${_gcnllr_pipeline}")
+  set(_gcnllr_pipeline_return [=[  return hash;
+}
+
+#ifdef AURORA_ENABLE_GXCORE]=])
+  string(FIND "${_gcnllr_pipeline}" "${_gcnllr_pipeline_return}" _gcnllr_pipeline_return_at)
+  if(_gcnllr_pipeline_return_at EQUAL -1)
+    message(FATAL_ERROR "Pinned native pipeline return boundary differs")
+  endif()
+  string(REPLACE "${_gcnllr_pipeline_return}" [=[  if (canReuse && pipelineReady)
+    ready = {config, hash, type, cacheGeneration, true};
+  return hash;
+}
+
+#ifdef AURORA_ENABLE_GXCORE]=] _gcnllr_pipeline "${_gcnllr_pipeline}")
+  if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
+    set(_gcnllr_pipeline_clear "  g_pipelines.clear();\n  g_pipelineQueue.clear();")
+    string(FIND "${_gcnllr_pipeline}" "${_gcnllr_pipeline_clear}" _gcnllr_pipeline_clear_at)
+    if(_gcnllr_pipeline_clear_at EQUAL -1)
+      message(FATAL_ERROR "Pinned native shader module shutdown boundary differs")
+    endif()
+    string(PREPEND _gcnllr_pipeline "namespace aurora::gx { void clear_machine_shader_modules(); }\n")
+    string(REPLACE "${_gcnllr_pipeline_clear}"
+      "  g_pipelines.clear();\n  gx::clear_machine_shader_modules();\n  g_pipelineQueue.clear();"
+      _gcnllr_pipeline "${_gcnllr_pipeline}")
+  endif()
+endif()
 set(_gcnllr_pipeline_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/pipeline_cache.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_pipeline_path}" CONTENT "${_gcnllr_pipeline}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
@@ -404,8 +585,25 @@ set_property(TARGET gxruntime_gxcore PROPERTY SOURCES "${_gcnllr_core_sources}")
 # fence can then submit all BIOS bands together, rather than map/unmap the
 # large staging arena and wait for the GPU at every individual band.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/common.cpp" _gcnllr_common)
+if(_gcnllr_draw_packet_header)
+  gcnllr_draw_packet_replace(_gcnllr_common "#include \"../gx/pipeline.hpp\""
+    "#include \"${_gcnllr_draw_packet_header}\"")
+  set(_gcnllr_storage_push "Range push_storage(const uint8_t* data, size_t length) {")
+  set(_gcnllr_geometry_packet [=[u32 machine_geometry_packet(const u32* data, size_t words) {
+  auto& storage = current_frame_packet().storage;
+  const size_t begin = storage.size();
+  const size_t aligned = AURORA_ALIGN(begin, sizeof(u32));
+  if (aligned > begin) storage.append_zeroes(aligned - begin);
+  storage.append(reinterpret_cast<const u8*>(data), words * sizeof(u32));
+  return static_cast<u32>(aligned / sizeof(u32));
+}
+
+]=])
+  gcnllr_draw_packet_replace(_gcnllr_common "${_gcnllr_storage_push}"
+     "${_gcnllr_geometry_packet}${_gcnllr_storage_push}")
+endif()
 string(REPLACE "bool captureDepthSnapshot = false;"
-  "bool captureDepthSnapshot = false;\n  wgpu::RenderPipeline machineClearPipeline;\n  ClipRect machineClearRect{};\n  wgpu::Color machineClearColor{};\n  float machineClearZ = 0;"
+  "bool captureDepthSnapshot = false;\n  wgpu::RenderPipeline machineClearPipeline;\n  ClipRect machineClearRect{};\n  std::vector<std::function<void(wgpu::CommandEncoder&)>> machineBeforeDraw;\n  wgpu::Color machineClearColor{};\n  float machineClearZ = 0;"
   _gcnllr_common "${_gcnllr_common}")
 set(_gcnllr_pass_anchor "auto pass = cmd.BeginRenderPass(&renderPassDescriptor);\n  render_pass(pass, frame, passInfo, 0, split);")
 string(FIND "${_gcnllr_common}" "${_gcnllr_pass_anchor}" _gcnllr_pass_offset)
@@ -437,6 +635,76 @@ string(REPLACE "void queue_palette_conv(tex_palette_conv::ConvRequest req) {" [=
 }
 void queue_palette_conv(tex_palette_conv::ConvRequest req) {]=]
   _gcnllr_common "${_gcnllr_common}")
+set(_gcnllr_texture_view_anchor "  for (const auto& conv : passInfo.paletteConvs) {")
+string(FIND "${_gcnllr_common}" "${_gcnllr_texture_view_anchor}" _gcnllr_texture_view_offset)
+if(_gcnllr_texture_view_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned pre-draw texture view boundary differs")
+endif()
+string(REPLACE "${_gcnllr_texture_view_anchor}"
+  "  for (const auto& encode : passInfo.machineBeforeDraw) encode(cmd);\n${_gcnllr_texture_view_anchor}"
+  _gcnllr_common "${_gcnllr_common}")
+if(GCNLLR_GPU_FRAME_PACKETS)
+  set(_gcnllr_uniform_push "Range push_uniform(const uint8_t* data, size_t length) {")
+  string(FIND "${_gcnllr_common}" "${_gcnllr_uniform_push}" _gcnllr_uniform_at)
+  if(_gcnllr_uniform_at EQUAL -1)
+    message(FATAL_ERROR "Pinned uniform packet allocator differs")
+  endif()
+  string(REPLACE "${_gcnllr_uniform_push}" [=[ByteBuffer& machine_uniform_packet(size_t capacity, u32& offset) {
+  auto& uniforms = current_frame_packet().uniforms;
+  const size_t begin = uniforms.size();
+  const size_t aligned = AURORA_ALIGN(begin, g_cachedLimits.minUniformBufferOffsetAlignment);
+  if (aligned > begin) uniforms.append_zeroes(aligned - begin);
+  uniforms.reserve_extra(capacity);
+  offset = static_cast<u32>(aligned);
+  return uniforms;
+}
+Range push_uniform(const uint8_t* data, size_t length) {]=]
+    _gcnllr_common "${_gcnllr_common}")
+  set(_gcnllr_bind_generation "static std::mutex g_bindGroupCacheMutex;")
+  set(_gcnllr_bind_clear "g_cachedBindGroups.clear();")
+  set(_gcnllr_bind_begin "BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {")
+  set(_gcnllr_bind_end "  return id;\n}\n\nwgpu::BindGroup find_bind_group")
+  foreach(_boundary IN ITEMS _gcnllr_bind_generation _gcnllr_bind_clear _gcnllr_bind_begin _gcnllr_bind_end)
+    string(FIND "${_gcnllr_common}" "${${_boundary}}" _offset)
+    if(_offset EQUAL -1)
+      message(FATAL_ERROR "Pinned bind-group publication boundary differs: ${_boundary}")
+    endif()
+  endforeach()
+  string(REPLACE "${_gcnllr_bind_generation}"
+    "${_gcnllr_bind_generation}\nstatic std::atomic<uint64_t> g_machineBindGroupGeneration{1};"
+    _gcnllr_common "${_gcnllr_common}")
+  string(REPLACE "${_gcnllr_bind_clear}"
+    "${_gcnllr_bind_clear}\n  g_machineBindGroupGeneration.fetch_add(1, std::memory_order_release);"
+    _gcnllr_common "${_gcnllr_common}")
+  string(REPLACE "${_gcnllr_bind_begin}" [=[BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
+  // The frame owner has already published this exact texture group in the
+  // same recording packet. The shared cache retains its resource handles.
+  struct ReadyTextureGroup {
+    std::array<WGPUBindGroupEntry, gx::MaxTextures * 2> entries{};
+    WGPUBindGroupLayout layout{};
+    BindGroupRef id{};
+    uint64_t packet{}, generation{};
+  };
+  static thread_local ReadyTextureGroup lastGroup;
+  const auto packet = current_frame_id();
+  const auto generation = g_machineBindGroupGeneration.load(std::memory_order_acquire);
+  const bool comparable = packet && !descriptor.nextInChain && descriptor.entryCount == lastGroup.entries.size();
+  const size_t bytes = sizeof(WGPUBindGroupEntry) * descriptor.entryCount;
+  if (comparable && lastGroup.packet == packet && lastGroup.generation == generation &&
+      lastGroup.layout == descriptor.layout && std::memcmp(lastGroup.entries.data(), descriptor.entries, bytes) == 0)
+    return lastGroup.id;]=] _gcnllr_common "${_gcnllr_common}")
+  string(REPLACE "${_gcnllr_bind_end}" [=[  if (comparable) {
+    std::memcpy(lastGroup.entries.data(), descriptor.entries, bytes);
+    lastGroup.layout = descriptor.layout;
+    lastGroup.id = id;
+    lastGroup.packet = packet;
+    lastGroup.generation = generation;
+  }
+  return id;
+}
+
+wgpu::BindGroup find_bind_group]=] _gcnllr_common "${_gcnllr_common}")
+endif()
 set(_gcnllr_common_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/common.cpp")
 set(_gcnllr_encode_anchor "void queue_palette_conv(tex_palette_conv::ConvRequest req) {")
 string(FIND "${_gcnllr_common}" "${_gcnllr_encode_anchor}" _gcnllr_encode_offset)
@@ -444,7 +712,80 @@ if(_gcnllr_encode_offset LESS 0)
   message(FATAL_ERROR "Pinned ordered native encoding boundary differs")
 endif()
 string(REPLACE "${_gcnllr_encode_anchor}"
-  "#include \"${CMAKE_CURRENT_LIST_DIR}/ordered_encode.inc\"\n${_gcnllr_encode_anchor}"
+  "#include \"${CMAKE_CURRENT_LIST_DIR}/ordered_encode.inc\"\n#if GCNLLR_PERSISTENT_GEOMETRY\n#include \"${CMAKE_CURRENT_LIST_DIR}/persistent_geometry.inc\"\n#endif\n${_gcnllr_encode_anchor}"
+  _gcnllr_common "${_gcnllr_common}")
+if(GCNLLR_PERSISTENT_GEOMETRY)
+  string(PREPEND _gcnllr_common "#include \"${CMAKE_CURRENT_LIST_DIR}/persistent_geometry.hpp\"\n#include <stdexcept>\n")
+  foreach(_geometry IN ITEMS Vertex Index Storage)
+    string(REGEX MATCH "${_geometry}BufferSize,[ \t\r\n]+\"Shared ${_geometry} Buffer\""
+      _gcnllr_buffer_anchor "${_gcnllr_common}")
+    if(NOT _gcnllr_buffer_anchor)
+      message(FATAL_ERROR "Pinned shared geometry buffer boundary differs")
+    endif()
+    if(_geometry STREQUAL "Vertex")
+      set(_gcnllr_geometry_kind vertices)
+    elseif(_geometry STREQUAL "Index")
+      set(_gcnllr_geometry_kind indices)
+    else()
+      set(_gcnllr_geometry_kind arrays)
+    endif()
+    string(REPLACE "${_gcnllr_buffer_anchor}"
+      "geometry_buffer_size(GeometryKind::${_gcnllr_geometry_kind}, ${_geometry}BufferSize), \"Shared ${_geometry} Buffer\""
+      _gcnllr_common "${_gcnllr_common}")
+  endforeach()
+  string(REPLACE "bool begin_frame(bool preserveEfb) {"
+    "bool begin_frame(bool preserveEfb) {\n  begin_geometry_frame(preserveEfb);"
+    _gcnllr_common "${_gcnllr_common}")
+  string(REPLACE "  g_vertexBuffer = {};"
+    "  release_geometry();\n  g_vertexBuffer = {};"
+    _gcnllr_common "${_gcnllr_common}")
+endif()
+set(_gcnllr_midpoint_anchor "  bool interpolate = false;\n  int interpSteps = 1;")
+string(FIND "${_gcnllr_common}" "${_gcnllr_midpoint_anchor}" _gcnllr_midpoint_offset)
+if(_gcnllr_midpoint_offset LESS 0)
+  message(FATAL_ERROR "Pinned Aurora presentation frame packet differs")
+endif()
+string(REPLACE "${_gcnllr_midpoint_anchor}" "${_gcnllr_midpoint_anchor}\n  uint32_t scanoutTarget = 0;"
+  _gcnllr_common "${_gcnllr_common}")
+foreach(_gcnllr_midpoint_boundary IN ITEMS
+    "static bool note_game_frame_end();"
+    "    const auto stats = packet.stats;"
+    "    if (!clocked)\n      run_deferred_present();"
+    "    } else if (callback) {\n      if (presents)"
+    "  g_deferredPresents.clear();"
+    "  int step = 0;           // the in-between frame's step, or -1 for the real frame"
+    "  log_present(kind, present.gameFrame, present.step, present.due);"
+    "void after_submit() noexcept {")
+  string(FIND "${_gcnllr_common}" "${_gcnllr_midpoint_boundary}" _gcnllr_midpoint_offset)
+  if(_gcnllr_midpoint_offset LESS 0)
+    message(FATAL_ERROR "Pinned Aurora presentation boundary differs: ${_gcnllr_midpoint_boundary}")
+  endif()
+endforeach()
+string(REPLACE "static bool note_game_frame_end();"
+  "static bool note_game_frame_end();\nstatic bool present_interpolated_scanout(wgpu::CommandEncoder&, const EndFrameCallback&, uint64_t, uint32_t);\nstatic void release_machine_interpolation();"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "    const auto stats = packet.stats;"
+  "    const auto stats = packet.stats;\n    const auto scanoutTarget = packet.presents ? packet.scanoutTarget : 0u;\n    const auto nativeFrameId = packet.frameId;"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "    if (!clocked)\n      run_deferred_present();"
+  "    const bool presentedScanout = !interpolate && scanoutTarget && callback &&\n        present_interpolated_scanout(encoder, callback, nativeFrameId, scanoutTarget);\n    if (!clocked && !presentedScanout)\n      run_deferred_present();"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "    } else if (callback) {\n      if (presents)"
+  "    } else if (callback && !presentedScanout) {\n      if (presents)" _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "  g_deferredPresents.clear();" "  g_deferredPresents.clear();\n  release_machine_interpolation();"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "  int step = 0;           // the in-between frame's step, or -1 for the real frame"
+  "  int step = 0;           // the in-between frame's step, or -1 for the real frame\n  PresentClock::time_point discardAfter{};"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "  log_present(kind, present.gameFrame, present.step, present.due);"
+  [=[  if (present.discardAfter.time_since_epoch().count() != 0 && PresentClock::now() > present.discardAfter) {
+    log_present("dropped-generated", present.gameFrame, present.step, present.due);
+    return;
+  }
+  log_present(kind, present.gameFrame, present.step, present.due);]=]
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "void after_submit() noexcept {"
+  "#include \"${CMAKE_CURRENT_LIST_DIR}/scanout_interpolation.inc\"\n\nvoid after_submit() noexcept {"
   _gcnllr_common "${_gcnllr_common}")
 file(CONFIGURE OUTPUT "${_gcnllr_common_path}" CONTENT "${_gcnllr_common}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)

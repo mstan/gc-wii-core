@@ -11,14 +11,17 @@ extern "C" {
 #define GCNLLR_NATIVE_GX_STREAMED_COPY 4u
 #define GCNLLR_NATIVE_GX_COMPOSED_SCANOUT 8u
 #define GCNLLR_NATIVE_GX_DEFERRED_RETIREMENT 16u
+#define GCNLLR_NATIVE_GX_DISPLAY_COLOR 32u
+#define GCNLLR_NATIVE_GX_COPY_RANGE 64u
+#define GCNLLR_NATIVE_GX_TEXTURE_VIEWS 128u
 #define GCNLLR_NATIVE_GX_COPY_DISPLAY 1u
 #define GCNLLR_NATIVE_GX_COPY_MATERIALIZING 2u
 
 typedef struct {
     uint64_t token;
     uint32_t address, row_bytes, rows, stride;
-    /* DISPLAY selects packed YUY2 scanout; zero selects tiled texture rows.
-     * The opaque token retains the provider's immutable format/geometry. */
+    /* DISPLAY selects scanout with YUY2 bytes on memory observation. Zero
+     * selects tiled texture rows. The token retains immutable geometry. */
     uint32_t flags;
 } GcnllrNativeGxCopy;
 
@@ -134,6 +137,10 @@ typedef struct {
      * declined layouts use the ordinary materialized-MEM1 scanout path. */
     int (*present_spans)(const GcnllrNativeGxScanoutSpan*,uint32_t count,
                          uint32_t width,uint32_t height);
+    /* COPY_RANGE: observe a four-byte-aligned interval in a dense XFB's
+     * packed bytes. Publishes exactly the selected bytes with MATERIALIZING.
+     * Positive succeeds, zero declines, negative is terminal. */
+    int (*materialize_copy_range)(uint64_t token,uint32_t offset,uint32_t size);
 } GcnllrNativeGxApi;
 typedef const GcnllrNativeGxApi* (*GcnllrNativeGxGetApi)(uint32_t abi);
 

@@ -4,7 +4,7 @@
 // remain immutable. All live recording transitions stay on the FIFO thread.
 void set_owned_texture_lookup(OwnedTextureLookup lookup) {g_ownedTextureLookup=lookup;}
 
-OwnedTexture capture_owned_efb_copy(const gxc::EfbCopyCommand& cmd) {
+OwnedTexture capture_owned_efb_copy(const gxc::EfbCopyCommand& cmd,bool submit) {
   struct Capturing {
     Capturing() {g_capturingOwnedTexture=true;}
     ~Capturing() {g_capturingOwnedTexture=false;}
@@ -13,11 +13,10 @@ OwnedTexture capture_owned_efb_copy(const gxc::EfbCopyCommand& cmd) {
   const auto it=g_efbCopyTextures.find(cmd.dest_address);
   if(it==g_efbCopyTextures.end() || !it->second.handle)
     throw std::runtime_error("GPU texture producer allocation failed");
-  // Submit the captured target before machine publication. Later observation
-  // can be evicting another token while this FIFO worker waits on the owner.
-  // It must only enqueue readback of an already-submitted immutable resource.
+  // Legacy worker publication requires a submitted immutable resource. The
+  // single-owner renderer can safely defer submission until a real observer.
   const auto handle=it->second.handle;
-  if(!gfx::segment_frame())throw std::runtime_error("GPU texture producer submission failed");
+  if(submit && !gfx::segment_frame())throw std::runtime_error("GPU texture producer submission failed");
   return {handle,cmd.destination_width,cmd.destination_height,cmd.format};
 }
 

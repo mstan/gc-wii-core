@@ -7,7 +7,11 @@
 #include "async_readback.hpp"
 #endif
 namespace gxruntime::gxcore { struct EfbCopyCommand; }
+namespace aurora::gfx { struct TextureRef; namespace gxcore {struct OwnedTexture;} }
+struct GXTlutObj_;
 namespace gcnllr::gpu_bridge {
+void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows);
+unsigned efb_scale(const char* setting);
 void initialize();
 bool settle_framebuffer();
 struct CopiedImage {uint32_t width{},height{};std::vector<uint8_t> yuy2;};
@@ -17,19 +21,21 @@ struct DisplayCopyFilter {
     uint32_t low{},high{};
     bool clamp_top{},clamp_bottom{};
 };
-void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter);
+void record_display_copy(const gxruntime::gxcore::EfbCopyCommand& copy,const DisplayCopyFilter& filter,
+                         bool eager,uint32_t output_rows,float yscale);
 std::vector<CopiedImage> take_display_copies();
-// Immutable encoded YUY2 generations. The batched provider records their GPU
-// work in the current packet; observation submits before consuming real bytes.
+// Immutable display generations. Observation submits the source packet before
+// consuming real guest bytes.
 std::vector<EncodedImageHandle> retain_display_copies();
 // Submit any lazily recorded generations before CPU observation/PE completion.
 // Segmented providers already submitted them; no live provider switch exists.
+void note_recorded_copy();
 void submit_copies();
 void validate_submission();
 // Await host encoding/submission acknowledgement, without GPU execution,
 // transfer or map completion. Propagate deferred encoding errors before PE.
 void acknowledge_submission();
-CopiedImage materialize_display_copy(const EncodedImageHandle&);
+CopiedImage materialize_display_copy(const EncodedImageHandle&,uint32_t offset=0,uint32_t size=0);
 #if GCNLLR_ASYNC_COPIES
 aurora::gfx::AsyncReadback queue_display_readback(const EncodedImageHandle&);
 #endif
@@ -44,4 +50,10 @@ bool present(const uint8_t* yuy2,uint32_t width,uint32_t height,uint32_t stride)
 bool peek_scanout(uint16_t x,uint16_t y,uint32_t* value);
 void finish();
 void release();
+#if GCNLLR_GPU_OWNED_TEXTURES
+std::shared_ptr<aurora::gfx::TextureRef> reinterpret_texture(const aurora::gfx::gxcore::OwnedTexture&,
+                                                           uint32_t format,uint32_t width,uint32_t height);
+std::shared_ptr<aurora::gfx::TextureRef> colorize_ci8(const std::shared_ptr<aurora::gfx::TextureRef>&,
+                                                    const GXTlutObj_&);
+#endif
 }
