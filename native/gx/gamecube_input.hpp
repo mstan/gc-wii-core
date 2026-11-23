@@ -238,6 +238,14 @@ public:
 
     bool enabled() const { return enabled_; }
     const GcnllrGameCubeInput& input() const { return input_; }
+    GcnllrPad& port_input(size_t port) { return input_.ports[port]; }
+
+    int keyboard_port() const {
+        for (size_t i = 0; i < profile_.size(); ++i)
+            if (profile_[i].device == "keyboard")
+                return static_cast<int>(i);
+        return -1;
+    }
 
     void poll(const bool* keys) {
         for (auto*& pad : pads_)

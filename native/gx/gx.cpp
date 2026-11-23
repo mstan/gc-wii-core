@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 #include "gcnllr/native_gx.h"
 #include "gamecube_input.hpp"
+#include "keyboard_mouse_input.hpp"
 #include "memory.hpp"
 #include "texture_encode.hpp"
 #include "owned_texture.hpp"
 #include "raster_viewport.hpp"
 #include "pointer.hpp"
 #include "gpu_bridge.hpp"
+#include "present_trace.hpp"
 #include <unordered_map>
 #include "fifo_worker.hpp"
 #include "ordered_effects.hpp"
@@ -15,7 +17,9 @@
 #include "gfx/texture.hpp"
 #endif
 #include "gfx/thread_cpu.hpp"
+#include "webgpu/gpu.hpp"
 #include "window.hpp"
+#include <imgui.h>
 #if GCNLLR_NATIVE_DRAW_SINK
 #include "native_draw_sink.hpp"
 #endif
@@ -27,7 +31,9 @@
 #include "gx/recomp.hpp"
 #include "gx/gx.hpp"
 extern "C" void gcnllr_aurora_retail_reset();
-extern "C" void gcnllr_aurora_retail_overlay(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
+extern "C" void gcnllr_aurora_retail_overlay(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,float);
+extern "C" void gcnllr_aurora_retail_overlay_split(float,float);
+extern "C" void gcnllr_aurora_retail_view_framing(float,float,float);
 #else
 #include <gxruntime/aurora_recomp/retail_gx_frontend.hpp>
 #include <gxruntime/gxcore/gxcore.hpp>
@@ -44,13 +50,16 @@ extern "C" void gcnllr_aurora_retail_overlay(uint32_t,uint32_t,uint32_t,uint32_t
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 #ifdef _WIN32
@@ -58,6 +67,10 @@ extern "C" void gcnllr_aurora_retail_overlay(uint32_t,uint32_t,uint32_t,uint32_t
 #define NOMINMAX
 #include <windows.h>
 #endif
+
+namespace aurora::webgpu {
+void set_fixed_present_aspect(uint32_t width, uint32_t height) noexcept;
+}
 
 namespace aurora::gfx::gxcore {
 bool submit_draw_plan(const gxruntime::gxcore::DrawPlan&);
@@ -202,6 +215,7 @@ std::vector<uint8_t> xfb;
 Clock::time_point last_events{};
 SDL_Gamepad* gamepad{};
 gcnllr::gamecube_input::ControllerPorts gamecube_pads;
+gcnllr::keyboard_mouse::Input mouse_controls;
 FILE* frame_times{};
 std::atomic<uint64_t> completion_service_ns{};
 uint64_t last_completion_service_ns{};
@@ -312,7 +326,10 @@ void pump(bool force=false) {
     }
     const bool* keys=SDL_GetKeyboardState(nullptr);
     if (gamecube_pads.enabled()) {
-        gamecube_pads.poll(window && SDL_GetKeyboardFocus() == window ? keys : nullptr);
+        const bool* focused_keys = window && SDL_GetKeyboardFocus() == window ? keys : nullptr;
+        gamecube_pads.poll(focused_keys);
+        if (const int port = gamecube_pads.keyboard_port(); port >= 0)
+            mouse_controls.poll(window, focused_keys, gamecube_pads.port_input(port));
         pad = gamecube_pads.input().ports[0];
         return;
     }
@@ -514,6 +531,18 @@ std::mutex retained_mutex;
 std::unordered_map<uint64_t,RetainedCopy> retained_copies;
 std::unordered_map<uint32_t,uint64_t> texture_producers;
 uint64_t next_copy_token;
+// Keep older handles for byte observers. A partially overwritten producer
+// can no longer provide a decoded view of the complete guest texture.
+void invalidate_overlapping_texture_producers(const GcnllrNativeGxCopy& copy) {
+    const auto end=[](const GcnllrNativeGxCopy& region) {
+        return uint64_t(region.address)+(region.rows-1)*uint64_t(region.stride)+region.row_bytes;
+    };
+    const auto copy_end=end(copy);
+    std::erase_if(texture_producers,[&](const auto& producer) {
+        const auto& older=retained_copies.at(producer.second).copy;
+        return older.address<copy_end && copy.address<end(older);
+    });
+}
 RetainedCopy retained_copy(uint64_t token) {
     std::lock_guard lock(retained_mutex);
     const auto found=retained_copies.find(token);
@@ -712,6 +741,7 @@ void flush_display_copies() {
             const GcnllrNativeGxCopy descriptor{++next_copy_token,copy.destination,copy.width*2,copy.height,copy.stride,GCNLLR_NATIVE_GX_COPY_DISPLAY};
             {
                 std::lock_guard lock(retained_mutex);
+                invalidate_overlapping_texture_producers(descriptor);
                 retained_copies.emplace(descriptor.token,RetainedCopy{descriptor,std::move(images[i]),{}});
 #if GCNLLR_ASYNC_COPIES
                 retained_copies.at(descriptor.token).stream=stream;
@@ -789,6 +819,7 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
         const GcnllrNativeGxCopy descriptor{++next_copy_token,command.dest_address,row_bytes,rows,stride,0};
         {
             std::lock_guard lock(retained_mutex);
+            invalidate_overlapping_texture_producers(descriptor);
             retained_copies.emplace(descriptor.token,RetainedCopy{descriptor,{},std::move(texture)});
             texture_producers[descriptor.address]=descriptor.token;
 #if GCNLLR_ASYNC_COPIES
@@ -900,8 +931,10 @@ void stop() {
     retail_active=false;retail_texture_ids.clear();aurora::gx::recomp::clear_guest_address_resolver();
 #endif
     if (gamepad) { SDL_CloseGamepad(gamepad);gamepad=nullptr; }
+    mouse_controls.stop();
     gamecube_pads.stop();
     if (initialized) { gcnllr::gpu_bridge::release();aurora_shutdown();initialized=false; }
+    gcnllr::present_trace::finish();
     if (frame_times) {std::fclose(frame_times);frame_times=nullptr;}
     frame_open=false;
 }
@@ -934,9 +967,29 @@ int start(const GcnllrNativeGxConfig* input) {
         if (!config.hidden && controller_profile && *controller_profile &&
             !gamecube_pads.start(controller_profile))
             throw std::runtime_error("Unable to load the GameCube controller profile");
+        if (const char* encoded = std::getenv("GCNLLR_KEYBOARD_MOUSE"); gamecube_pads.enabled() && encoded) {
+            std::istringstream bindings(encoded);
+            if (!mouse_controls.start(bindings, std::getenv("GCNLLR_MOUSE_SENSITIVITY_FILE")))
+                throw std::runtime_error("Unable to load Mouse + Keyboard bindings");
+        }
         SDL_SetMainReady();
         SDL_SetHint("GCNLLR_RENDER_HIDDEN",input->hidden ? "1" : "0");
         SDL_SetHint("GCNLLR_GX_FILL_WINDOW",std::getenv("GCNLLR_DISPLAY_PIXEL_ASPECT") ? "1" : "0");
+        uint32_t present_width=0,present_height=0;
+        if (const char* fixed=std::getenv("GCNLLR_DISPLAY_ASPECT")) {
+            const std::string_view ratio(fixed);
+            const auto separator=ratio.find(':');
+            if (separator==ratio.npos)
+                throw std::runtime_error("Fixed display aspect must be WIDTH:HEIGHT");
+            const char* split=ratio.data()+separator;
+            const char* end=ratio.data()+ratio.size();
+            const auto x=std::from_chars(ratio.data(),split,present_width);
+            const auto y=std::from_chars(split+1,end,present_height);
+            if (x.ec!=std::errc{} || x.ptr!=split || y.ec!=std::errc{} || y.ptr!=end ||
+                !present_width || !present_height || present_width>16384u || present_height>16384u)
+                throw std::runtime_error("Fixed display aspect must be WIDTH:HEIGHT");
+        }
+        aurora::webgpu::set_fixed_present_aspect(present_width,present_height);
         SDL_SetHint("GCNLLR_VALIDATE_GPU",std::getenv("GCNLLR_GPU_VALIDATE") ? "1" : "0");
 #ifdef _WIN32
         HMODULE module{};char path[32768]{};
@@ -966,9 +1019,12 @@ int start(const GcnllrNativeGxConfig* input) {
         settings.windowPosX=-1;settings.windowPosY=-1;
         settings.vsync=false;settings.startFullscreen=false;settings.pauseOnFocusLost=false;
         settings.allowJoystickBackgroundEvents=true;settings.logLevel=LOG_INFO;settings.logCallback=log_message;
+        gcnllr::present_trace::start();
         auto info=aurora_initialize(0,nullptr,&settings);
         initialized=true;
         if (!info.window) throw std::runtime_error("Aurora did not create a native GPU window");
+        if (mouse_controls.enabled())
+            ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         if (info.backend==BACKEND_NULL) throw std::runtime_error("A real GPU backend is required");
         bool compatible=info.backend==settings.desiredBackend;
 #if defined(_WIN32) && !defined(GCNLLR_GPU_VULKAN)
@@ -1303,8 +1359,12 @@ int present_spans(const GcnllrNativeGxScanoutSpan* plan,uint32_t count,uint32_t 
         return present_impl(nullptr,width,height,width*2,{},spans)?1:-1;
     } catch(const std::exception& e){fail(e.what());return -1;}
 }
+#if !GCNLLR_RETAIL_PIPELINE && !GCNLLR_NATIVE_DRAW_SINK
+#include "checkpoint.inc"
+#endif
 const GcnllrNativeGxApi api={GCNLLR_NATIVE_GX_ABI,start,fifo,drain,status,peek,stop,present,service,
-    GCNLLR_NATIVE_GX_RESIDENT_COPY|(GCNLLR_GX_COOPERATIVE_VI ? GCNLLR_NATIVE_GX_COMPLETED_SCANOUT : 0u)
+    GCNLLR_NATIVE_GX_RESIDENT_COPY|GCNLLR_NATIVE_GX_SLICED_TEXTURE_COPIES
+        |(GCNLLR_GX_COOPERATIVE_VI ? GCNLLR_NATIVE_GX_COMPLETED_SCANOUT : 0u)
         |(GCNLLR_ASYNC_COPIES ? GCNLLR_NATIVE_GX_STREAMED_COPY : 0u)
         |(GCNLLR_COMPOSED_SCANOUT ? GCNLLR_NATIVE_GX_DEFERRED_RETIREMENT : 0u)
         |(GCNLLR_GPU_OWNED_DISPLAY ? GCNLLR_NATIVE_GX_DISPLAY_COLOR|GCNLLR_NATIVE_GX_COPY_RANGE : 0u)
@@ -1443,27 +1503,98 @@ extern "C" bool gcnllr_aurora_retail_bp(uint32_t reg,uint32_t value) {
 extern "C" GCNLLR_EXPORT const GcnllrNativeGxApi* gcnllr_native_gx_get_api(uint32_t abi) {
     return abi==GCNLLR_NATIVE_GX_ABI ? &api : nullptr;
 }
+
+void gcnllr::draw_mouse_settings() {
+    if (!mouse_controls.settings_open() || !ImGui::GetCurrentContext())
+        return;
+    namespace mk = gcnllr::keyboard_mouse;
+    const auto& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos({io.DisplaySize.x * .5f, io.DisplaySize.y * .5f},
+                            ImGuiCond_Always, {.5f,.5f});
+    ImGui::SetNextWindowSize({std::min(380.f, io.DisplaySize.x * .9f), 0.f});
+    bool open = true;
+    if (ImGui::Begin("Mouse + Keyboard", &open,
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_AlwaysAutoResize)) {
+        int percent = mouse_controls.sensitivity();
+        if (ImGui::SliderInt("Aim sensitivity", &percent, mk::min_sensitivity, mk::max_sensitivity, "%d%%"))
+            mouse_controls.set_sensitivity(percent);
+        ImGui::SetItemDefaultFocus();
+        if (mouse_controls.save_failed())
+            ImGui::TextUnformatted("Sensitivity could not be saved.");
+        if (ImGui::Button("Resume"))
+            open = false;
+    }
+    ImGui::End();
+    if (!open)
+        mouse_controls.close_settings();
+}
+extern "C" GCNLLR_EXPORT const GcnllrNativeGxCheckpointApi* gcnllr_native_gx_get_checkpoint_api(uint32_t abi) {
+#if !GCNLLR_RETAIL_PIPELINE && !GCNLLR_NATIVE_DRAW_SINK
+    if(abi==GCNLLR_NATIVE_GX_CHECKPOINT_ABI && checkpoint_supported())return &checkpoint_api;
+#else
+    (void)abi;
+#endif
+    return nullptr;
+}
 extern "C" GCNLLR_EXPORT int gcnllr_native_gx_gamecube_input(uint32_t abi, GcnllrGameCubeInput* output) {
     if (abi != GCNLLR_GAMECUBE_INPUT_ABI || !output || !gamecube_pads.enabled())
         return 0;
     *output = gamecube_pads.input();
     return 1;
 }
-extern "C" GCNLLR_EXPORT void gcnllr_native_gx_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows) {
-    gcnllr::gpu_bridge::set_scanout_view(x,y,columns,rows);
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_keyboard_mouse(uint32_t port, uint32_t consume,
+                                                           GcnllrKeyboardMouseInput* output) {
+    const int keyboard_port = gamecube_pads.keyboard_port();
+    return output && keyboard_port >= 0 && port == static_cast<uint32_t>(keyboard_port) &&
+        mouse_controls.read(consume, *output);
+}
+extern "C" GCNLLR_EXPORT void gcnllr_native_gx_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows,
+                                                           uint32_t aspect_width,uint32_t aspect_height,
+                                                           uint32_t trim_lines) {
+    gcnllr::gpu_bridge::set_scanout_view(x,y,columns,rows,aspect_width,aspect_height,trim_lines);
+}
+
+extern "C" GCNLLR_EXPORT void gcnllr_native_gx_scanout_timing(uint64_t native_ns) {
+    gcnllr::gpu_bridge::set_scanout_timing(native_ns);
 }
 
 extern "C" GCNLLR_EXPORT int gcnllr_native_gx_overlay_layout(uint32_t columns,uint32_t rows,uint32_t tiles,
-                                                            uint32_t width,uint32_t height) {
+                                                            uint32_t width,uint32_t height,float aspect) {
 #if GCNLLR_RETAIL_PIPELINE
     if(!retail_active || !frontend)return 0;
     if(tiles && (!columns || columns>2 || rows!=2 || !width || !height || width>640 || height>480))return 0;
     if(!flush_commands())return 0;
     flush_geometry();
-    gcnllr_aurora_retail_overlay(columns,rows,tiles,width,height);
+    gcnllr_aurora_retail_overlay(columns,rows,tiles,width,height,aspect);
     return 1;
 #else
     (void)columns;(void)rows;(void)tiles;(void)width;(void)height;
+    return 0;
+#endif
+}
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_overlay_split(float split,float shift) {
+#if GCNLLR_RETAIL_PIPELINE
+    if(!retail_active || !frontend || !flush_commands())return 0;
+    flush_geometry();
+    gcnllr_aurora_retail_overlay_split(split,shift);
+    return 1;
+#else
+    (void)split;(void)shift;
+    return 0;
+#endif
+}
+
+extern "C" GCNLLR_EXPORT int gcnllr_native_gx_view_framing(float scale,float anchor_x,float anchor_y) {
+#if GCNLLR_RETAIL_PIPELINE
+    if(!retail_active || !frontend || !flush_commands())return 0;
+    flush_geometry();
+    gcnllr_aurora_retail_view_framing(scale,anchor_x,anchor_y);
+    return 1;
+#else
+    (void)scale;(void)anchor_x;(void)anchor_y;
     return 0;
 #endif
 }
@@ -1473,9 +1604,10 @@ extern "C" GCNLLR_EXPORT int gcnllr_native_gx_output_size(uint32_t* width,uint32
     if(!initialized || !width || !height ||
        !SDL_GetWindowSizeInPixels(aurora::window::get_sdl_window(),&w,&h) || w<=0 || h<=0)
         return 0;
-    *width=uint32_t(w);
-    *height=uint32_t(h);
-    return 1;
+    const auto viewport=aurora::webgpu::calculate_present_viewport(w,h,w,h);
+    *width=uint32_t(viewport.width);
+    *height=uint32_t(viewport.height);
+    return *width && *height;
 }
 extern "C" GCNLLR_EXPORT int gcnllr_native_gx_resize_window(uint32_t width,uint32_t height) {
     auto* window=initialized ? aurora::window::get_sdl_window():nullptr;

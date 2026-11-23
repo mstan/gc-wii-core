@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef GCNLLR_NATIVE_GX_H
 #define GCNLLR_NATIVE_GX_H
+#include <stddef.h>
 #include "display.h"
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,8 @@ extern "C" {
 #define GCNLLR_NATIVE_GX_DISPLAY_COLOR 32u
 #define GCNLLR_NATIVE_GX_COPY_RANGE 64u
 #define GCNLLR_NATIVE_GX_TEXTURE_VIEWS 128u
+/* The renderer invalidates whole-texture lookups when a later copy overlaps. */
+#define GCNLLR_NATIVE_GX_SLICED_TEXTURE_COPIES 256u
 #define GCNLLR_NATIVE_GX_COPY_DISPLAY 1u
 #define GCNLLR_NATIVE_GX_COPY_MATERIALIZING 2u
 
@@ -144,6 +147,16 @@ typedef struct {
 } GcnllrNativeGxApi;
 typedef const GcnllrNativeGxApi* (*GcnllrNativeGxGetApi)(uint32_t abi);
 
+/* Optional checkpoints for the synchronous renderer. Call at a stopped
+ * machine boundary after retiring published copies to guest memory. */
+#define GCNLLR_NATIVE_GX_CHECKPOINT_ABI 1u
+typedef struct {
+    int (*capture)(void** bytes,size_t* size);
+    int (*restore)(const void* bytes,size_t size);
+    void (*release)(void* bytes);
+} GcnllrNativeGxCheckpointApi;
+typedef const GcnllrNativeGxCheckpointApi* (*GcnllrNativeGxGetCheckpointApi)(uint32_t abi);
+
 /* Optional GameCube input export. It does not change the renderer ABI used
  * by hosts with their own controller stack. */
 #define GCNLLR_GAMECUBE_INPUT_ABI 1u
@@ -152,6 +165,20 @@ typedef struct {
     GcnllrPad ports[4];
 } GcnllrGameCubeInput;
 typedef int (*GcnllrNativeGxGameCubeInput)(uint32_t abi, GcnllrGameCubeInput* output);
+
+typedef struct {
+    float yaw, pitch, strafe;
+    int32_t visor_step;
+    uint32_t lock_on;
+} GcnllrKeyboardMouseInput;
+
+enum {
+    GCNLLR_MOUSE_TAKE_AIM = 1,
+    GCNLLR_MOUSE_TAKE_VISOR = 2,
+    GCNLLR_MOUSE_NO_ACTIVATE = 4,
+    GCNLLR_MOUSE_COMBAT = 8,
+    GCNLLR_MOUSE_MORPH_BALL = 16
+};
 #ifdef __cplusplus
 }
 #endif

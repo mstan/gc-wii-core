@@ -152,6 +152,17 @@ typedef struct {
     void*         field_hook_user;
 } GcnVi;
 
+/* Registered device and its authoritative field index. Host callbacks,
+ * presentation caches and the borrowed SI comparator remain live. */
+typedef struct GcnViState {
+    u16 registers[GCN_VI_SIZE / 2];
+    u32 half_line,core_clock;
+    u64 now_cycles,last_cycles,ticks_last_line_start,fields;
+    u8 irq_level,reassert_sources;
+} GcnViState;
+bool gcn_vi_capture(const GcnVi*,GcnViState*);
+bool gcn_vi_restore(GcnVi*,const GcnViState*);
+
 void gcn_vi_init(GcnVi* vi);
 void gcn_vi_init_model(GcnVi* vi, bool is_wii);
 void gcn_vi_set_irq(GcnVi* vi, GcnViIrqFn fn, void* user);

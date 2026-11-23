@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+
+namespace gcnllr { void draw_mouse_settings(); }
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -10,7 +12,9 @@ namespace gxruntime::gxcore { struct EfbCopyCommand; }
 namespace aurora::gfx { struct TextureRef; namespace gxcore {struct OwnedTexture;} }
 struct GXTlutObj_;
 namespace gcnllr::gpu_bridge {
-void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows);
+void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows,
+                      uint32_t aspect_width,uint32_t aspect_height,uint32_t trim_lines);
+void set_scanout_timing(uint64_t native_ns);
 unsigned efb_scale(const char* setting);
 void initialize();
 bool settle_framebuffer();
@@ -44,6 +48,16 @@ struct DisplaySpan {EncodedImageHandle image;uint32_t source,destination,size;st
 bool present_display_spans(const std::vector<DisplaySpan>&,uint32_t width,uint32_t height);
 std::vector<uint8_t> read_efb(uint32_t& width,uint32_t& height);
 std::vector<uint32_t> read_depth(uint32_t& width,uint32_t& height);
+#if !GCNLLR_RETAIL_PIPELINE && !GCNLLR_NATIVE_DRAW_SINK
+struct EfbCheckpoint {
+    uint32_t width{},height{};
+    std::vector<uint8_t> rgba;
+    std::vector<uint32_t> native_depth;
+};
+bool checkpoint_efb_supported(uint32_t* width=nullptr,uint32_t* height=nullptr);
+EfbCheckpoint capture_efb();
+bool restore_efb(const EfbCheckpoint&);
+#endif
 void release_depth();
 void clear_efb(const gxruntime::gxcore::EfbCopyCommand& copy);
 bool present(const uint8_t* yuy2,uint32_t width,uint32_t height,uint32_t stride);

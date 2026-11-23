@@ -97,6 +97,16 @@ fn copy_byte(address:u32,subpixel:vec2<u32>) -> u32 {
 static wgpu::ComputePipeline texture_view_pipeline;
 static uint64_t texture_view_count;
 
+static void prepare_texture_view_pipeline() {
+    wgpu::ShaderSourceWGSL wgsl{};
+    wgsl.code=texture_view_shader;
+    const wgpu::ShaderModuleDescriptor shader{.nextInChain=&wgsl,.label="GX tiled texture sampling view"};
+    const auto module=gpu::g_device.CreateShaderModule(&shader);
+    const wgpu::ComputePipelineDescriptor pipeline{.label="GX tiled texture sampling view",
+        .compute={.module=module,.entryPoint="main"}};
+    texture_view_pipeline=gpu::g_device.CreateComputePipeline(&pipeline);
+}
+
 gfx::TextureHandle reinterpret_texture(const gfx::gxcore::OwnedTexture& copy,
                                        uint32_t format,uint32_t width,uint32_t height) {
     const auto& source=copy.texture;
@@ -119,14 +129,6 @@ gfx::TextureHandle reinterpret_texture(const gfx::gxcore::OwnedTexture& copy,
     if((!logical_i8 && (!scale_x || !scale_y)) || !gpu::g_device.GetLimits(&limits) ||
        width>limits.maxTextureDimension2D/view_scale_x || height>limits.maxTextureDimension2D/view_scale_y)return {};
     const wgpu::Extent3D size{width*view_scale_x,height*view_scale_y,1};
-    if(!texture_view_pipeline) {
-        wgpu::ShaderSourceWGSL wgsl{};wgsl.code=texture_view_shader;
-        const wgpu::ShaderModuleDescriptor shader{.nextInChain=&wgsl,.label="GX tiled texture sampling view"};
-        const auto module=gpu::g_device.CreateShaderModule(&shader);
-        const wgpu::ComputePipelineDescriptor pipeline{.label="GX tiled texture sampling view",
-            .compute={.module=module,.entryPoint="main"}};
-        texture_view_pipeline=gpu::g_device.CreateComputePipeline(&pipeline);
-    }
     constexpr auto storage_format=wgpu::TextureFormat::RGBA8Unorm;
     const wgpu::TextureDescriptor storage{.label="Retained GX texture sampling view",
         .usage=wgpu::TextureUsage::StorageBinding|wgpu::TextureUsage::TextureBinding,

@@ -94,7 +94,7 @@ fn synthesize(@builtin(global_invocation_id) id: vec3u) {
     if (any(p >= dims)) { return; }
     let before = textureLoad(prior, p, 0);
     let after = textureLoad(next, p, 0);
-    let time = (f32(id.z) + 1.0) / (f32(phases.x) + 1.0);
+    let time = (f32(id.z + phases.y) + 1.0) / (f32(phases.x) + 1.0);
     let nearest = select(before, after, time > 0.5);
     if (textureLoad(cut, vec2i(0), 0).r != 0.0) {
         textureStore(output, p, i32(id.z), nearest);
@@ -123,11 +123,14 @@ struct ScanoutInterpolation {
   wgpu::Texture midpointTexture;
   wgpu::Buffer phaseUniform;
   uint32_t width = 0, height = 0, layers = 0;
-  std::array<std::array<webgpu::TextureWithSampler, MaxGenerated+1>, 2> held;
+  std::array<std::array<webgpu::TextureWithSampler, MaxGenerated+1>, 3> held;
   unsigned heldSet = 0;
   bool hasPrevious = false;
-  double midpointBudget = 0.0;
+  uint32_t targetFps = 0;
+  double generatedCredit = 0.0;
+  uint64_t lastNativeNs = 0;
   PresentClock::time_point lastFrame{};
+  PresentClock::time_point lastSlot{};
 
   void prepare(const webgpu::TextureWithSampler& source, uint32_t count) {
     if (!estimate) {
@@ -174,7 +177,8 @@ struct ScanoutInterpolation {
 
   void encode(wgpu::CommandEncoder& encoder, const webgpu::TextureWithSampler& prior,
               const webgpu::TextureWithSampler& next,
-              const std::array<webgpu::TextureWithSampler, MaxGenerated+1>& targets, uint32_t count) {
+              const std::array<webgpu::TextureWithSampler, MaxGenerated+1>& targets,
+              uint32_t count, uint32_t firstPhase, uint32_t totalPhases) {
     const auto dispatch = [&encoder](const wgpu::ComputePipeline& pipeline,
                                     const auto& entries, uint32_t x, uint32_t y, uint32_t z,
                                     const char* name) {
@@ -188,7 +192,7 @@ struct ScanoutInterpolation {
       pass.DispatchWorkgroups(x, y, z);
       pass.End();
     };
-    const std::array<uint32_t, 4> uniform{count,0,0,0};
+    const std::array<uint32_t, 4> uniform{totalPhases,firstPhase,0,0};
     g_queue.WriteBuffer(phaseUniform, 0, uniform.data(), sizeof(uniform));
     const uint32_t groupsX = (width + 7) / 8, groupsY = (height + 7) / 8;
     dispatch(estimate, std::array{wgpu::BindGroupEntry{.binding = 0, .textureView = prior.view},
@@ -219,79 +223,154 @@ static void release_machine_interpolation() { g_scanoutInterpolation = {}; }
 
 static void defer_scanout_phase(PresentClock::time_point due, PresentClock::duration spacing,
                                 const webgpu::TextureWithSampler* source,
-                                const EndFrameCallback& callback, uint64_t frameId, int step) {
+                                const EndFrameCallback& callback, uint64_t frameId, int step,
+                                uint32_t aspectWidth, uint32_t aspectHeight) {
   g_deferredPresents.push_back(
       DeferredPresent{.due = due, .source = source, .callback = callback,
-                      .gameFrame = frameId, .step = step, .discardAfter = due + spacing});
+                      .gameFrame = frameId, .step = step,
+                      .discardAfter = step < 0 ? PresentClock::time_point{} : due + spacing,
+                      .scanoutAspectWidth = aspectWidth, .scanoutAspectHeight = aspectHeight,
+                      .machineScanout = true});
 }
 
 static bool present_interpolated_scanout(wgpu::CommandEncoder& encoder,
-                                        const EndFrameCallback& callback, uint64_t frameId, uint32_t targetFps) {
-  const auto& source = webgpu::present_source();
-  if (!source.texture || source.format != wgpu::TextureFormat::RGBA8Unorm)
-    return false;
+                                        const EndFrameCallback& callback, const webgpu::TextureWithSampler& source,
+                                        uint64_t frameId, uint32_t targetFps,
+                                        uint32_t aspectWidth, uint32_t aspectHeight,
+                                        uint64_t nativeNs) {
   auto& interpolation = g_scanoutInterpolation;
+  if (!source.texture || source.format != wgpu::TextureFormat::RGBA8Unorm) {
+    interpolation.hasPrevious = false;
+    return false;
+  }
   const auto now = PresentClock::now();
+  gcnllr::present_trace::mark(gcnllr::present_trace::Lane::render,
+                            gcnllr::present_trace::Event::scanout_ready,frameId,nativeNs);
   const auto interval = now - interpolation.lastFrame;
   interpolation.lastFrame = now;
+  const auto nativeInterval = nativeNs > interpolation.lastNativeNs ? nativeNs - interpolation.lastNativeNs : 0;
+  const bool nativeCadence = interpolation.lastNativeNs != 0 && nativeInterval > 0 && nativeInterval < 70'000'000;
+  interpolation.lastNativeNs = nativeNs;
   const auto spacing = std::chrono::nanoseconds(1'000'000'000 / targetFps);
-  const bool continuous = interpolation.hasPrevious && interval < std::chrono::milliseconds(70);
-  // Real scanouts take the first opportunity. Extra scanouts during a
-  // transition reduce the time available for generated presentations.
-  interpolation.midpointBudget = continuous
-      ? std::clamp(interpolation.midpointBudget +
-          std::chrono::duration<double>(interval).count() * targetFps - 1.0, -2.0, MaxGenerated + 1.0)
-      : 0.0;
   const auto& previous = interpolation.held[interpolation.heldSet][MaxGenerated];
-  const bool generate = continuous && interpolation.midpointBudget >= 1.0 &&
-      previous.size.width == source.size.width && previous.size.height == source.size.height &&
-      g_gameFramePeriodNs >= 11'000'000 && g_gameFramePeriodNs <= 39'500'000;
-  const uint32_t count = generate
-      ? std::min(MaxGenerated, static_cast<uint32_t>(interpolation.midpointBudget)) : 0;
+  const bool continuous = interpolation.hasPrevious && interval < std::chrono::milliseconds(70) &&
+      interpolation.targetFps == targetFps;
+  const bool canBlend = continuous && previous.size.width == source.size.width &&
+      previous.size.height == source.size.height;
+  if (!continuous)
+    run_deferred_present();
+  const auto sourcePeriod = std::chrono::nanoseconds(std::clamp<int64_t>(g_gameFramePeriodNs, 0, 39'500'000));
+  // GameCube VI can publish up to 60 native scanouts per second. Above that
+  // rate, retain the established interpolation budget per source interval.
+  // The configured target selects the policy for the session.
+  const bool oversampled = targetFps > 60;
+  auto realDue = now;
+  auto firstDue = now;
+  uint32_t totalPhases = 0;
+  if (oversampled) {
+    // Hardware field timing survives render-worker scheduling jitter. Count
+    // authored XFB holds as elapsed VI periods when assigning interpolation
+    // phases. Keep the measured interval for presenters without VI timing.
+    const auto sourceInterval = nativeCadence
+        ? std::chrono::nanoseconds(nativeInterval)
+        : std::chrono::duration_cast<std::chrono::nanoseconds>(interval);
+    interpolation.generatedCredit = continuous ? std::clamp(interpolation.generatedCredit +
+        std::chrono::duration<double>(sourceInterval).count() * targetFps - 1.0, -2.0, MaxGenerated + 1.0) : 0.0;
+    // Round native fractional credit and carry its signed residue so a stable
+    // 60 Hz stream does not lose a phase between two new framebuffers.
+    const double rounding = nativeCadence ? 0.5 : 0.0;
+    const auto phases = static_cast<uint32_t>(
+        std::clamp(interpolation.generatedCredit + rounding, 0.0, static_cast<double>(MaxGenerated)));
+    if (canBlend && g_gameFramePeriodNs >= 11'000'000 && g_gameFramePeriodNs <= 39'500'000 &&
+        phases != 0) {
+      totalPhases = phases;
+      interpolation.generatedCredit -= totalPhases;
+    }
+  } else {
+    // The native-rate grid retains its phase through source cadence changes.
+    // Look ahead far enough for a slower source to supply the next image.
+    const auto lookahead = std::max(spacing * 5 / 4, sourcePeriod - spacing * 3 / 4);
+    realDue = now + lookahead;
+    firstDue = realDue;
+    if (continuous) {
+      const auto lastSlot = interpolation.lastSlot;
+      const auto slots = (realDue - lastSlot + spacing / 2) / spacing;
+      if (slots <= 0 && !g_deferredPresents.empty() &&
+          g_deferredPresents.back().due == lastSlot && g_deferredPresents.back().step < 0) {
+        realDue = lastSlot;
+        g_deferredPresents.pop_back();
+      } else {
+        const auto advance = std::max<decltype(spacing.count())>(slots, 1);
+        realDue = lastSlot + advance * spacing;
+        // A geometry change keeps native presents on the existing clock.
+        // Interpolated images require equal source dimensions.
+        if (canBlend)
+          totalPhases = static_cast<uint32_t>(std::min<decltype(advance)>(MaxGenerated, advance - 1));
+        firstDue = realDue - totalPhases * spacing;
+      }
+    }
+  }
+  // Do not encode phases whose deadline has already passed by a full slot.
+  // The surviving phases keep their position between the original sources.
+  const auto expired = (now - firstDue) / spacing;
+  const uint32_t firstPhase = static_cast<uint32_t>(
+      std::clamp<decltype(expired)>(expired, 0, totalPhases));
+  const uint32_t count = totalPhases - firstPhase;
   interpolation.hasPrevious = true;
-  interpolation.heldSet ^= 1;
+  interpolation.targetFps = targetFps;
+  interpolation.heldSet = (interpolation.heldSet + 1) % interpolation.held.size();
   auto& held = interpolation.held[interpolation.heldSet];
   flush_presents_from(&held.front(), &held.back());
   ensure_held_texture(held.back(), source);
   const wgpu::TexelCopyTextureInfo src{.texture = source.texture}, dst{.texture = held.back().texture};
   const wgpu::Extent3D extent{source.size.width, source.size.height, 1};
   encoder.CopyTextureToTexture(&src, &dst, &extent);
-  if (!count) {
-    // Pending presents temporarily replace the scanout override. Restore this
-    // packet's source before its ordinary real-frame callback runs.
-    run_deferred_present();
-    webgpu::set_present_source_override(&source);
-    g_lastDue = {};
+
+  if (oversampled && !count) {
+    interpolation.lastSlot = {};
     return false;
   }
 
-  interpolation.midpointBudget -= count;
-  interpolation.prepare(source, count);
-  for (uint32_t i = 0; i < count; ++i)
-    ensure_held_texture(held[i], source);
-  interpolation.encode(encoder, previous, source, held, count);
+  if (count) {
+    interpolation.prepare(source, count);
+    for (uint32_t i = 0; i < count; ++i)
+      ensure_held_texture(held[i], source);
+    interpolation.encode(encoder, previous, source, held, count, firstPhase, totalPhases);
+  }
   webgpu::gpu_prof::frame_end(encoder);
   const auto commands = encoder.Finish();
   g_queue.Submit(1, &commands);
   webgpu::gpu_prof::after_submit();
   after_submit();
+  if (oversampled) {
+    const auto start = PresentClock::now();
+    const auto lastSlot = interpolation.lastSlot;
+    firstDue = lastSlot.time_since_epoch().count() != 0
+        ? std::clamp(lastSlot + spacing, start, start + spacing) : start;
+    realDue = firstDue + spacing * count;
+  }
+  interpolation.lastSlot = realDue;
   if (g_presentLog)
-    std::fprintf(stderr, "[scanout-interpolation] frame=%llu target=%u phases=%u encode_us=%lld\n",
+    gcnllr::present_trace::record_text("[scanout-timing] frame=%llu ready_us=%lld due_us=%lld reset=%d size=%ux%u\n",
+                 static_cast<unsigned long long>(frameId),
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                     now.time_since_epoch()).count()),
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                     realDue.time_since_epoch()).count()), !continuous, source.size.width, source.size.height);
+  if (g_presentLog && count)
+    gcnllr::present_trace::record_text("[scanout-interpolation] frame=%llu target=%u phases=%u encode_us=%lld\n",
                  static_cast<unsigned long long>(frameId), targetFps, count,
                  static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
                      PresentClock::now() - now).count()));
-  if (frame_interp::dump_frame(frameId)) {
+  if (count && frame_interp::dump_frame(frameId)) {
     dump_texture(previous, "prior", frameId);
     dump_texture(held[0], "between", frameId);
     dump_texture(held.back(), "real", frameId);
   }
-  const auto start = PresentClock::now();
-  const auto due = g_lastDue.time_since_epoch().count() != 0
-      ? std::clamp(g_lastDue + spacing, start, start + spacing) : start;
   for (uint32_t i = 0; i < count; ++i)
-    defer_scanout_phase(due + i*spacing, spacing, &held[i], callback, frameId, static_cast<int>(i));
-  g_lastDue = due + count*spacing;
-  defer_present(g_lastDue, &held.back(), callback, frameId, -1);
+    defer_scanout_phase(firstDue + (firstPhase + i)*spacing, spacing, &held[i], callback, frameId,
+                        static_cast<int>(firstPhase + i), aspectWidth, aspectHeight);
+  defer_scanout_phase(realDue, spacing, &held.back(), callback, frameId, -1, aspectWidth, aspectHeight);
   deferred_present_tick();
   return true;
 }

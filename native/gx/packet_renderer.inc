@@ -63,7 +63,12 @@ public:
         }
         if (cache_placement) ++cache_placement_states;
         else if (duplicate) ++duplicate_draw_states;
-        else if (!core.submit_packet(packet)) return false;
+        else if (!core.submit_packet(packet)) {
+#if !GCNLLR_NATIVE_DRAW_SINK
+            if (const auto* reason=core.failure_reason()) throw std::runtime_error(reason);
+#endif
+            return false;
+        }
         if (is_bp && config.bp_write && (reg==0x45 || reg==0x47 || reg==0x48))
             ordered_bp_effect(reg,packet.state.value);
         return !failed.load();

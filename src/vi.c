@@ -405,6 +405,42 @@ int gcn_vi_xfb_info(u32* addr, u32* width, u32* height, u32* stride) {
     return (*addr != 0 && *width != 0 && *height != 0) ? 1 : 0;
 }
 
+bool gcn_vi_capture(const GcnVi* vi,GcnViState* state) {
+    if(!vi || vi!=s_vi || !state)return false;
+    memset(state,0,sizeof(*state));
+    memcpy(state->registers,vi->reg,sizeof(state->registers));
+    state->half_line=vi->half_line_count;
+    state->core_clock=vi->core_clock;
+    state->now_cycles=vi->now_cycles;
+    state->last_cycles=vi->last_cycles;
+    state->ticks_last_line_start=vi->ticks_last_line_start;
+    state->fields=s_vi_field_count;
+    state->irq_level=(u8)vi->irq_level;
+    state->reassert_sources=(u8)vi->reassert_sources;
+    return true;
+}
+
+bool gcn_vi_restore(GcnVi* vi,const GcnViState* state) {
+    if(!vi || vi!=s_vi || !state || vi->core_clock!=state->core_clock ||
+       state->last_cycles>state->now_cycles || state->ticks_last_line_start>state->now_cycles ||
+       state->irq_level>1 || state->reassert_sources>1)return false;
+    memcpy(vi->reg,state->registers,sizeof(vi->reg));
+    vi->half_line_count=state->half_line;
+    vi->now_cycles=state->now_cycles;
+    vi->last_cycles=state->last_cycles;
+    vi->ticks_last_line_start=state->ticks_last_line_start;
+    vi->irq_level=state->irq_level;
+    vi->reassert_sources=state->reassert_sources!=0;
+    vi->tphl_cache=0;
+    vi->tphl_key=UINT32_MAX;
+    s_vi_field_count=state->fields;
+#ifndef GCNLLR_VI_DEVICE_ONLY
+    s_presented_xfb_generation=0;
+    s_vi_field_first_qpc_set=0;
+#endif
+    return true;
+}
+
 u64 gcn_vi_get_field_count(void) {
     return s_vi_field_count;
 }

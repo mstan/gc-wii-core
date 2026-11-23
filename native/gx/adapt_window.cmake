@@ -25,10 +25,39 @@ list(APPEND _gcnllr_core_sources "${_gcnllr_window_path}")
 set_property(TARGET aurora_core PROPERTY SOURCES "${_gcnllr_core_sources}")
 target_include_directories(aurora_core PRIVATE "${GXRUNTIME_DIR}/graphics/aurora/lib")
 
+# A profile can retain compiled device blobs when it changes portable seeds.
+# The caller still owns exclusive use of the writable profile cache.
+set(_gcnllr_device_cache_source "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu_cache.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_gcnllr_device_cache_source}")
+file(READ "${_gcnllr_device_cache_source}" _gcnllr_device_cache)
+set(_gcnllr_device_cache_path "reinterpret_cast<const char8_t*>(g_config.cachePath)")
+string(FIND "${_gcnllr_device_cache}" "${_gcnllr_device_cache_path}" _gcnllr_device_cache_offset)
+if(_gcnllr_device_cache_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned Aurora device cache path differs")
+endif()
+string(PREPEND _gcnllr_device_cache
+  "#include <SDL3/SDL_stdinc.h>\n#include \"${CMAKE_CURRENT_LIST_DIR}/sqlite_cache.hpp\"\n")
+string(REPLACE "static std::filesystem::path cache_path() {"
+  "static std::filesystem::path cache_path() {\n  const auto* directory = SDL_getenv(\"GCNLLR_DEVICE_CACHE_DIRECTORY\");"
+  _gcnllr_device_cache "${_gcnllr_device_cache}")
+string(REPLACE "${_gcnllr_device_cache_path}"
+  "reinterpret_cast<const char8_t*>(directory && *directory ? directory : g_config.cachePath)"
+  _gcnllr_device_cache "${_gcnllr_device_cache}")
+string(REPLACE "sqlite3_open(file.c_str(), &db)" "gcnllr::open_shader_cache(file.c_str(), &db)"
+  _gcnllr_device_cache "${_gcnllr_device_cache}")
+set(_gcnllr_device_cache_adapted "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gpu_cache.cpp")
+file(CONFIGURE OUTPUT "${_gcnllr_device_cache_adapted}" CONTENT "${_gcnllr_device_cache}" @ONLY)
+get_target_property(_gcnllr_core_sources aurora_core SOURCES)
+list(REMOVE_ITEM _gcnllr_core_sources lib/webgpu/gpu_cache.cpp)
+list(APPEND _gcnllr_core_sources "${_gcnllr_device_cache_adapted}")
+set_property(TARGET aurora_core PROPERTY SOURCES "${_gcnllr_core_sources}")
+set_source_files_properties("${_gcnllr_device_cache_adapted}" TARGET_DIRECTORY aurora_core
+  PROPERTIES INCLUDE_DIRECTORIES "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu")
+
 # Dawn's Windows loader requires absolute runtime search directories. A DLL
 # service cannot assume that the caller's executable sits beside Dawn/DXC.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu.cpp" _gcnllr_gpu)
-string(PREPEND _gcnllr_gpu "#include <SDL3/SDL_hints.h>\n")
+string(PREPEND _gcnllr_gpu "#include <atomic>\n#include <SDL3/SDL_hints.h>\n")
 set(_gcnllr_power ".powerPreference = wgpu::PowerPreference::HighPerformance,")
 string(FIND "${_gcnllr_gpu}" "${_gcnllr_power}" _gcnllr_power_offset)
 if(_gcnllr_power_offset EQUAL -1)
@@ -48,7 +77,18 @@ if(_gcnllr_present_offset EQUAL -1)
   message(FATAL_ERROR "Pinned native GPU presentation viewport differs")
 endif()
 string(REPLACE "${_gcnllr_present}"
-  "  if (SDL_GetHintBoolean(\"GCNLLR_GX_FILL_WINDOW\", false))\n    return {0.f, 0.f, static_cast<float>(surface_width), static_cast<float>(surface_height), 0.f, 1.f};\n\n${_gcnllr_present}"
+  [=[  if (const uint32_t aspect = g_fixed_present_aspect.load(std::memory_order_relaxed)) {
+    content_width = aspect >> 16;
+    content_height = aspect & 0xffffu;
+  } else if (SDL_GetHintBoolean("GCNLLR_GX_FILL_WINDOW", false)) {
+    return {0.f, 0.f, static_cast<float>(surface_width), static_cast<float>(surface_height), 0.f, 1.f};
+  }
+
+  uint32_t viewport_width = surface_width;]=]
+  _gcnllr_gpu "${_gcnllr_gpu}")
+set(_gcnllr_viewport "Viewport calculate_present_viewport(")
+string(REPLACE "${_gcnllr_viewport}"
+  "static std::atomic<uint32_t> g_fixed_present_aspect;\n\nvoid set_fixed_present_aspect(uint32_t width, uint32_t height) noexcept {\n  g_fixed_present_aspect.store(width && height ? (width << 16) | height : 0, std::memory_order_relaxed);\n}\n\n${_gcnllr_viewport}"
   _gcnllr_gpu "${_gcnllr_gpu}")
 set(_gcnllr_resize "void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force) {\n  const gfx::render_worker::Pause pause{gfx::flush_deferred_presents};")
 string(FIND "${_gcnllr_gpu}" "${_gcnllr_resize}" _gcnllr_resize_offset)
@@ -139,6 +179,22 @@ set(_gcnllr_readback_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/efb_readb
 file(CONFIGURE OUTPUT "${_gcnllr_readback_path}" CONTENT "${_gcnllr_readback}" @ONLY)
 
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/aurora.cpp" _gcnllr_surface)
+function(gcnllr_trace_boundary variable before after)
+  string(FIND "${${variable}}" "${before}" offset)
+  if(offset LESS 0)
+    message(FATAL_ERROR "Pinned Aurora timing boundary differs: ${before}")
+  endif()
+  string(REPLACE "${before}" "${after}" adapted "${${variable}}")
+  set(${variable} "${adapted}" PARENT_SCOPE)
+endfunction()
+gcnllr_trace_boundary(_gcnllr_surface "g_surface.GetCurrentTexture(&surfaceTexture);"
+  "hitch::mark(hitch::Lane::render, hitch::Event::acquire_begin);\n        g_surface.GetCurrentTexture(&surfaceTexture);\n        hitch::mark(hitch::Lane::render, hitch::Event::acquire_end);")
+gcnllr_trace_boundary(_gcnllr_surface "const auto buffer = encoder.Finish(&cmdBufDescriptor);"
+  "hitch::mark(hitch::Lane::render, hitch::Event::finish_begin);\n    const auto buffer = encoder.Finish(&cmdBufDescriptor);")
+gcnllr_trace_boundary(_gcnllr_surface "g_queue.Submit(1, &buffer);"
+  "hitch::mark(hitch::Lane::render, hitch::Event::submit_begin);\n      g_queue.Submit(1, &buffer);\n      hitch::mark(hitch::Lane::render, hitch::Event::submit_end);")
+gcnllr_trace_boundary(_gcnllr_surface "status = g_surface.Present();"
+  "hitch::mark(hitch::Lane::render, hitch::Event::swap_begin);\n          status = g_surface.Present();\n          hitch::mark(hitch::Lane::render, hitch::Event::swap_end);")
 set(_gcnllr_surface_submit "    if (canPresent && g_surface) {\n      ZoneScopedN(\"Present\");")
 string(FIND "${_gcnllr_surface}" "${_gcnllr_surface_submit}" _gcnllr_surface_offset)
 if(_gcnllr_surface_offset EQUAL -1)
@@ -148,12 +204,13 @@ string(REPLACE "${_gcnllr_surface_submit}"
   "    if (canPresent && g_surface) {\n      gfx::efb_readback::after_surface_submit(currentTexture);\n      ZoneScopedN(\"Present\");"
   _gcnllr_surface "${_gcnllr_surface}")
 string(PREPEND _gcnllr_surface
-  "#include <webgpu/webgpu_cpp.h>\nnamespace aurora::gfx::efb_readback { void after_surface_submit(const wgpu::Texture&) noexcept; }\n")
+  "#include \"${CMAKE_CURRENT_LIST_DIR}/present_trace.hpp\"\n#include <webgpu/webgpu_cpp.h>\nnamespace hitch = gcnllr::present_trace;\nnamespace aurora::gfx::efb_readback { void after_surface_submit(const wgpu::Texture&) noexcept; }\n")
 set(_gcnllr_surface_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/aurora.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_surface_path}" CONTENT "${_gcnllr_surface}" @ONLY)
 get_target_property(_gcnllr_core_sources aurora_core SOURCES)
 list(REMOVE_ITEM _gcnllr_core_sources lib/aurora.cpp)
 list(APPEND _gcnllr_core_sources "${_gcnllr_surface_path}")
+
 set_property(TARGET aurora_core PROPERTY SOURCES "${_gcnllr_core_sources}")
 get_target_property(_gcnllr_readback_sources aurora_gx SOURCES)
 list(REMOVE_ITEM _gcnllr_readback_sources lib/gfx/efb_readback.cpp)
@@ -200,6 +257,13 @@ set_source_files_properties("${_gcnllr_gx_path}" TARGET_DIRECTORY aurora_gx
 set(_gcnllr_pipeline_original "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/pipeline_cache.cpp")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_gcnllr_pipeline_original}")
 file(READ "${_gcnllr_pipeline_original}" _gcnllr_pipeline)
+string(PREPEND _gcnllr_pipeline
+  "#include \"${CMAKE_CURRENT_LIST_DIR}/sqlite_cache.hpp\"\n")
+gcnllr_draw_packet_replace(_gcnllr_pipeline
+  "std::filesystem::path{g_config.cachePath} / \"pipeline_cache.db\""
+  "std::filesystem::path{reinterpret_cast<const char8_t*>(g_config.cachePath)} / \"pipeline_cache.db\"")
+gcnllr_draw_packet_replace(_gcnllr_pipeline "sqlite3_open(path.c_str(), &g_pipelineCacheDb)"
+  "gcnllr::open_shader_cache(path.c_str(), &g_pipelineCacheDb)")
 if(_gcnllr_draw_packet_header)
   gcnllr_draw_packet_replace(_gcnllr_pipeline "#include \"../gx/pipeline.hpp\""
     "#include \"${_gcnllr_draw_packet_header}\"")
@@ -290,6 +354,21 @@ if(GCNLLR_GPU_FRAME_PACKETS)
 
 #ifdef AURORA_ENABLE_GXCORE]=] _gcnllr_pipeline "${_gcnllr_pipeline}")
   if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
+    # Retail draws use their exact pipelines. The host SDK's initial GXCore
+    # work can use a specialized pipeline instead of starting the generic
+    # compiler before the first frame or prewarming its unused cache entries.
+    set(_gcnllr_uber_default "    return webgpu::g_backendType == wgpu::BackendType::D3D12 ? 1 : 0;")
+    set(_gcnllr_uber_cached "      if (const int8_t uber = ubershader_of(config); uber >= 0) {")
+    foreach(_gcnllr_uber_anchor IN ITEMS "${_gcnllr_uber_default}" "${_gcnllr_uber_cached}")
+      string(FIND "${_gcnllr_pipeline}" "${_gcnllr_uber_anchor}" _gcnllr_uber_offset)
+      if(_gcnllr_uber_offset EQUAL -1)
+        message(FATAL_ERROR "Pinned retail ubershader boundary differs: ${_gcnllr_uber_anchor}")
+      endif()
+    endforeach()
+    string(REPLACE "${_gcnllr_uber_default}" "    return 0;" _gcnllr_pipeline "${_gcnllr_pipeline}")
+    string(REPLACE "${_gcnllr_uber_cached}"
+      "      if (ubershader_mode() == 0 && ubershader_of(config) >= 0)\n        continue;\n${_gcnllr_uber_cached}"
+      _gcnllr_pipeline "${_gcnllr_pipeline}")
     set(_gcnllr_pipeline_clear "  g_pipelines.clear();\n  g_pipelineQueue.clear();")
     string(FIND "${_gcnllr_pipeline}" "${_gcnllr_pipeline_clear}" _gcnllr_pipeline_clear_at)
     if(_gcnllr_pipeline_clear_at EQUAL -1)
@@ -574,6 +653,34 @@ if(_gcnllr_direct_fusion_offset EQUAL -1)
 endif()
 string(REPLACE "${_gcnllr_direct_fusion}" "!pending_state_.bp_valid(GxCoreState::kDrawTagRegister))"
   _gcnllr_core "${_gcnllr_core}")
+if(GCNLLR_RENDER_PIPELINE STREQUAL "packet")
+  # Save the consumer's guest resource bindings along with the planner state.
+  # Keep the original packet path and its validation for reopening bindings.
+  set(_checkpoint_include "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/include")
+  set(_sink_header "${GXRUNTIME_DIR}/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_sink_header}")
+  file(READ "${_sink_header}" _sink_source)
+  set(_sink_anchor "  const ConsumedTexture& bound_texture() const { return bound_texture_; }")
+  string(FIND "${_sink_source}" "${_sink_anchor}" _sink_offset)
+  if(_sink_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned GX consumer checkpoint adaptation differs")
+  endif()
+  string(REPLACE "${_sink_anchor}" "${_sink_anchor}\n  const ConsumedTexture& bound_texture_at(std::uint32_t slot) const { return bound_textures_[slot]; }\n  void start_packet_stream() { has_last_sequence_ = false; }"
+    _sink_source "${_sink_source}")
+  file(CONFIGURE OUTPUT "${_checkpoint_include}/gxruntime/aurora_recomp/render_sink.hpp"
+    CONTENT "${_sink_source}" @ONLY)
+  foreach(_target gxruntime_aurora_render_sink gxruntime_retail_gx_frontend gxruntime_gxcore)
+    target_include_directories(${_target} BEFORE PUBLIC "$<BUILD_INTERFACE:${_checkpoint_include}>")
+  endforeach()
+  string(FIND "${_gcnllr_core}" "namespace {\nconstexpr std::uint32_t kSinkStateMagic" _checkpoint_begin)
+  string(FIND "${_gcnllr_core}" "} // namespace gxruntime::gxcore" _checkpoint_end REVERSE)
+  if(_checkpoint_begin EQUAL -1 OR _checkpoint_end LESS _checkpoint_begin)
+    message(FATAL_ERROR "Pinned GX planner checkpoint adaptation differs")
+  endif()
+  string(SUBSTRING "${_gcnllr_core}" 0 ${_checkpoint_begin} _core_prefix)
+  string(SUBSTRING "${_gcnllr_core}" ${_checkpoint_end} -1 _core_suffix)
+  set(_gcnllr_core "${_core_prefix}#include \"${CMAKE_CURRENT_LIST_DIR}/gxcore_checkpoint.inc\"\n\n${_core_suffix}")
+endif()
 set(_gcnllr_core_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gxcore.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_core_path}" CONTENT "${_gcnllr_core}" @ONLY)
 get_target_property(_gcnllr_core_sources gxruntime_gxcore SOURCES)
@@ -745,13 +852,16 @@ string(FIND "${_gcnllr_common}" "${_gcnllr_midpoint_anchor}" _gcnllr_midpoint_of
 if(_gcnllr_midpoint_offset LESS 0)
   message(FATAL_ERROR "Pinned Aurora presentation frame packet differs")
 endif()
-string(REPLACE "${_gcnllr_midpoint_anchor}" "${_gcnllr_midpoint_anchor}\n  uint32_t scanoutTarget = 0;"
+string(REPLACE "${_gcnllr_midpoint_anchor}"
+  "${_gcnllr_midpoint_anchor}\n  std::shared_ptr<const webgpu::TextureWithSampler> scanoutSource;\n  uint32_t scanoutTarget = 0;\n  uint32_t scanoutAspectWidth = 0;\n  uint32_t scanoutAspectHeight = 0;\n  uint64_t scanoutNativeNs = 0;"
   _gcnllr_common "${_gcnllr_common}")
 foreach(_gcnllr_midpoint_boundary IN ITEMS
     "static bool note_game_frame_end();"
     "    const auto stats = packet.stats;"
+    "      interpolate = packet.interpolate && callback && periodKnown;"
+    "      hold = !interpolate && callback && periodKnown && frame_interp::enabled();"
     "    if (!clocked)\n      run_deferred_present();"
-    "    } else if (callback) {\n      if (presents)"
+    "    } else if (callback) {\n      if (presents)\n        g_heldShown = false;\n      callback(encoder);"
     "  g_deferredPresents.clear();"
     "  int step = 0;           // the in-between frame's step, or -1 for the real frame"
     "  log_present(kind, present.gameFrame, present.step, present.due);"
@@ -762,31 +872,68 @@ foreach(_gcnllr_midpoint_boundary IN ITEMS
   endif()
 endforeach()
 string(REPLACE "static bool note_game_frame_end();"
-  "static bool note_game_frame_end();\nstatic bool present_interpolated_scanout(wgpu::CommandEncoder&, const EndFrameCallback&, uint64_t, uint32_t);\nstatic void release_machine_interpolation();"
+  "static bool note_game_frame_end();\nstatic bool present_interpolated_scanout(wgpu::CommandEncoder&, const EndFrameCallback&, const webgpu::TextureWithSampler&, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t);\nstatic void release_machine_interpolation();"
   _gcnllr_common "${_gcnllr_common}")
 string(REPLACE "    const auto stats = packet.stats;"
-  "    const auto stats = packet.stats;\n    const auto scanoutTarget = packet.presents ? packet.scanoutTarget : 0u;\n    const auto nativeFrameId = packet.frameId;"
+  "    const auto stats = packet.stats;\n    const auto scanout = std::move(packet.scanoutSource);\n    const auto scanoutTarget = packet.presents && scanout ? packet.scanoutTarget : 0u;\n    const auto scanoutAspectWidth = packet.scanoutAspectWidth;\n    const auto scanoutAspectHeight = packet.scanoutAspectHeight;\n    const auto scanoutNativeNs = packet.scanoutNativeNs;\n    const auto nativeFrameId = packet.frameId;"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "      interpolate = packet.interpolate && callback && periodKnown;"
+  "      interpolate = !scanout && packet.interpolate && callback && periodKnown;"
+  _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "      hold = !interpolate && callback && periodKnown && frame_interp::enabled();"
+  "      hold = !scanout && !interpolate && callback && periodKnown && frame_interp::enabled();"
   _gcnllr_common "${_gcnllr_common}")
 string(REPLACE "    if (!clocked)\n      run_deferred_present();"
-  "    const bool presentedScanout = !interpolate && scanoutTarget && callback &&\n        present_interpolated_scanout(encoder, callback, nativeFrameId, scanoutTarget);\n    if (!clocked && !presentedScanout)\n      run_deferred_present();"
+  "    const bool presentedScanout = scanoutTarget && callback &&\n        present_interpolated_scanout(encoder, callback, *scanout, nativeFrameId, scanoutTarget,\n                                     scanoutAspectWidth, scanoutAspectHeight, scanoutNativeNs);\n    // A render segment submitted for a copy or readback carries no new scanout.\n    if (presents && !clocked && !presentedScanout)\n      run_deferred_present();"
   _gcnllr_common "${_gcnllr_common}")
-string(REPLACE "    } else if (callback) {\n      if (presents)"
-  "    } else if (callback && !presentedScanout) {\n      if (presents)" _gcnllr_common "${_gcnllr_common}")
+string(REPLACE "    } else if (callback) {\n      if (presents)\n        g_heldShown = false;\n      callback(encoder);"
+  [=[    } else if (callback && !presentedScanout) {
+      if (presents)
+        g_heldShown = false;
+      if (presents && scanout) {
+        webgpu::set_fixed_present_aspect(scanoutAspectWidth, scanoutAspectHeight);
+        webgpu::set_present_source_override(scanout.get());
+      }
+      callback(encoder);
+      if (presents && scanout)
+        webgpu::set_present_source_override(nullptr);]=] _gcnllr_common "${_gcnllr_common}")
 string(REPLACE "  g_deferredPresents.clear();" "  g_deferredPresents.clear();\n  release_machine_interpolation();"
   _gcnllr_common "${_gcnllr_common}")
 string(REPLACE "  int step = 0;           // the in-between frame's step, or -1 for the real frame"
-  "  int step = 0;           // the in-between frame's step, or -1 for the real frame\n  PresentClock::time_point discardAfter{};"
+  "  int step = 0;           // the in-between frame's step, or -1 for the real frame\n  PresentClock::time_point discardAfter{};\n  uint32_t scanoutAspectWidth = 0;\n  uint32_t scanoutAspectHeight = 0;\n  bool machineScanout = false;"
   _gcnllr_common "${_gcnllr_common}")
 string(REPLACE "  log_present(kind, present.gameFrame, present.step, present.due);"
   [=[  if (present.discardAfter.time_since_epoch().count() != 0 && PresentClock::now() > present.discardAfter) {
     log_present("dropped-generated", present.gameFrame, present.step, present.due);
     return;
   }
+  if (present.machineScanout)
+    webgpu::set_fixed_present_aspect(present.scanoutAspectWidth, present.scanoutAspectHeight);
   log_present(kind, present.gameFrame, present.step, present.due);]=]
   _gcnllr_common "${_gcnllr_common}")
 string(REPLACE "void after_submit() noexcept {"
   "#include \"${CMAKE_CURRENT_LIST_DIR}/scanout_interpolation.inc\"\n\nvoid after_submit() noexcept {"
   _gcnllr_common "${_gcnllr_common}")
+gcnllr_trace_boundary(_gcnllr_common "  log_present(kind, present.gameFrame, present.step, present.due);"
+  "  hitch::mark(hitch::Lane::render, hitch::Event::present_selected, present.gameFrame, present.step);\n  log_present(kind, present.gameFrame, present.step, present.due);")
+gcnllr_trace_boundary(_gcnllr_common "  auto encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);\n  const auto start = PresentClock::now();\n  present.callback(encoder);"
+  "  hitch::mark(hitch::Lane::render, hitch::Event::encoder_begin, present.gameFrame);\n  auto encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);\n  hitch::mark(hitch::Lane::render, hitch::Event::callback_begin, present.gameFrame);\n  const auto start = PresentClock::now();\n  present.callback(encoder);\n  hitch::mark(hitch::Lane::render, hitch::Event::callback_end, present.gameFrame);")
+gcnllr_trace_boundary(_gcnllr_common "  const uint64_t present = g_shownFrames.fetch_add(1, std::memory_order_relaxed) + 1;"
+  "  const uint64_t present = g_shownFrames.fetch_add(1, std::memory_order_relaxed) + 1;\n  hitch::mark(hitch::Lane::render, hitch::Event::present_complete, present);")
+foreach(_gcnllr_present_message IN ITEMS present present-took encode-took display-timing)
+  gcnllr_trace_boundary(_gcnllr_common "std::fprintf(stderr, \"[${_gcnllr_present_message}]"
+    "hitch::record_text(\"[${_gcnllr_present_message}]")
+endforeach()
+# Drawing statistics already have their own explicit interpolation trace.
+# Keep them in the optional presentation capture without synchronous logging.
+gcnllr_trace_boundary(_gcnllr_common "  if (frame_interp::tracing() || g_presentLog ||"
+  [=[  if (g_presentLog)
+    hitch::record_text("[native-gx:aurora::gfx] In-between data for game frame %llu: %zu bytes of constants and %zu of vertices, %zu blocks did not fit; frame uniforms %zu bytes, vertices %zu, indices %zu, draws %zu (%zu merged)\n",
+        static_cast<unsigned long long>(frame_interp::game_frame_number()), size_t(interpSlot.uniformUsed),
+        size_t(interpSlot.vertexUsed), size_t(g_interpUniformOverflows), frame.uniforms.size(),
+        frame.verts.size(), frame.indices.size(), size_t(g_drawCallCount), size_t(g_mergedDrawCallCount));
+  if (frame_interp::tracing() ||]=])
+string(PREPEND _gcnllr_common "#include \"${CMAKE_CURRENT_LIST_DIR}/present_trace.hpp\"\n#include <cstdint>\n#include <memory>\nnamespace hitch = gcnllr::present_trace;\nnamespace aurora::webgpu {\nvoid set_fixed_present_aspect(std::uint32_t width, std::uint32_t height) noexcept;\n}\n")
 file(CONFIGURE OUTPUT "${_gcnllr_common_path}" CONTENT "${_gcnllr_common}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
 list(REMOVE_ITEM _gcnllr_gx_sources lib/gfx/common.cpp)

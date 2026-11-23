@@ -29,6 +29,13 @@ void machine_encode_tail(std::function<void(wgpu::CommandEncoder&)> encode) {
   machine_encode_after_resolve(std::move(encode));
 }
 
-void machine_interpolate_next_scanout(uint32_t targetFps) {
-  current_frame_packet().scanoutTarget = targetFps;
+void machine_present_next_scanout(std::shared_ptr<const webgpu::TextureWithSampler> source,
+                                  uint32_t targetFps, uint32_t aspectWidth, uint32_t aspectHeight,
+                                  uint64_t nativeNs) {
+  auto& packet = current_frame_packet();
+  packet.scanoutSource = std::move(source);
+  packet.scanoutTarget = targetFps;
+  packet.scanoutAspectWidth = aspectWidth;
+  packet.scanoutAspectHeight = aspectHeight;
+  packet.scanoutNativeNs = nativeNs;
 }

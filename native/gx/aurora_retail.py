@@ -259,6 +259,7 @@ extern "C" u32 gcnllr_aurora_retail_required(const u8* data,u32 size) {
     # machine binding exists; hooks are inert until its real FIFO takes over.
     prefix='''// SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from pinned RecompCore338a3dbc Aurora gx/command_processor.cpp.
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <list>
@@ -283,7 +284,7 @@ extern "C" bool gcnllr_aurora_geometry_epoch(const void*,uint32_t,uint32_t*,uint
     body=text[begin:end]
     text=text[:begin]+'  machine_draw_shared_overlay([&] {\n'+body+'\n  });'+text[end:]
     text=text.replace('MaxUniformSize*2u,0,storage',
-                      'MaxUniformSize*(machine_overlay.tiles ? 5u : 2u),0,storage')
+                      'MaxUniformSize*(machine_overlay_shift_x!=0.f ? 9u : machine_overlay.tiles ? 5u : 2u),0,storage')
     return prefix+text
 
 def compose_texture(text):

@@ -5,6 +5,15 @@
 static float machine_viewport[6]{};
 static decltype(g_gxState.proj) machine_projection;
 static bool machine_viewport_valid{},machine_projection_valid{},machine_raster_dirty=true;
+static float machine_view_scale=1.f,machine_view_anchor_x=0.f,machine_view_anchor_y=0.f;
+
+extern "C" void gcnllr_aurora_retail_view_framing(float scale,float anchor_x,float anchor_y) {
+    machine_view_scale=scale;
+    machine_view_anchor_x=anchor_x;
+    machine_view_anchor_y=anchor_y;
+    machine_raster_dirty=true;
+}
+
 static void machine_raster() {
     if(!machine_raster_dirty || !machine_viewport_valid || !machine_projection_valid)return;
     machine_raster_dirty=false;
@@ -13,6 +22,13 @@ static void machine_raster() {
     float projection[4][4],viewport[6];
     static_assert(sizeof(projection)==sizeof(machine_projection));
     std::memcpy(projection,&machine_projection,sizeof(projection));
+    if(machine_view_scale!=1.f) {
+        const float offset=1.f-machine_view_scale;
+        for(unsigned i=0;i<4;++i) {
+            projection[0][i]=machine_view_scale*projection[0][i]+offset*machine_view_anchor_x*projection[3][i];
+            projection[1][i]=machine_view_scale*projection[1][i]+offset*machine_view_anchor_y*projection[3][i];
+        }
+    }
     std::memcpy(viewport,machine_viewport,sizeof(viewport));
     gcnllr::remap_raster_viewport(projection,viewport,origin,640,480);
     std::memcpy(&g_gxState.proj,projection,sizeof(projection));

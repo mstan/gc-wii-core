@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "gpu_bridge.hpp"
+#include "present_trace.hpp"
 #if GCNLLR_GPU_OWNED_TEXTURES
 #include "owned_texture.hpp"
 #include "texture_encode.hpp"
@@ -48,7 +49,9 @@ void machine_copy_clear(const wgpu::RenderPipeline&,ClipRect,wgpu::Color,float);
 void machine_encode_after_resolve(std::function<void(wgpu::CommandEncoder&)>);
 void machine_seal_display_source(ClipRect);
 void machine_encode_tail(std::function<void(wgpu::CommandEncoder&)>);
-void machine_interpolate_next_scanout(uint32_t targetFps);
+void machine_present_next_scanout(std::shared_ptr<const webgpu::TextureWithSampler>,
+                                  uint32_t targetFps, uint32_t aspectWidth, uint32_t aspectHeight,
+                                  uint64_t native_ns);
 void machine_encode_before_draw(std::function<void(wgpu::CommandEncoder&)>);
 }
 
@@ -84,7 +87,12 @@ static gpu::TextureWithSampler scanout;
 // than letting a worker clear destroy it concurrently with that caller read.
 static std::shared_ptr<gpu::TextureWithSampler> queued_scanout;
 static std::shared_ptr<gpu::TextureWithSampler> local_scanout;
-static std::array<uint32_t,4> scanout_view{0,0,1,1};
+struct ScanoutView {
+    uint32_t x{},y{},columns{1},rows{1},aspect_width{},aspect_height{};
+    uint32_t trim_lines{};
+};
+static ScanoutView scanout_view;
+static uint64_t scanout_native_ns{};
 #endif
 static std::array<wgpu::RenderPipeline,8> clear_pipelines;
 static std::vector<uint8_t> pixels;
@@ -143,13 +151,13 @@ void submit_copies() {
 }
 static constexpr size_t display_param_words=GCNLLR_GPU_OWNED_DISPLAY ? 12 : 8;
 
-static wgpu::Buffer display_parameters(const DisplayBand& band,[[maybe_unused]] uint32_t first_pair=0,
-                                       [[maybe_unused]] uint32_t pair_count=0) {
+static wgpu::Buffer display_parameters(const DisplayBand& band,
+                                       [[maybe_unused]] std::array<uint32_t,2> range={}) {
     const std::array<uint32_t,display_param_words> values{band.weights[0],band.weights[1],band.weights[2],
         band.first_row | (band.capture_rows << 16),
         band.width,band.height,band.scale,band.source_x | (band.source_y << 16)
 #if GCNLLR_GPU_OWNED_DISPLAY
-        ,band.source_rows,std::bit_cast<uint32_t>(band.yscale),first_pair,pair_count
+        ,band.source_rows,std::bit_cast<uint32_t>(band.yscale),range[0],range[1]
 #endif
     };
     const wgpu::BufferDescriptor descriptor{.label="Immutable GameCube copy filter",
@@ -175,7 +183,7 @@ static void reserve_display_readback(uint64_t bytes) {
 static void encode_display_band(const wgpu::ComputePassEncoder& pass, const DisplayBand& band,
                                 const wgpu::TextureView& source, const wgpu::Buffer& output,
                                 uint64_t offset,uint32_t first_pair=0,uint32_t pair_count=0) {
-    const auto parameters=display_parameters(band,first_pair,pair_count);
+    const auto parameters=display_parameters(band,{first_pair,pair_count});
     const std::array entries{
         wgpu::BindGroupEntry{.binding=0,.textureView=source},
         wgpu::BindGroupEntry{.binding=1,.buffer=output,.offset=offset,.size=pair_count?uint64_t(pair_count)*4:band_bytes(band)},
@@ -278,9 +286,30 @@ R"(
 #if GCNLLR_GPU_OWNED_DISPLAY
 static constexpr char display_color_shader[]=R"(
 @group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+fn host_rgb(x: i32, y: i32, capture_height: i32) -> vec3<i32> {
+    return vec3<i32>(textureLoad(src, vec2<i32>(x,clamp(y,0,capture_height-1)), 0).rgb*255.0+0.5);
+}
+fn host_color(position: vec2<u32>) -> vec3<i32> {
+    let scale=parameters.geometry.z;
+    if (scale==1u) { return filtered(i32(position.x),i32(position.y)); }
+    // Keep individual EFB samples and apply the display filter at the
+    // finer texel spacing. The packed XFB encoder uses the guest spacing.
+    let capture_height=i32((parameters.weights.w>>16u)*scale);
+    let first_row=i32((parameters.weights.w&65535u)*scale);
+    let last_source_row=i32(parameters.stretch.x*scale)-1;
+    let source_row=min(last_source_row,i32((f32(position.y)+0.5)/bitcast<f32>(parameters.stretch.y)));
+    let row=first_row+source_row;
+    let x=i32(position.x);
+    let middle=host_rgb(x,row,capture_height);
+    let weights=parameters.weights.xyz;
+    if (all(weights==vec3<u32>(0u,64u,0u))) { return middle; }
+    let sum=host_rgb(x,row-1,capture_height)*i32(weights.x)+middle*i32(weights.y)+
+            host_rgb(x,row+1,capture_height)*i32(weights.z);
+    return min(sum>>vec3<u32>(6u),vec3<i32>(255));
+}
 @compute @workgroup_size(16,8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (any(id.xy>=parameters.geometry.xy)) { return; }
-    let color=filtered(i32(id.x),i32(id.y));
+    if (any(id.xy>=textureDimensions(dst))) { return; }
+    let color=host_color(id.xy+parameters.stretch.zw);
     textureStore(dst,vec2<i32>(id.xy),vec4<f32>(vec3<f32>(color)/255.0,1.0));
 }
 )";
@@ -334,6 +363,7 @@ gfx::TextureHandle colorize_ci8(const gfx::TextureHandle& source, const GXTlutOb
 void initialize() {
 #if GCNLLR_GPU_OWNED_TEXTURES
     texture_view_count=0;
+    prepare_texture_view_pipeline();
 #endif
     recorded_copies=false;recorded_encodes=observation_submissions=publication_joins=0;
     scanout_frames=scanout_joins=0;
@@ -767,13 +797,15 @@ void clear_efb(const gxruntime::gxcore::EfbCopyCommand& copy) {
         pass.End();const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
     });
 }
-static void prepare_scanout(uint32_t width,uint32_t height) {
+static void prepare_scanout(uint32_t width,uint32_t height,uint32_t scale=1) {
     validate_submission();
 #if !GCNLLR_QUEUED_PRESENT
     submit_copies();
 #endif
     if (!width || !height || width>640 || height>576 || (width&1))
         throw std::runtime_error("Invalid VI scanout");
+    width*=scale;
+    height*=scale;
     // The previous present must be submitted before its texture is updated.
     // Queue ordering then protects the previous frame without a GPU idle wait.
 #if !GCNLLR_QUEUED_PRESENT
@@ -814,7 +846,8 @@ static std::shared_ptr<gpu::TextureWithSampler> local_scanout_target(const wgpu:
     target->format=scanout.format;
     target->sampler=scanout.sampler;
     const wgpu::TextureDescriptor descriptor{.label="Local multiplayer scanout",
-        .usage=wgpu::TextureUsage::CopySrc|wgpu::TextureUsage::CopyDst|wgpu::TextureUsage::TextureBinding,
+        .usage=wgpu::TextureUsage::CopySrc|wgpu::TextureUsage::CopyDst|
+               wgpu::TextureUsage::TextureBinding|wgpu::TextureUsage::StorageBinding,
         .size=extent,.format=target->format};
     target->texture=gpu::g_device.CreateTexture(&descriptor);
     target->view=target->texture.CreateView();
@@ -822,7 +855,9 @@ static std::shared_ptr<gpu::TextureWithSampler> local_scanout_target(const wgpu:
     return target;
 }
 
-static bool queue_scanout_packet(std::function<void(wgpu::CommandEncoder&,const gpu::TextureWithSampler&)> encode) {
+static bool queue_scanout_packet(
+        std::function<void(wgpu::CommandEncoder&,const gpu::TextureWithSampler&,wgpu::Origin3D)> encode,
+        uint32_t color_scale=0) {
     static const uint32_t interpolationTarget = [] {
         const char* setting = std::getenv("GCNLLR_FRAME_INTERPOLATION");
         if (!setting) return 0u;
@@ -833,21 +868,28 @@ static bool queue_scanout_packet(std::function<void(wgpu::CommandEncoder&,const 
         return parsed.ec==std::errc{} && parsed.ptr==end && target>=31 &&
             target<=360 ? target : 0u;
     }();
-    // The override API borrows a pointer. Retain the exact texture generation
-    // through the queued clear, even if the caller changes geometry meanwhile.
+    // Keep the exact texture generation with its render packet, even if the
+    // caller changes geometry before the render worker reaches this frame.
     const auto target=queued_scanout;++scanout_frames;
     auto display=target;
     wgpu::Origin3D offset{};
-    const auto [column,row,columns,rows]=scanout_view;
-    if(columns>1 || rows>1) {
-        const auto width=target->size.width,height=target->size.height;
-        offset={width*column/columns,height*row/rows,0};
+    const auto [column,row,columns,rows,aspect_width,aspect_height,trim_lines]=scanout_view;
+    const auto width=target->size.width,height=target->size.height;
+    const auto scaled_trim=trim_lines*std::max(1u,color_scale);
+    const auto trim=scaled_trim*2<height ? scaled_trim : 0u;
+    if(columns>1 || rows>1 || trim) {
+        const auto content_height=height-trim*2;
+        offset={width*column/columns,trim+content_height*row/rows,0};
         display=local_scanout_target({width*(column+1)/columns-offset.x,
-                                      height*(row+1)/rows-offset.y,1});
+                                      trim+content_height*(row+1)/rows-offset.y,1});
     }
-    gfx::machine_encode_tail([target,display,offset,encode=std::move(encode)](wgpu::CommandEncoder& encoder) {
+    gfx::machine_encode_tail([target,display,offset,color_scale,encode=std::move(encode)](wgpu::CommandEncoder& encoder) {
         try {
-            encode(encoder,*target);
+            if(color_scale) {
+                encode(encoder,*display,offset);
+                return;
+            }
+            encode(encoder,*target,{});
             if(display!=target) {
                 const wgpu::TexelCopyTextureInfo from{.texture=target->texture,.origin=offset};
                 const wgpu::TexelCopyTextureInfo to{.texture=display->texture};
@@ -858,20 +900,25 @@ static bool queue_scanout_packet(std::function<void(wgpu::CommandEncoder&,const 
             if(!submission_error)submission_error=std::current_exception();
         }
     });
-    worker::enqueue_work([display] {gpu::set_present_source_override(display.get());});
-    if (interpolationTarget) gfx::machine_interpolate_next_scanout(interpolationTarget);
+    const bool adapted_view = display != target;
+    gfx::machine_present_next_scanout(std::move(display),interpolationTarget,
+                                     adapted_view ? aspect_width : 0,adapted_view ? aspect_height : 0,
+                                     scanout_native_ns);
+    draw_mouse_settings();
     aurora_end_frame();
-    worker::enqueue_work([display] {gpu::set_present_source_override(nullptr);});
+    present_trace::mark(present_trace::Lane::source,present_trace::Event::scanout_queued,scanout_frames);
     recorded_copies=false;
     aurora::imgui::new_frame(aurora::window::get_window_size());
     // Aurora's bounded frame packets provide backpressure. Real CPU/PE reads,
     // screenshot observations and shutdown still wait for their required data.
-    return gfx::begin_frame(true);
+    const bool ready=gfx::begin_frame(true);
+    present_trace::mark(present_trace::Lane::source,present_trace::Event::frame_slot_ready,scanout_frames);
+    return ready;
 }
 static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t height,
         std::vector<DisplaySpan> spans={},std::vector<uint8_t> cpu={}) {
     return queue_scanout_packet([buffer,width,height,spans=std::move(spans),cpu=std::move(cpu)]
-            (wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& target) {
+            (wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& target,wgpu::Origin3D) {
         // One worker orders uploads and submitted draws that share this input.
         if(!cpu.empty())gpu::g_queue.WriteBuffer(buffer,0,cpu.data(),cpu.size());
         for(const auto& span:spans)if(span.image)
@@ -881,12 +928,21 @@ static bool queue_scanout(const wgpu::Buffer& buffer,uint32_t width,uint32_t hei
 }
 #endif
 
-void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows) {
+void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows,
+                      uint32_t aspect_width,uint32_t aspect_height,uint32_t trim_lines) {
 #if GCNLLR_QUEUED_PRESENT
     if(columns && rows && x<columns && y<rows)
-        scanout_view={x,y,columns,rows};
+        scanout_view={x,y,columns,rows,aspect_width,aspect_height,trim_lines};
 #else
     (void)x;(void)y;(void)columns;(void)rows;
+    (void)aspect_width;(void)aspect_height;(void)trim_lines;
+#endif
+}
+void set_scanout_timing(uint64_t native_ns) {
+#if GCNLLR_QUEUED_PRESENT
+    scanout_native_ns=native_ns;
+#else
+    (void)native_ns;
 #endif
 }
 static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32_t height) {
@@ -898,6 +954,7 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
     decode_scanout(encoder,buffer,scanout,width,height);
     const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
     worker::enqueue_work([] {gpu::set_present_source_override(&scanout);});
+    draw_mouse_settings();
     aurora_end_frame();
     worker::enqueue_work([] {gpu::set_present_source_override(nullptr);});
     aurora::imgui::new_frame(aurora::window::get_window_size());
@@ -908,13 +965,14 @@ static bool show_encoded_buffer(const wgpu::Buffer& buffer,uint32_t width,uint32
 }
 bool present_display_copy(const EncodedImageHandle& image,uint32_t width,uint32_t height) {
     if(!image || image->width!=width || image->height!=height)return false;
-    prepare_scanout(width,height);
 #if GCNLLR_GPU_OWNED_DISPLAY
     if(image->color) {
+        prepare_scanout(width,height,image->color->scale);
         ++color_scanouts;
-        return queue_scanout_packet([image](wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& target) {
+        return queue_scanout_packet([image](wgpu::CommandEncoder& encoder,const gpu::TextureWithSampler& target,
+                                            wgpu::Origin3D offset) {
             const auto& band=*image->color;
-            const auto parameters=display_parameters(band);
+            const auto parameters=display_parameters(band,{offset.x,offset.y});
             const std::array entries{
                 wgpu::BindGroupEntry{.binding=0,.textureView=band.texture->sampleTextureView},
                 wgpu::BindGroupEntry{.binding=1,.textureView=target.view},
@@ -924,11 +982,12 @@ bool present_display_copy(const EncodedImageHandle& image,uint32_t width,uint32_
             auto pass=encoder.BeginComputePass();
             pass.SetPipeline(scanout_color);
             pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&descriptor));
-            pass.DispatchWorkgroups((band.width+15)/16,(band.height+7)/8);
+            pass.DispatchWorkgroups((target.size.width+15)/16,(target.size.height+7)/8);
             pass.End();
-        });
+        },image->color->scale);
     }
 #endif
+    prepare_scanout(width,height);
     return show_encoded_buffer(image->buffer,width,height);
 }
 bool present_display_spans(const std::vector<DisplaySpan>& spans,uint32_t width,uint32_t height) {
@@ -1038,7 +1097,8 @@ void release() {
 #if GCNLLR_QUEUED_PRESENT
     queued_scanout.reset();
     local_scanout.reset();
-    scanout_view={0,0,1,1};
+    scanout_view={};
+    scanout_native_ns=0;
 #endif
     display_encoded={};display_encoded_capacity=0;display_encoder={};
     scanout_input={};scanout_input_capacity=0;scanout_decoder={};
