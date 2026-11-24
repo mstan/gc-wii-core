@@ -128,8 +128,8 @@ public:
             SDL_GetRelativeMouseState(&dx, &dy);
             if (morph_ball_)
                 return true;
-            // 0.05 degrees per count at 100% sensitivity.
-            const float radians_per_count = settings_.sensitivity * .00000872664626f;
+            constexpr float radians_per_count_at_100 = 0.00130899694f;  // 0.075 degrees.
+            const float radians_per_count = (settings_.sensitivity / 100.f) * radians_per_count_at_100;
             state_.yaw -= dx * radians_per_count;
             state_.pitch += dy * radians_per_count * (settings_.invert_y ? 1.f : -1.f);
         }
