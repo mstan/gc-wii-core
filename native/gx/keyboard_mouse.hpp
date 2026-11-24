@@ -2,6 +2,7 @@
 #pragma once
 
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <filesystem>
@@ -47,7 +48,7 @@ inline constexpr std::array<ActionInfo, ActionCount> actions{{
     {"spider-ball", "Spider Ball", "Morph Ball", {mouse(SDL_BUTTON_RIGHT)}},
     {"beam", "Fire beam / Lay bomb", "Combat", {mouse(SDL_BUTTON_LEFT)}},
     {"missile", "Fire missile", "Combat", {mouse(SDL_BUTTON_RIGHT)}},
-    {"lock-on", "Lock on / Scan / Grapple", "Combat", {key(SDL_SCANCODE_LSHIFT), key(SDL_SCANCODE_RSHIFT)}},
+    {"lock-on", "Lock on / Scan / Grapple", "Combat", {key(SDL_SCANCODE_F), key(SDL_SCANCODE_LSHIFT), key(SDL_SCANCODE_RSHIFT)}},
     {"visor-previous", "Previous visor", "Visors", {mouse(SDL_BUTTON_X1), key(SDL_SCANCODE_Q)}},
     {"visor-next", "Next visor", "Visors", {mouse(SDL_BUTTON_X2), key(SDL_SCANCODE_R)}},
     {"power-beam", "Power Beam", "Beams", {key(SDL_SCANCODE_1)}},
@@ -173,6 +174,7 @@ struct Settings {
             return false;
         bool legacy = false;
         bool had_menu_version = false;
+        bool add_grapple_default = true;
         for (size_t i = 0; i < parsed.bindings.size(); ++i) {
             std::string text;
             if (!(stream >> text)) {
@@ -197,8 +199,20 @@ struct Settings {
                 parsed.bindings[SpiderBall] = actions[SpiderBall].initial;
         } else {
             std::string version;
-            if (!(stream >> version) || version != "bindings-v3")
+            if (!(stream >> version) || (version != "bindings-v3" && version != "bindings-v4"))
                 return false;
+            add_grapple_default = version == "bindings-v3";
+        }
+        if (add_grapple_default &&
+            encode_bindings(parsed.bindings[LockOn]) ==
+                encode_bindings({key(SDL_SCANCODE_LSHIFT), key(SDL_SCANCODE_RSHIFT)})) {
+            const bool f_bound = std::any_of(parsed.bindings.begin(), parsed.bindings.end(), [](const auto& set) {
+                return std::any_of(set.begin(), set.end(), [](const Binding& binding) {
+                    return binding.device == Binding::Key && binding.code == SDL_SCANCODE_F;
+                });
+            });
+            if (!f_bound)
+                parsed.bindings[LockOn] = actions[LockOn].initial;
         }
         *this = parsed;
         return true;
@@ -208,7 +222,7 @@ struct Settings {
         stream << sensitivity << ' ' << invert_y;
         for (const auto& binding : bindings)
             stream << ' ' << encode_bindings(binding);
-        stream << " bindings-v3";
+        stream << " bindings-v4";
     }
 };
 }  // namespace gcnllr::keyboard_mouse
