@@ -491,6 +491,36 @@ endif()
 string(REPLACE "${_gcnllr_encode_anchor}"
   "#include \"${CMAKE_CURRENT_LIST_DIR}/ordered_encode.inc\"\n${_gcnllr_encode_anchor}"
   _gcnllr_common "${_gcnllr_common}")
+# A resize can occur with a partially recorded frame that has not reached
+# the render queue yet. Those draws retain descriptor-keyed bind-group IDs.
+# Resize must retain their owners: new resource descriptors naturally get new
+# IDs, and the existing frame-age sweep retires unused entries. Normal shutdown
+# still clears the cache after every recorded and queued frame is drained.
+set(_gcnllr_resize_cache [=[void clear_caches() noexcept {
+  g_offscreenCache.clear();
+  std::lock_guard lock{g_bindGroupCacheMutex};
+  g_cachedBindGroups.clear();
+}]=])
+string(FIND "${_gcnllr_common}" "${_gcnllr_resize_cache}" _gcnllr_resize_cache_at)
+if(_gcnllr_resize_cache_at EQUAL -1)
+  message(FATAL_ERROR "Pinned native bind-group resize lifetime differs")
+endif()
+string(REPLACE "${_gcnllr_resize_cache}" [=[void clear_caches() noexcept {
+  g_offscreenCache.clear();
+  // Recording/queued packets still own IDs from the current descriptor cache.
+  // Keep those bindings alive until the normal frame-age retirement.
+}]=] _gcnllr_common "${_gcnllr_common}")
+# The donor's CHECK is compiled out in release. Guard a violated lifetime
+# explicitly instead of dereferencing end() and allowing an unbounded lookup.
+set(_gcnllr_find_binding [=[  CHECK(it != g_cachedBindGroups.end(), "get_bind_group: failed to locate {:x}", id);]=])
+string(FIND "${_gcnllr_common}" "${_gcnllr_find_binding}" _gcnllr_find_binding_at)
+if(_gcnllr_find_binding_at EQUAL -1)
+  message(FATAL_ERROR "Pinned native bind-group lookup differs")
+endif()
+string(REPLACE "${_gcnllr_find_binding}"
+  "  if (it == g_cachedBindGroups.end()) throw std::runtime_error(\"Native draw lost its recorded bind group\");"
+  _gcnllr_common "${_gcnllr_common}")
+string(PREPEND _gcnllr_common "#include <stdexcept>\n")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_frame.cmake")
 file(CONFIGURE OUTPUT "${_gcnllr_common_path}" CONTENT "${_gcnllr_common}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
