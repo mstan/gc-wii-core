@@ -1,5 +1,9 @@
 get_filename_component(GC_WII_GX_ROOT "../.." ABSOLUTE BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 option(GC_WII_GX_WII "Wii GPU physical-address fields (GameCube preserves its original masks)" OFF)
+option(GCNLLR_NATIVE_TYPED_OUTPUT "Typed native frame/raster presentation profile" OFF)
+if(GCNLLR_NATIVE_TYPED_OUTPUT AND (GCNLLR_GPU_OWNED_DISPLAY OR GCNLLR_RESIDENT_XFB OR GCNLLR_GX_COOPERATIVE_VI OR GCNLLR_GX_FIFO_WORKER OR GCNLLR_ASYNC_COPIES))
+  message(FATAL_ERROR "Typed output requires its guarded serial/queued machine owner")
+endif()
 target_compile_definitions(aurora_gx PRIVATE GC_WII_GX_WII=$<BOOL:${GC_WII_GX_WII}>)
 set(GCNLLR_RENDER_PIPELINE "retail" CACHE STRING "Native Aurora command/batch owner; packet is a legacy comparison build")
 set_property(CACHE GCNLLR_RENDER_PIPELINE PROPERTY STRINGS packet retail)
@@ -28,7 +32,10 @@ if(GCNLLR_ASYNC_COPIES AND (NOT GCNLLR_RESIDENT_XFB OR NOT GCNLLR_GX_COOPERATIVE
   message(FATAL_ERROR "Streamed copies require observed memory and cooperative completion")
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_window.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_worker_timing.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/adapt_retail.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_efb.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_viewport_depth.cmake")
 set(GCNLLR_GPU_BACKEND "auto" CACHE STRING "Native GPU backend: auto, d3d12 or vulkan")
 option(GCNLLR_GX_FIFO_WORKER "Translate native FIFO on a cooperating worker" OFF)
 if(GCNLLR_NATIVE_PIPELINE AND GCNLLR_GX_FIFO_WORKER)
@@ -47,6 +54,15 @@ if(GCNLLR_GPU_OWNED_TEXTURES AND NOT GCNLLR_GPU_OWNED_DISPLAY)
 endif()
 set(GCNLLR_GX_SUBMISSION "segmented" CACHE STRING "Build-time native submission: segmented, batched or queued")
 set_property(CACHE GCNLLR_GX_SUBMISSION PROPERTY STRINGS segmented batched queued)
+set(GCNLLR_NATIVE_OUTPUT_SUBMISSION "serial" CACHE STRING "Guarded native output presentation: serial or queued")
+set_property(CACHE GCNLLR_NATIVE_OUTPUT_SUBMISSION PROPERTY STRINGS serial queued)
+if(NOT GCNLLR_NATIVE_OUTPUT_SUBMISSION MATCHES "^(serial|queued)$")
+  message(FATAL_ERROR "Unknown native output submission provider")
+endif()
+if(GCNLLR_NATIVE_OUTPUT_SUBMISSION STREQUAL "queued" AND (GCNLLR_GX_FIFO_WORKER OR
+    GCNLLR_ASYNC_COPIES OR GCNLLR_COMPOSED_SCANOUT OR GCNLLR_GX_COOPERATIVE_VI OR GCNLLR_RESIDENT_XFB))
+  message(FATAL_ERROR "Queued native output requires the guarded serial machine owner")
+endif()
 set(GCNLLR_GX_COMPLETION "physical" CACHE STRING "Build-time PE completion: physical or owned")
 set_property(CACHE GCNLLR_GX_COMPLETION PROPERTY STRINGS physical owned)
 if(NOT GCNLLR_GX_COMPLETION MATCHES "^(physical|owned)$")
@@ -69,7 +85,7 @@ if(NOT GCNLLR_GX_SUBMISSION STREQUAL "segmented" AND NOT GCNLLR_COMPOSED_SCANOUT
   message(FATAL_ERROR "Batched submission requires composed observed GPU ownership")
 endif()
 set(_gcnllr_batched_submission OFF)
-if(NOT GCNLLR_GX_SUBMISSION STREQUAL "segmented")
+if(NOT GCNLLR_GX_SUBMISSION STREQUAL "segmented" OR GCNLLR_NATIVE_OUTPUT_SUBMISSION STREQUAL "queued")
   set(_gcnllr_batched_submission ON)
 endif()
 if(GCNLLR_COMPOSED_SCANOUT AND (NOT GCNLLR_ASYNC_COPIES OR NOT GCNLLR_RESIDENT_XFB OR NOT GCNLLR_GX_COOPERATIVE_VI OR GCNLLR_GX_FIFO_WORKER))
@@ -82,7 +98,20 @@ if(NOT GCNLLR_GPU_BACKEND MATCHES "^(auto|d3d12|vulkan)$")
   message(FATAL_ERROR "Unknown native GPU backend: ${GCNLLR_GPU_BACKEND}")
 endif()
 add_library(gcnllr-native-gx SHARED "${CMAKE_CURRENT_LIST_DIR}/gx.cpp" "${CMAKE_CURRENT_LIST_DIR}/gpu_bridge.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/efb_depth.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/efb_depth.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_gui_effects.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/native_gui_program.cpp")
+option(GC_WII_NATIVE_J3D "Build native J3D resource/material renderer (experimental consumer binding)" OFF)
+target_compile_definitions(gcnllr-native-gx PRIVATE GC_WII_NATIVE_J3D=$<BOOL:${GC_WII_NATIVE_J3D}>)
+if(GC_WII_NATIVE_J3D)
+  if(GCNLLR_GX_FIFO_WORKER)
+    message(FATAL_ERROR "Native J3D requires rendering on its caller thread")
+  endif()
+  target_sources(gcnllr-native-gx PRIVATE "${CMAKE_CURRENT_LIST_DIR}/native_j3d.cpp"
+    "${GC_WII_GX_ROOT}/native/j3d/asset.cpp" "${GC_WII_GX_ROOT}/native/j3d/material.cpp")
+endif()
+option(GCNLLR_GPU_TRACE_CACHE "Read the GPU trace setting once at service startup" ON)
+target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GPU_TRACE_CACHE=$<BOOL:${GCNLLR_GPU_TRACE_CACHE}>)
 if(GCNLLR_GPU_BACKEND STREQUAL "vulkan")
   target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GPU_VULKAN=1)
 elseif(GCNLLR_GPU_BACKEND STREQUAL "d3d12")
@@ -95,6 +124,29 @@ set_target_properties(gcnllr-native-gx PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gcnllr-services"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gcnllr-services")
 target_compile_features(gcnllr-native-gx PRIVATE cxx_std_20)
+target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_NATIVE_TYPED_OUTPUT=$<BOOL:${GCNLLR_NATIVE_TYPED_OUTPUT}>)
+if(BUILD_TESTING)
+  add_executable(test_native_gx_api "${CMAKE_CURRENT_LIST_DIR}/test_api.cpp")
+  target_include_directories(test_native_gx_api PRIVATE "${GC_WII_GX_ROOT}/include")
+  target_link_libraries(test_native_gx_api PRIVATE gcnllr-native-gx)
+  target_compile_definitions(test_native_gx_api PRIVATE TEST_NATIVE_TYPED_OUTPUT=$<BOOL:${GCNLLR_NATIVE_TYPED_OUTPUT}>)
+  add_test(NAME native_gx_capability_abi_contract COMMAND test_native_gx_api)
+  set_tests_properties(native_gx_capability_abi_contract PROPERTIES ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:$<TARGET_FILE_DIR:gcnllr-native-gx>")
+  find_package(Threads REQUIRED)
+  add_executable(test_native_display "${GC_WII_GX_ROOT}/tests/test_native_display.cpp")
+  target_include_directories(test_native_display PRIVATE "${GC_WII_GX_ROOT}/include")
+  target_compile_features(test_native_display PRIVATE cxx_std_20)
+  target_link_libraries(test_native_display PRIVATE Threads::Threads)
+  add_test(NAME native_display_aspect_contract COMMAND test_native_display)
+  add_executable(test_native_gui_program "${GC_WII_GX_ROOT}/tests/test_native_gui_program.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/native_scene.cpp" "${CMAKE_CURRENT_LIST_DIR}/native_gui.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/native_gui_program.cpp")
+  target_compile_features(test_native_gui_program PRIVATE cxx_std_20)
+  target_include_directories(test_native_gui_program PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${GC_WII_GX_ROOT}/include"
+    "${GXRUNTIME_DIR}/include" "${GXRUNTIME_DIR}/graphics/gxcore/include")
+  add_test(NAME native_gui_program_lowering COMMAND test_native_gui_program)
+endif()
 target_compile_definitions(gcnllr-native-gx PRIVATE GC_WII_GX_WII=$<BOOL:${GC_WII_GX_WII}>)
 target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_RETAIL_PIPELINE=$<STREQUAL:${GCNLLR_RENDER_PIPELINE},retail>)
 target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_NATIVE_PIPELINE=$<BOOL:${GCNLLR_NATIVE_PIPELINE}>
@@ -107,15 +159,17 @@ target_compile_definitions(gcnllr-native-gx PRIVATE
   GCNLLR_GPU_FRAME_PACKETS=$<BOOL:${GCNLLR_GPU_FRAME_PACKETS}>
   GCNLLR_GX_ONE_COPY=$<BOOL:${GCNLLR_GX_ONE_COPY}>)
 target_compile_definitions(gcnllr-native-gx PRIVATE GCNLLR_GX_FIFO_WORKER=$<BOOL:${GCNLLR_GX_FIFO_WORKER}>
+  GCNLLR_RESIDENT_XFB=$<BOOL:${GCNLLR_RESIDENT_XFB}>
   GCNLLR_GX_COOPERATIVE_VI=$<BOOL:${GCNLLR_GX_COOPERATIVE_VI}>
   GCNLLR_ASYNC_COPIES=$<BOOL:${GCNLLR_ASYNC_COPIES}>
   GCNLLR_COMPOSED_SCANOUT=$<BOOL:${GCNLLR_COMPOSED_SCANOUT}>
   GCNLLR_BATCHED_SUBMISSION=$<BOOL:${_gcnllr_batched_submission}>
+  GCNLLR_NATIVE_QUEUED_OUTPUT=$<STREQUAL:${GCNLLR_NATIVE_OUTPUT_SUBMISSION},queued>
   GCNLLR_OWNED_COMPLETION=$<STREQUAL:${GCNLLR_GX_COMPLETION},owned>
-  GCNLLR_QUEUED_PRESENT=$<STREQUAL:${GCNLLR_GX_SUBMISSION},queued>)
+  GCNLLR_QUEUED_PRESENT=$<OR:$<STREQUAL:${GCNLLR_GX_SUBMISSION},queued>,$<STREQUAL:${GCNLLR_NATIVE_OUTPUT_SUBMISSION},queued>>)
 set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/texture_readback.cpp" TARGET_DIRECTORY aurora_gx
   APPEND PROPERTY COMPILE_DEFINITIONS GCNLLR_ASYNC_COPIES=$<BOOL:${GCNLLR_ASYNC_COPIES}>)
-target_include_directories(gcnllr-native-gx PRIVATE "${GC_WII_GX_ROOT}/include" "${GXRUNTIME_DIR}/graphics/aurora/lib")
+target_include_directories(gcnllr-native-gx PRIVATE "${CMAKE_BINARY_DIR}/gcnllr-services/adapted" "${GC_WII_GX_ROOT}/include" "${GXRUNTIME_DIR}/graphics/aurora/lib")
 target_link_libraries(gcnllr-native-gx PRIVATE
   aurora::core aurora::gx aurora::vi aurora::pad aurora::si
   absl::flat_hash_map)
@@ -135,4 +189,16 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_RUNTIME_DLLS:gcnllr-native-gx> $<TARGET_FILE_DIR:gcnllr-native-gx>
     COMMAND_EXPAND_LISTS)
+endif()
+
+# The graphics donor graph also exposes its generic DVD binding. Keep its
+# existing seek semantics on the Windows C ABI without changing the donor.
+if(TARGET gxruntime AND WIN32 AND (MSVC OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC"))
+  set_property(SOURCE "${GXRUNTIME_DIR}/src/dvd.c" TARGET_DIRECTORY gxruntime
+    APPEND PROPERTY COMPILE_DEFINITIONS fseeko=_fseeki64 off_t=__int64)
+endif()
+if(WIN32 AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+  # Older compatible donors use the CRT's optional math constants here.
+  set_property(SOURCE "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/frame_interp.cpp"
+    TARGET_DIRECTORY aurora_gx APPEND PROPERTY COMPILE_DEFINITIONS _USE_MATH_DEFINES)
 endif()

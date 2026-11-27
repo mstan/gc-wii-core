@@ -64,9 +64,16 @@ int main(void) {
     vi.reg[GCN_VI_VTE_LO >> 1] = 502u;
     set_u32(&vi, GCN_VI_FB_LEFT_TOP_HI, base + line_stride);
     set_u32(&vi, GCN_VI_FB_LEFT_BOTTOM_HI, base);
+    /* Reversing PRB alone makes the even field contain an even number of
+     * halflines. Keep the literal field until its paired blanking is changed. */
+    expect_info(base + line_stride, 640u, 240u, line_stride * 2u);
+    vi.reg[GCN_VI_VTO_HI >> 1] = 4u;
+    vi.reg[GCN_VI_VTE_HI >> 1] = 5u;
     expect_info(base, 640u, 480u, line_stride);
 
     /* POFF is shared by both field-base registers. */
+    vi.reg[GCN_VI_VTO_HI >> 1] = 5u;
+    vi.reg[GCN_VI_VTE_HI >> 1] = 4u;
     vi.reg[GCN_VI_VTO_LO >> 1] = 502u;
     vi.reg[GCN_VI_VTE_LO >> 1] = 503u;
     set_u32(&vi, GCN_VI_FB_LEFT_TOP_HI,

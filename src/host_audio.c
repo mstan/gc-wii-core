@@ -71,6 +71,7 @@ static const u64 s_last_underrun_at = 0;
 #endif
 
 static GcnHostAudioStats s_stats;
+static u32 s_requested_volume;
 static FILE* s_capture;
 static u64 s_capture_limit;
 
@@ -277,6 +278,8 @@ static DWORD WINAPI audio_worker_main(void* unused) {
     if (FAILED(hr)) goto init_failed;
     hr = ISimpleAudioVolume_SetMute(volume,s_stats.output_muted,NULL);
     if (FAILED(hr)) goto init_failed;
+    hr = ISimpleAudioVolume_SetMasterVolume(volume,s_stats.output_volume/100.0f,NULL);
+    if (FAILED(hr)) goto init_failed;
 
     EnterCriticalSection(&s_audio_lock);
     s_start_hr = S_OK;
@@ -293,6 +296,15 @@ static DWORD WINAPI audio_worker_main(void* unused) {
     LeaveCriticalSection(&s_audio_lock);
     if (stop)
         goto done;
+
+    EnterCriticalSection(&s_audio_lock);
+    u32 requested_volume = s_requested_volume;
+    LeaveCriticalSection(&s_audio_lock);
+    hr = ISimpleAudioVolume_SetMasterVolume(volume,requested_volume/100.0f,NULL);
+    if (FAILED(hr)) goto stream_failed;
+    EnterCriticalSection(&s_audio_lock);
+    s_stats.output_volume = requested_volume;
+    LeaveCriticalSection(&s_audio_lock);
 
     BYTE* dst = NULL;
     hr = IAudioRenderClient_GetBuffer(render, buffer_frames, &dst);
@@ -325,6 +337,19 @@ static DWORD WINAPI audio_worker_main(void* unused) {
             goto stream_failed;
         }
 
+        /* COM stays on its owning thread. Host UI edits only publish a
+         * request under the existing lock; the guest sample stream is intact. */
+        EnterCriticalSection(&s_audio_lock);
+        requested_volume = s_requested_volume;
+        const bool volume_changed = requested_volume != s_stats.output_volume;
+        LeaveCriticalSection(&s_audio_lock);
+        if (volume_changed) {
+            hr = ISimpleAudioVolume_SetMasterVolume(volume,requested_volume/100.0f,NULL);
+            if (FAILED(hr)) goto stream_failed;
+            EnterCriticalSection(&s_audio_lock);
+            s_stats.output_volume = requested_volume;
+            LeaveCriticalSection(&s_audio_lock);
+        }
         LARGE_INTEGER t0, t1;
         QueryPerformanceCounter(&t0);
         UINT32 padding = 0;
@@ -398,6 +423,7 @@ static void close_worker_handles(void) {
 bool gcn_host_audio_start(u32 sample_rate) {
     capture_close();
     memset(&s_stats, 0, sizeof s_stats);
+    s_stats.pcm_hash = 14695981039346656037ull;
     const char* audio = getenv("GCN_AUDIO");
     const char* window = getenv("GCN_WINDOW");
     bool requested = audio && *audio ? *audio != '0' :
@@ -405,6 +431,18 @@ bool gcn_host_audio_start(u32 sample_rate) {
     s_stats.enabled = requested;
     const char* mute = getenv("GCN_AUDIO_MUTE");
     s_stats.output_muted = mute && *mute && *mute != '0';
+    s_stats.output_volume = 100;
+    const char* level = getenv("GCN_AUDIO_VOLUME");
+    if (level && *level) {
+        char* end;
+        long value = strtol(level,&end,10);
+        if (*end || value < 0 || value > 100) {
+            fprintf(stderr,"gcn audio: GCN_AUDIO_VOLUME must be 0..100\n");
+            return false;
+        }
+        s_stats.output_volume = (u32)value;
+    }
+    s_requested_volume = s_stats.output_volume;
     s_stats.sample_rate = sample_rate;
     bool capturing = capture_start(sample_rate);
     if (!requested)
@@ -523,6 +561,10 @@ void gcn_host_audio_submit_be_s16(void* user, const u8* samples, u32 bytes) {
         return;
     bytes -= bytes % 4u;
     s_stats.emulated_frames += bytes / 4u;
+    for (u32 i = 0; i < bytes; ++i) {
+        s_stats.pcm_hash ^= samples[i];
+        s_stats.pcm_hash *= 1099511628211ull;
+    }
     capture_samples(samples, bytes);
     if (!s_stats.enabled) return;
 
@@ -558,6 +600,19 @@ void gcn_host_audio_get_stats(GcnHostAudioStats* out) {
     if (s_sync_ready)
         LeaveCriticalSection(&s_audio_lock);
 #endif
+}
+
+bool gcn_host_audio_set_volume(u32 percent) {
+    if (percent > 100u) return false;
+#ifdef _WIN32
+    if (s_sync_ready) EnterCriticalSection(&s_audio_lock);
+#endif
+    s_requested_volume = percent;
+    if (!s_stats.device_open) s_stats.output_volume = percent;
+#ifdef _WIN32
+    if (s_sync_ready) LeaveCriticalSection(&s_audio_lock);
+#endif
+    return true;
 }
 
 void gcn_host_audio_stop(void) {

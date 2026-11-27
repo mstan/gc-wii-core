@@ -6,7 +6,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define GCNLLR_NATIVE_GX_ABI 12u
+#define GCNLLR_NATIVE_GX_ABI 13u
 #define GCNLLR_NATIVE_GX_COMPLETED_SCANOUT 1u
 #define GCNLLR_NATIVE_GX_RESIDENT_COPY 2u
 #define GCNLLR_NATIVE_GX_STREAMED_COPY 4u
@@ -17,6 +17,8 @@ extern "C" {
 #define GCNLLR_NATIVE_GX_TEXTURE_VIEWS 128u
 /* The renderer invalidates whole-texture lookups when a later copy overlaps. */
 #define GCNLLR_NATIVE_GX_SLICED_TEXTURE_COPIES 256u
+/* Guest RAM is written only during calls made by the machine owner. */
+#define GCNLLR_NATIVE_GX_SERIAL_RAM_WRITES 512u
 #define GCNLLR_NATIVE_GX_COPY_DISPLAY 1u
 #define GCNLLR_NATIVE_GX_COPY_MATERIALIZING 2u
 

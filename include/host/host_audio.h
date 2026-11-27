@@ -32,12 +32,15 @@ typedef struct {
     bool capture_failed;
     bool output_muted; /* actual WASAPI session mute, independent of emulation */
     u64 emulated_frames; /* actual AID PCM delivered, including with host sink off */
+    u64 pcm_hash; /* FNV-1a64 of ordered big-endian R/L PCM before host buffering */
+    u32 output_volume; /* WASAPI session gain, 0..100; guest PCM is unchanged */
 } GcnHostAudioStats;
 
 /* Default-on with GCN_WINDOW=1; default-off for headless/oracle runs.
  * GCN_AUDIO=1 or 0 overrides that policy. GCN_AUDIO_CAPTURE optionally writes
  * bounded WAV evidence, including with output disabled. True enables the sink,
- * not necessarily a speaker device; device_open is reported separately. */
+ * not necessarily a speaker device; device_open is reported separately.
+ * GCN_AUDIO_VOLUME=0..100 controls only the host session (default 100). */
 bool gcn_host_audio_start(u32 sample_rate);
 void gcn_host_audio_stop(void);
 
@@ -50,6 +53,12 @@ void gcn_host_audio_submit_be_s16(void* user, const u8* samples, u32 bytes);
 u32 gcn_host_audio_convert_be_s16(u8* dst, const u8* src, u32 bytes);
 
 void gcn_host_audio_get_stats(GcnHostAudioStats* out);
+
+/* Request a live host-session gain, 0..100. The device-owning thread applies
+ * it on its next output event; output_volume reports the applied value.
+ * This never unmutes the session or changes guest PCM/capture/counters.
+ * Call from the producer thread, as with start/submit/stop. */
+bool gcn_host_audio_set_volume(u32 percent);
 
 #ifdef __cplusplus
 }

@@ -5,6 +5,7 @@ namespace gcnllr { void draw_mouse_settings(); }
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <gcnllr/native_presentation.h>
 #if GCNLLR_ASYNC_COPIES
 #include "async_readback.hpp"
 #endif
@@ -17,7 +18,15 @@ void set_scanout_view(uint32_t x,uint32_t y,uint32_t columns,uint32_t rows,
 void set_scanout_timing(uint64_t native_ns);
 unsigned efb_scale(const char* setting);
 void initialize();
+void set_idle_dimming(bool enabled);
+bool set_presentation_frame(uint32_t,const GcWiiNativePresentationFrame*);
+bool set_filtered_presentation_frame(uint32_t,const GcWiiNativePresentationFrame*,uint32_t);
+void select_presentation_source(uint32_t);
+bool presentation_matches_copy(uint32_t);
+bool read_presentation(uint8_t*,uint32_t,uint32_t*,uint32_t*);
 bool settle_framebuffer();
+bool set_internal_scale(uint32_t);
+bool raster_size(uint32_t*,uint32_t*);
 struct CopiedImage {uint32_t width{},height{};std::vector<uint8_t> yuy2;};
 struct EncodedImage;
 using EncodedImageHandle=std::shared_ptr<const EncodedImage>;
@@ -60,6 +69,10 @@ bool restore_efb(const EfbCheckpoint&);
 #endif
 void release_depth();
 void clear_efb(const gxruntime::gxcore::EfbCopyCommand& copy);
+// Seal earlier draws, then record a clear before subsequent native draws or
+// copies in the same GPU packet. No resource/address or command is invented.
+void record_efb_clear(const gxruntime::gxcore::EfbCopyCommand& copy);
+void complete_frame(bool physical);
 bool present(const uint8_t* yuy2,uint32_t width,uint32_t height,uint32_t stride);
 bool peek_scanout(uint16_t x,uint16_t y,uint32_t* value);
 void finish();

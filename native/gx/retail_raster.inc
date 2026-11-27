@@ -4,6 +4,8 @@
 // when their inputs or wrapped scissor change. Host viewport stays in bounds.
 static float machine_viewport[6]{};
 static decltype(g_gxState.proj) machine_projection;
+static decltype(g_gxState.logicalViewport) machine_raster_viewport;
+static decltype(g_gxState.logicalScissor) machine_raster_scissor;
 static bool machine_viewport_valid{},machine_projection_valid{},machine_raster_dirty=true;
 static float machine_view_scale=1.f,machine_view_anchor_x=0.f,machine_view_anchor_y=0.f;
 
@@ -15,7 +17,15 @@ extern "C" void gcnllr_aurora_retail_view_framing(float scale,float anchor_x,flo
 }
 
 static void machine_raster() {
-    if(!machine_raster_dirty || !machine_viewport_valid || !machine_projection_valid)return;
+    if(!machine_viewport_valid || !machine_projection_valid)return;
+    if(!machine_raster_dirty) {
+        // Typed host draws share the command encoder but own their raster.
+        // The original machine inputs did not change, so restore the already
+        // derived raster rather than leaving a native GUI/J3D viewport active.
+        if(g_gxState.logicalViewport!=machine_raster_viewport)set_logical_viewport(machine_raster_viewport);
+        if(g_gxState.logicalScissor!=machine_raster_scissor)set_logical_scissor(machine_raster_scissor);
+        return;
+    }
     machine_raster_dirty=false;
     const auto& bp=g_gxState.bpRegCache;
     const auto origin=gcnllr::raster_origin(machine_viewport,bp[0x20],bp[0x21],bp[0x59]);
@@ -40,5 +50,7 @@ static void machine_raster() {
     set_logical_viewport({0,0,640,480,
         gcnllr::normalized_viewport_depth(machine_viewport[5]-machine_viewport[2]),
         gcnllr::normalized_viewport_depth(machine_viewport[5])});
+    machine_raster_viewport=g_gxState.logicalViewport;
+    machine_raster_scissor=g_gxState.logicalScissor;
     g_gxState.stateDirty=true;
 }

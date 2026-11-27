@@ -224,6 +224,7 @@ u32 gcn_exi_sync_rtc_from_host(GcnExi* exi, u64 core_cycles);
 
 /* Advance/latch the running counter for persistence or explicit observation. */
 u32 gcn_exi_rtc_latch(GcnExi* exi, u64 core_cycles);
+u32 gcn_exi_rtc_latch_clock(GcnExi* exi, u64 core_cycles, u64 clock_hz);
 
 /* Register the write-back hook (ROADMAP M3): called synchronously right after
  * a guest RTC_WRITE or SRAM_WRITE lands in exi->rtc.counter / exi->sram. NULL
@@ -267,12 +268,19 @@ bool gcn_exi_persist_save(const char* path, u32 rtc,
  * [GCN_EXI_BASE, GCN_EXI_BASE + GCN_EXI_REGISTER_BYTES)). */
 u32  gcn_exi_read(void* user, CPUState* cpu, u32 addr, u8 size);
 void gcn_exi_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size);
+void gcn_exi_write_clock(void* user, CPUState* cpu, u32 addr, u32 value,
+                         u8 size, u64 clock_hz);
 
 /* Same device and state machine, independent of the caller's CPU ABI. DMA
  * writes notify the supplied observers before transfer completion/IRQ. */
 u32 gcn_exi_bus_read(GcnExi* exi, u32 addr, u8 size);
 void gcn_exi_bus_write(GcnExi* exi, const GcnExiAccess* access,
                        u32 addr, u32 value, u8 size);
+/* Same transactions and unmodified state layout. Old APIs use 486 MHz; Wii
+ * callers pass 729 MHz for their raw CPU cycle domain. Register reads return
+ * the already latched transfer result. Zero Hz refuses before any mutation. */
+void gcn_exi_bus_write_clock(GcnExi* exi, const GcnExiAccess* access,
+                             u32 addr, u32 value, u8 size, u64 clock_hz);
 
 #ifdef __cplusplus
 }

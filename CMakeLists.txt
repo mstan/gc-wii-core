@@ -108,12 +108,22 @@ add_library(gcn_runtime_core STATIC
   src/title_module_none.c
   src/overlay_none.c
   src/rings.c
+  src/cost_ring.c
+  src/device_domains.c
   src/seed.c
   src/trace.c
   src/util/crc32.c
   ${GC_WII_POWERPC_CORE_DIR}/src/frontend/decoder.c
   ${GC_WII_POWERPC_CORE_DIR}/src/backend/ppc_cycles.c
 )
+option(GCN_COST_RING "Record the always-on bounded per-field cost ring" ON)
+target_compile_definitions(gcn_runtime_core PRIVATE GCN_COST_RING_ENABLED=$<BOOL:${GCN_COST_RING}>)
+set(GCN_OVERLAY_LOOKUP "indexed" CACHE STRING "Native overlay lookup: indexed or search")
+set_property(CACHE GCN_OVERLAY_LOOKUP PROPERTY STRINGS indexed search)
+if(NOT GCN_OVERLAY_LOOKUP MATCHES "^(indexed|search)$")
+  message(FATAL_ERROR "Unknown overlay lookup provider")
+endif()
+target_compile_definitions(gcn_runtime_core PRIVATE GCN_OVERLAY_INDEXED=$<STREQUAL:${GCN_OVERLAY_LOOKUP},indexed>)
 target_include_directories(gcn_runtime_core PUBLIC include)
 target_include_directories(gcn_runtime_core PRIVATE
   ${GC_WII_POWERPC_CORE_DIR}/src)
@@ -133,6 +143,10 @@ target_link_libraries(gcn_runtime PRIVATE gcn_runtime_core)
 # Tests
 # ---------------------------------------------------------------------------
 enable_testing()
+option(GC_WII_J3D_ASSETS "Build native J3D resource conversion" OFF)
+if(GC_WII_J3D_ASSETS)
+  add_subdirectory(native/j3d)
+endif()
 
 add_executable(test_broadway_runtime tests/test_broadway.c)
 target_link_libraries(test_broadway_runtime PRIVATE gcn_runtime_core)
@@ -153,6 +167,18 @@ add_test(NAME aot_module_identity COMMAND test_aot_module)
 add_executable(test_overlay_module tests/test_overlay_module.c)
 target_link_libraries(test_overlay_module PRIVATE gcn_runtime_core)
 add_test(NAME overlay_pc_namespaces COMMAND test_overlay_module)
+add_executable(test_cost_ring tests/test_cost_ring.c)
+target_link_libraries(test_cost_ring PRIVATE gcn_runtime_core)
+target_compile_definitions(test_cost_ring PRIVATE GCN_COST_RING_ENABLED=$<BOOL:${GCN_COST_RING}>)
+add_test(NAME cost_ring_fields COMMAND test_cost_ring)
+# Exercise exported OFF operations even in the normal ON core configuration.
+add_executable(test_cost_ring_disabled tests/test_cost_ring.c src/cost_ring.c)
+target_include_directories(test_cost_ring_disabled PRIVATE include)
+target_compile_definitions(test_cost_ring_disabled PRIVATE GCN_COST_RING_ENABLED=0)
+add_test(NAME cost_ring_disabled_contract COMMAND test_cost_ring_disabled)
+add_executable(test_shared_device_domains tests/test_device_domains.c)
+target_link_libraries(test_shared_device_domains PRIVATE gcn_runtime_core)
+add_test(NAME shared_device_domains COMMAND test_shared_device_domains)
 
 add_executable(test_dsp_registers tests/test_dsp_registers.c)
 target_link_libraries(test_dsp_registers PRIVATE gcn_runtime_core)
@@ -174,6 +200,11 @@ add_executable(test_vi_native_xfb tests/test_vi_native_xfb.c src/vi.c)
 target_compile_definitions(test_vi_native_xfb PRIVATE GCNLLR_NATIVE_GX=1)
 target_link_libraries(test_vi_native_xfb PRIVATE gcn_runtime_core)
 add_test(NAME vi_native_xfb_presentation COMMAND test_vi_native_xfb)
+add_executable(test_di_file tests/test_di_file.c src/di.c)
+target_link_libraries(test_di_file PRIVATE gcn_runtime_core)
+add_test(NAME di_large_file_io COMMAND test_di_file
+  "${CMAKE_CURRENT_BINARY_DIR}/di-large-file-fixture.bin"
+  "${CMAKE_CURRENT_BINARY_DIR}")
 
 # M4: EXI memcard device model + GCMemcard image module. Both are standalone
 # (only libc + their own headers), so they build/test without the generated C.
@@ -188,6 +219,10 @@ add_test(NAME memcard_image COMMAND test_memcard_image)
 add_executable(test_rtc tests/test_rtc.c src/rtc.c)
 target_include_directories(test_rtc PRIVATE include)
 add_test(NAME rtc_boot_sync COMMAND test_rtc)
+add_executable(test_exi_clock tests/test_exi_clock.c src/exi.c src/rtc.c src/memcard.c)
+target_include_directories(test_exi_clock PRIVATE include)
+target_link_libraries(test_exi_clock PRIVATE ipl_descramble_core)
+add_test(NAME exi_rtc_clock_profiles COMMAND test_exi_clock)
 
 add_executable(test_host_audio tests/test_host_audio.c src/host_audio.c)
 target_include_directories(test_host_audio PRIVATE include)
@@ -599,3 +634,15 @@ if(GCN_WITH_GENERATED)
     target_compile_options(gcn_dsp_lle PRIVATE ${GCN_PGO_FLAGS})
   endif()
 endif()
+
+# Common owner mechanisms retain their existing GameCube and Wii fixtures.
+add_executable(test_gamecube_device_domains tests/test_gamecube_device_domains.c src/device_domains.c)
+target_include_directories(test_gamecube_device_domains PRIVATE include)
+add_test(NAME gamecube_independent_device_domains_contract COMMAND test_gamecube_device_domains)
+add_executable(test_resident_memory tests/test_resident_memory.c src/resident_memory.c)
+target_include_directories(test_resident_memory PRIVATE include)
+add_test(NAME native_resident_memory_contract COMMAND test_resident_memory)
+add_executable(test_resident_slices tests/test_resident_slices.c src/resident_memory.c)
+target_include_directories(test_resident_slices PRIVATE include)
+target_compile_definitions(test_resident_slices PRIVATE GCNLLR_RESIDENT_SLICES=1)
+add_test(NAME native_resident_slices_contract COMMAND test_resident_slices)

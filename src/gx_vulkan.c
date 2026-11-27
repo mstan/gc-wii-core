@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <x86intrin.h>
+#include "gx/gx_host.h"
 
 #ifdef GCN_HAVE_VULKAN
 #include <vulkan/vulkan.h>
@@ -1787,7 +1787,7 @@ static int resident_materialize_pending(void) {
         return 1;
     if (!invalidate_readback())
         return 0;
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     if (s_vk.resident_pending_count) {
         gcn_gx_xfb_write_begin();
         for (u32 i = 0; i < s_vk.resident_pending_count; ++i) {
@@ -1830,7 +1830,7 @@ static int resident_materialize_pending(void) {
         }
         s_vk.resident_pending_tex_count = 0;
     }
-    s_vk.resident_copy_memcpy_tsc += __rdtsc() - t0;
+    s_vk.resident_copy_memcpy_tsc += gx_host_ticks() - t0;
     return 1;
 }
 
@@ -2000,7 +2000,7 @@ static int resident_emit_draw_batch(void) {
 static int resident_submit_current(int signal_fence) {
     if (!s_vk.resident_recording)
         return 1;
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     if (!resident_emit_draw_batch() || !flush_staging() ||
         vkEndCommandBuffer(s_vk.command_buffer) != VK_SUCCESS)
         return 0;
@@ -2016,7 +2016,7 @@ static int resident_submit_current(int signal_fence) {
     }
     if (vkQueueSubmit(s_vk.queue, 1, &submit, fence) != VK_SUCCESS)
         return 0;
-    u64 t1 = __rdtsc();
+    u64 t1 = gx_host_ticks();
     s_vk.resident_submit_cpu_tsc += t1 - t0;
     s_vk.images_general = 1;
     s_vk.resident_recording = 0;
@@ -2078,7 +2078,7 @@ static int resident_submit_batch(GxVkSubmitTrigger trigger) {
             s_vk.submit_noops[trigger]++;
     }
     int had_pending = s_vk.resident_pending_count != 0u;
-    u64 t0 = __rdtsc();
+    u64 t0 = gx_host_ticks();
     int signaled = s_vk.resident_recording;
     if (!resident_submit_current(signaled))
         return 0;
@@ -2097,19 +2097,19 @@ static int resident_submit_batch(GxVkSubmitTrigger trigger) {
         s_vk.submit_queue_submits[trigger] +=
             s_vk.resident_batches - batches_before;
     if (signaled) {
-        const u64 wait_t0 = stats ? __rdtsc() : 0u;
+        const u64 wait_t0 = stats ? gx_host_ticks() : 0u;
         const int wait_result = resident_wait_fence();
         if (!wait_result)
             return 0;
         if (stats) {
             s_vk.submit_wait_calls[trigger]++;
             s_vk.submit_wait_blocked[trigger] += (u64)(wait_result == 2);
-            s_vk.submit_wait_tsc[trigger] += __rdtsc() - wait_t0;
+            s_vk.submit_wait_tsc[trigger] += gx_host_ticks() - wait_t0;
         }
     }
     if (s_vk.general_debug_armed && signaled)
         gx_vk_dump_general_debug();
-    u64 t2 = __rdtsc();
+    u64 t2 = gx_host_ticks();
     if (s_vk.gpu_stats && s_vk.gpu_query_count) {
         u64 timestamps[GPU_QUERY_MAX] = {0};
         if (vkGetQueryPoolResults(s_vk.device, s_vk.query_pool, 0,
@@ -2132,7 +2132,7 @@ static int resident_submit_batch(GxVkSubmitTrigger trigger) {
     if (!resident_materialize_pending())
         return 0;
     if (had_pending)
-        s_vk.resident_copy_total_tsc += __rdtsc() - t0;
+        s_vk.resident_copy_total_tsc += gx_host_ticks() - t0;
     s_vk.resident_inflight = 0;
     s_vk.resident_draw_arena_used = 0;
     s_vk.command_buffer = s_vk.command_buffers[0];
@@ -3579,7 +3579,7 @@ static void record_xfb_copy(const GxVkCopyPush* push) {
 }
 
 int gx_vulkan_resident_efb_copy(const u32* bp, u8* ram, u32 ram_size) {
-    u64 copy_t0 = __rdtsc();
+    u64 copy_t0 = gx_host_ticks();
     if (!s_vk.resident_mode || !bp || !ram)
         return -1;
     /* Co-run: byte-compare the GPU planes against the software reference at
@@ -3768,7 +3768,7 @@ int gx_vulkan_resident_efb_copy(const u32* bp, u8* ram, u32 ram_size) {
      * and whole-object flicker.  A full XFB ring still forces an earlier
      * submit above, and texture updates explicitly submit before reusing
      * their arena bytes. */
-    s_vk.resident_copy_total_tsc += __rdtsc() - copy_t0;
+    s_vk.resident_copy_total_tsc += gx_host_ticks() - copy_t0;
     return 1;
 }
 

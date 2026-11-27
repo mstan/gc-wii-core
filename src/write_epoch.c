@@ -2,9 +2,11 @@
 #include "memory/write_epoch.h"
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32) && defined(GCNLLR_WRITE_WATCH)
+#if defined(_WIN32) && (defined(GCNLLR_WRITE_WATCH) || defined(GCNLLR_PAGE_BACKED_RAM))
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
+#if defined(_WIN32) && defined(GCNLLR_WRITE_WATCH)
 #define MAX_PAGES (GC_MAIN_RAM_SIZE/4096u)
 static u8* watched_ram;
 static u32 watched_size,page_size,owner_thread;
@@ -13,6 +15,11 @@ static void* dirty_pages[MAX_PAGES];
 static bool valid_epochs;
 #endif
 u8* gcn_mem1_alloc(u32 size) {
+#if defined(_WIN32) && defined(GCNLLR_PAGE_BACKED_RAM) && !defined(GCNLLR_WRITE_WATCH)
+    // Explicit host-page backing for owner-thread observation guards. This
+    // does not enable write epochs or change the guest memory geometry.
+    return VirtualAlloc(NULL,size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+#endif
 #if defined(_WIN32) && defined(GCNLLR_WRITE_WATCH)
     if (!watched_ram) {
         SYSTEM_INFO info;GetSystemInfo(&info);
@@ -29,6 +36,9 @@ u8* gcn_mem1_alloc(u32 size) {
     return calloc(1,size);
 }
 void gcn_mem1_release(u8* ram) {
+#if defined(_WIN32) && defined(GCNLLR_PAGE_BACKED_RAM) && !defined(GCNLLR_WRITE_WATCH)
+    if(ram)VirtualFree(ram,0,MEM_RELEASE);return;
+#endif
 #if defined(_WIN32) && defined(GCNLLR_WRITE_WATCH)
     if (ram && ram==watched_ram) {
         VirtualFree(ram,0,MEM_RELEASE);watched_ram=NULL;watched_size=0;valid_epochs=false;return;

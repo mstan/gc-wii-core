@@ -43,6 +43,11 @@ void gx_render_init(CPUState* cpu, const u32* bp, const u32* xf) {
     s_mode = GX_RENDER_SOFTWARE;
     s_initialized = 1;
 
+#ifdef GCN_GX_SOFTWARE_ONLY
+    /* A build-selected LLE reference must never redirect to a GPU backend. */
+    return;
+#endif
+
     const char* requested = getenv("GCN_GX_BACKEND");
     /* Interactive use should select the already-validated resident renderer
      * without requiring a second, easy-to-miss environment variable.  Keep

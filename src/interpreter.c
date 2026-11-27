@@ -115,9 +115,13 @@ void gcn_interpreter_capture_begin(void) { capture_init(); }
 static const u8* executable_page(CPUState* cpu, u32 pc, u32* page_out) {
     u32 phys = pc & 0x1FFFFFFFu;
     u32 page = pc & ~(PAGE_SIZE - 1u);
-    if (phys < cpu->ram_size && phys + PAGE_SIZE <= cpu->ram_size) {
-        if (page_out) *page_out = page;
-        return cpu->ram + (phys & ~(PAGE_SIZE - 1u));
+    if (phys < cpu->ram_size || (phys >= 0x10000000u && phys - 0x10000000u < cpu->mem2_size)) {
+        u32 available;
+        const u8* bytes=gcn_mem_resolve(cpu,page,&available);
+        if(bytes && available>=PAGE_SIZE) {
+            if (page_out) *page_out = page;
+            return bytes;
+        }
     }
     if (pc >= GCN_ROM_WINDOW_BASE && cpu->rom_window) {
         u32 off = pc - GCN_ROM_WINDOW_BASE;
@@ -158,7 +162,7 @@ static const u8* executable_page(CPUState* cpu, u32 pc, u32* page_out) {
  * written by plain stores and executed WITHOUT icbi keeps its old identity
  * here for the same reason it keeps executing stale native code: the
  * runtime models the un-invalidated icache, consistently. */
-#define CRC_RAM_PAGE_CAP (GC_MAIN_RAM_SIZE / PAGE_SIZE)
+#define CRC_RAM_PAGE_CAP (GCN_NATIVE_RAM_LIMIT / PAGE_SIZE)
 #define CRC_ROM_PAGE_CAP 1024u
 static u32 s_page_crc[CRC_RAM_PAGE_CAP];
 static u8 s_page_crc_seen[(CRC_RAM_PAGE_CAP + 7u) / 8u];
@@ -174,7 +178,7 @@ static u32 miss_page_crc(CPUState* cpu, u32 pc, const u8* bytes) {
     if (!bytes)
         return 0u;
     u32 phys = pc & 0x1FFFFFFFu;
-    if (phys < cpu->ram_size) {          /* executable_page's RAM branch */
+    if (phys < cpu->ram_size || (phys >= 0x10000000u && phys - 0x10000000u < cpu->mem2_size)) {
         u32 pidx = phys / PAGE_SIZE;
         u8 mask = (u8)(1u << (pidx & 7u));
         /* take FIRST: the read-and-clear must happen even when the page has
