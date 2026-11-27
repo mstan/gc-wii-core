@@ -26,7 +26,7 @@ static uint32_t internal_scale=1;
 #include <unordered_map>
 #include "fifo_worker.hpp"
 #include "ordered_effects.hpp"
-#include "gfx/gxcore_draw.hpp"
+#include "gxcore_draw.hpp"
 #if GCNLLR_ASYNC_COPIES || GCNLLR_GPU_OWNED_TEXTURES
 #include "gfx/texture.hpp"
 #endif

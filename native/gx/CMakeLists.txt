@@ -197,3 +197,8 @@ if(TARGET gxruntime AND WIN32 AND (MSVC OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC"))
   set_property(SOURCE "${GXRUNTIME_DIR}/src/dvd.c" TARGET_DIRECTORY gxruntime
     APPEND PROPERTY COMPILE_DEFINITIONS fseeko=_fseeki64 off_t=__int64)
 endif()
+if(WIN32 AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+  # Older compatible donors use the CRT's optional math constants here.
+  set_property(SOURCE "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/frame_interp.cpp"
+    TARGET_DIRECTORY aurora_gx APPEND PROPERTY COMPILE_DEFINITIONS _USE_MATH_DEFINES)
+endif()

@@ -38,7 +38,7 @@ consumers, with explicit transfer periods and optional multi-bank CPU memory.
 
 The portable row/token ownership manager in `resident_memory.h` and
 `src/resident_memory.c` is shared from gcnllr commit
-`97d2d4ea96d21a52319b7d45c9f504a496dd2596`, with its MIT notices retained.
+`87dd82c54f72724e5e42f1479f8abf4ee4aaee99`, with its MIT notices retained.
 Consumers own memory-access guards and physical-bank normalization; merely
 publishing a retained generation does not make stale RAM safe to access.
 
