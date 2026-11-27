@@ -100,6 +100,7 @@ struct EncodedImage {
 static gpu::TextureWithSampler scanout;
 static gpu::TextureWithSampler raster_color,raster_resolved,raster_depth;
 static uint32_t raster_scale=1;
+#include "rollback_efb.inc"
 static std::shared_ptr<gpu::TextureWithSampler> presentation_output;
 static wgpu::Buffer presentation_pixels;
 static uint64_t presentation_capacity{};
@@ -623,8 +624,10 @@ bool set_internal_scale(uint32_t scale) {
     const uint32_t width=efb_width*scale,height=efb_height*scale;
     raster_color=gpu::create_render_texture(width,height,true);
     raster_resolved=gpu::g_graphicsConfig.msaaSamples>1?gpu::create_render_texture(width,height,false):raster_color;
+    wgpu::TextureUsage depth_usage=wgpu::TextureUsage::RenderAttachment|wgpu::TextureUsage::TextureBinding;
+    if(gpu::g_graphicsConfig.msaaSamples==1)depth_usage|=wgpu::TextureUsage::CopySrc|wgpu::TextureUsage::CopyDst;
     const wgpu::TextureDescriptor depth_desc{.label="Independent high-resolution depth",
-        .usage=wgpu::TextureUsage::RenderAttachment|wgpu::TextureUsage::TextureBinding,
+        .usage=depth_usage,
         .size={width,height,1},.format=depth.format,.sampleCount=gpu::g_graphicsConfig.msaaSamples};
     raster_depth.size=depth_desc.size;raster_depth.format=depth_desc.format;
     raster_depth.texture=gpu::g_device.CreateTexture(&depth_desc);raster_depth.view=raster_depth.texture.CreateView();

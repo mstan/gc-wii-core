@@ -140,6 +140,7 @@ void machine_effect(std::function<void()> effect);
 void ordered_bp_effect(uint32_t reg,uint32_t value);
 void retire_streams(bool wait);
 uint64_t efb_generation=1,color_peek_generation{},depth_peek_generation{};
+uint64_t rollback_session{};
 std::vector<uint8_t> color_peek;
 std::vector<uint32_t> depth_peek;
 uint32_t color_peek_width{},color_peek_height{},depth_peek_width{},depth_peek_height{};
@@ -997,6 +998,7 @@ int start(const GcnllrNativeGxConfig* input) {
     streamed_retired=streamed_polls=streamed_barriers=0;
 #endif
     config=*input;state={};native_frame_state={};failed.store(false);readback_ns.store(0);next_copy_token=0;
+    if(++rollback_session==0)throw std::runtime_error("Renderer session identity exhausted");
     aurora::gfx::gxcore::reset_resident_geometry_stats();
     resident_textures.store(0);resident_texture_hits.store(0);
     resident_texture_materializations.store(0);resident_texture_incompatible.store(0);
@@ -1424,6 +1426,9 @@ int present_spans(const GcnllrNativeGxScanoutSpan* plan,uint32_t count,uint32_t 
 #if !GCNLLR_RETAIL_PIPELINE && !GCNLLR_NATIVE_DRAW_SINK
 #include "checkpoint.inc"
 #endif
+#if GCNLLR_RETAIL_PIPELINE
+#include "rollback.inc"
+#endif
 const GcnllrNativeGxApi api={GCNLLR_NATIVE_GX_ABI,start,fifo,drain,status,peek,stop,present,service,
     GCNLLR_NATIVE_GX_RESIDENT_COPY|GCNLLR_NATIVE_GX_SLICED_TEXTURE_COPIES
         |(GCNLLR_GX_COOPERATIVE_VI ? GCNLLR_NATIVE_GX_COMPLETED_SCANOUT : 0u)
@@ -1622,6 +1627,14 @@ void gcnllr::draw_mouse_settings() {
 extern "C" GCNLLR_EXPORT const GcnllrNativeGxCheckpointApi* gcnllr_native_gx_get_checkpoint_api(uint32_t abi) {
 #if !GCNLLR_RETAIL_PIPELINE && !GCNLLR_NATIVE_DRAW_SINK
     if(abi==GCNLLR_NATIVE_GX_CHECKPOINT_ABI && checkpoint_supported())return &checkpoint_api;
+#else
+    (void)abi;
+#endif
+    return nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcnllrNativeGxRollbackApi* gcnllr_native_gx_get_rollback_api(uint32_t abi) {
+#if GCNLLR_RETAIL_PIPELINE
+    if(abi==GCNLLR_NATIVE_GX_ROLLBACK_ABI && retail_rollback_supported())return &rollback_api;
 #else
     (void)abi;
 #endif

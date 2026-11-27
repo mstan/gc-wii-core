@@ -67,6 +67,13 @@ bool checkpoint_efb_supported(uint32_t* width=nullptr,uint32_t* height=nullptr);
 EfbCheckpoint capture_efb();
 bool restore_efb(const EfbCheckpoint&);
 #endif
+// Same-process immutable GPU versions, including the independent raster grid.
+// No CPU readback or loss of guest-observable EFB depth/color is involved.
+struct RollbackEfb;
+using RollbackEfbHandle=std::shared_ptr<const RollbackEfb>;
+bool rollback_efb_supported();
+RollbackEfbHandle capture_rollback_efb();
+bool restore_rollback_efb(const RollbackEfbHandle&);
 void release_depth();
 void clear_efb(const gxruntime::gxcore::EfbCopyCommand& copy);
 // Seal earlier draws, then record a clear before subsequent native draws or

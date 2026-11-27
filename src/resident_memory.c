@@ -207,6 +207,32 @@ static void retire(GcnResidentMemory* m,uint32_t index,bool discarded) {
     if(discarded)++m->stats.discards;
     m->config.release(m->config.user,&copy);
 }
+
+struct GcnResidentCheckpoint {
+    const GcnResidentMemory* owner;
+    uint32_t capacity,owned;
+    Record records[];
+};
+GcnResidentCheckpoint* gcn_resident_memory_capture(GcnResidentMemory* m) {
+    if(!m || m->busy)return NULL;
+    GcnResidentCheckpoint* saved=malloc(sizeof(*saved)+(size_t)m->config.capacity*sizeof(Record));
+    if(!saved)return NULL;
+    saved->owner=m;saved->capacity=m->config.capacity;saved->owned=m->stats.owned;
+    memcpy(saved->records,m->records,(size_t)saved->capacity*sizeof(Record));
+    return saved;
+}
+bool gcn_resident_memory_restore(GcnResidentMemory* m,const GcnResidentCheckpoint* saved) {
+    if(!m || !saved || saved->owner!=m || saved->capacity!=m->config.capacity || !begin(m))return false;
+    // The opaque checkpoint was constructed by this owner. Retiring the old
+    // branch only releases handles; the new provider is restored afterwards.
+    for(uint32_t i=0;i<m->config.capacity;++i)if(m->records[i].owned)retire(m,i,true);
+    memcpy(m->records,saved->records,(size_t)saved->capacity*sizeof(Record));
+    m->stats.owned=saved->owned;
+    for(uint32_t i=0;i<m->config.capacity;++i)if(m->records[i].owned)record_flags(m,m->records+i,true);
+    // Keep publication generations monotonic across abandoned branches.
+    return finish(m,true);
+}
+void gcn_resident_memory_checkpoint_close(GcnResidentCheckpoint* saved){free(saved);}
 static bool materialize(GcnResidentMemory* m,uint32_t index,unsigned reason,uint32_t offset,uint32_t size) {
     if(m->profile) {
         ++m->materialize_attempts[reason];

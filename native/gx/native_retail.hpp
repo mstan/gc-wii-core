@@ -60,6 +60,19 @@ public:
 #endif
     }
     size_t pending_fifo_size()const{return pending_.size();}
+    std::vector<uint8_t> checkpoint()const {
+#if GCNLLR_GX_ONE_COPY
+        if(!borrowed_.empty())throw std::runtime_error("Retail checkpoint has unconsumed borrowed FIFO bytes");
+#endif
+        return pending_;
+    }
+    void restore_checkpoint(std::vector<uint8_t> pending) {
+        if(pending.size()>16u*1024u*1024u)throw std::runtime_error("Invalid retail checkpoint carry");
+        pending_.swap(pending);
+#if GCNLLR_GX_ONE_COPY
+        borrowed_={};
+#endif
+    }
     const char* last_error()const{return nullptr;}
 #if GCNLLR_GX_ONE_COPY
     uint64_t borrowed_bytes()const{return borrowed_bytes_;}

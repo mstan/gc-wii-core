@@ -58,6 +58,14 @@ set_source_files_properties("${_gcnllr_device_cache_adapted}" TARGET_DIRECTORY a
 # Dawn's Windows loader requires absolute runtime search directories. A DLL
 # service cannot assume that the caller's executable sits beside Dawn/DXC.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu.cpp" _gcnllr_gpu)
+set(_gcnllr_depth_copy ".label = \"Depth texture\",\n      .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,")
+string(FIND "${_gcnllr_gpu}" "${_gcnllr_depth_copy}" _gcnllr_depth_copy_at)
+if(_gcnllr_depth_copy_at EQUAL -1)
+  message(FATAL_ERROR "Pinned native depth texture usage differs")
+endif()
+string(REPLACE "${_gcnllr_depth_copy}"
+  ".label = \"Depth texture\",\n      .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding |\n               (g_graphicsConfig.msaaSamples == 1 ? (wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst) : wgpu::TextureUsage{}),"
+  _gcnllr_gpu "${_gcnllr_gpu}")
 string(PREPEND _gcnllr_gpu "#include <atomic>\n#include <SDL3/SDL_hints.h>\n")
 set(_gcnllr_display_viewport "  uint32_t viewport_width = surface_width;")
 string(FIND "${_gcnllr_gpu}" "${_gcnllr_display_viewport}" _gcnllr_display_offset)

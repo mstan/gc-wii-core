@@ -193,7 +193,10 @@ endif()
 
 # The graphics donor graph also exposes its generic DVD binding. Keep its
 # existing seek semantics on the Windows C ABI without changing the donor.
-if(TARGET gxruntime AND WIN32 AND (MSVC OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC"))
+if(TARGET gxruntime AND WIN32 AND (MSVC OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
+   AND NOT CMAKE_PROJECT_NAME STREQUAL "bluewake_windows")
+  # BlueWake already force-includes its 64-bit POSIX compatibility header.
+  # Defining off_t before that header corrupts the CRT's typedef declaration.
   set_property(SOURCE "${GXRUNTIME_DIR}/src/dvd.c" TARGET_DIRECTORY gxruntime
     APPEND PROPERTY COMPILE_DEFINITIONS fseeko=_fseeki64 off_t=__int64)
 endif()

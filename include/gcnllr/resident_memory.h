@@ -13,6 +13,14 @@ extern "C" {
 #define GCN_RESIDENT_PAGE_FLAG 1u
 
 typedef struct GcnResidentMemory GcnResidentMemory;
+typedef struct GcnResidentCheckpoint GcnResidentCheckpoint;
+/* Owner-thread, same-manager rollback of the token/row map. The caller must
+ * independently retain every referenced immutable token and restore its GPU
+ * provider after restoring this map. No GPU bytes are materialized. Restore
+ * releases the abandoned live tokens and rebuilds page flags/bounds. */
+GcnResidentCheckpoint* gcn_resident_memory_capture(GcnResidentMemory*);
+bool gcn_resident_memory_restore(GcnResidentMemory*,const GcnResidentCheckpoint*);
+void gcn_resident_memory_checkpoint_close(GcnResidentCheckpoint*);
 /* Absolute MEM1 offsets and a half-open limit. Empty pages have equal
  * bounds represented by zero. Low 32 bits are the start, high 32 bits
  * are the limit. The CPU can consume the live view without a query into GX.

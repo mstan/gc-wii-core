@@ -294,6 +294,8 @@ extern "C" bool gcnllr_aurora_geometry_epoch(const void*,uint32_t,uint32_t*,uint
     text=text[:begin]+'  machine_draw_shared_overlay([&] {\n'+body+'\n  });'+text[end:]
     text=text.replace('MaxUniformSize*2u,0,storage',
                       'MaxUniformSize*(machine_overlay_shift_x!=0.f ? 9u : machine_overlay.tiles ? 5u : 2u),0,storage')
+    text=once(text,'} // namespace aurora::gx::fifo',
+        '#include "'+(root/'retail_checkpoint.inc').as_posix()+'"\n} // namespace aurora::gx::fifo')
     return prefix+text
 
 def compose_texture(text):
