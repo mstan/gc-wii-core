@@ -17,51 +17,32 @@ static gpu::TextureWithSampler rollback_attachment(const gpu::TextureWithSampler
     gpu::TextureWithSampler result{};
     result.size=source.size;result.format=source.format;
     const wgpu::TextureDescriptor descriptor{.label="Retained rollback EFB",
-        .usage=wgpu::TextureUsage::RenderAttachment|wgpu::TextureUsage::TextureBinding,
+        .usage=wgpu::TextureUsage::CopySrc|wgpu::TextureUsage::CopyDst,
         .size=source.size,.format=source.format,.sampleCount=1};
     result.texture=gpu::g_device.CreateTexture(&descriptor);
     if(!result.texture)throw std::runtime_error("Rollback attachment allocation failed");
-    result.view=result.texture.CreateView();
-    if(!result.view)throw std::runtime_error("Rollback attachment view failed");
     return result;
 }
 
-static void rollback_copy(const gpu::TextureWithSampler& color,const gpu::TextureWithSampler& depth,
-                          const gpu::TextureWithSampler& target,const gpu::TextureWithSampler& target_depth) {
-    worker::enqueue_work([color,depth,target,target_depth] {
-        constexpr auto code=R"(
-@group(0) @binding(0) var color:texture_2d<f32>;
-@group(0) @binding(1) var depth:texture_depth_2d;
-@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32> {
-    let x=f32((i<<1u)&2u);let y=f32(i&2u);
-    return vec4<f32>(x*2.0-1.0,1.0-y*2.0,0.0,1.0);
+static RollbackEfb rollback_live_efb() {
+    return {gpu::g_frameBuffer,gpu::g_depthBuffer,raster_color,raster_depth,raster_scale};
 }
-struct Output { @location(0) color:vec4<f32>, @builtin(frag_depth) depth:f32 };
-@fragment fn fs(@builtin(position) p:vec4<f32>)->Output {
-    return Output(textureLoad(color,vec2<i32>(p.xy),0),textureLoad(depth,vec2<i32>(p.xy),0));
-})";
-        wgpu::ShaderSourceWGSL source{};source.code=code;
-        const wgpu::ShaderModuleDescriptor shader_desc{.nextInChain=&source,.label="Rollback EFB copy"};
-        const auto shader=gpu::g_device.CreateShaderModule(&shader_desc);
-        const wgpu::ColorTargetState color_state{.format=target.format};
-        const wgpu::FragmentState fragment{.module=shader,.entryPoint="fs",.targetCount=1,.targets=&color_state};
-        const wgpu::DepthStencilState depth_state{.format=target_depth.format,.depthWriteEnabled=true,
-            .depthCompare=wgpu::CompareFunction::Always};
-        const wgpu::RenderPipelineDescriptor descriptor{.label="Rollback EFB color and depth",
-            .vertex={.module=shader,.entryPoint="vs"},.depthStencil=&depth_state,.fragment=&fragment};
-        const auto pipeline=gpu::g_device.CreateRenderPipeline(&descriptor);
-        const std::array entries{wgpu::BindGroupEntry{.binding=0,.textureView=color.view},
-            wgpu::BindGroupEntry{.binding=1,.textureView=depth.view}};
-        const wgpu::BindGroupDescriptor binding{.layout=pipeline.GetBindGroupLayout(0),
-            .entryCount=entries.size(),.entries=entries.data()};
-        const wgpu::RenderPassColorAttachment attachment{.view=target.view,
-            .loadOp=wgpu::LoadOp::Clear,.storeOp=wgpu::StoreOp::Store};
-        const wgpu::RenderPassDepthStencilAttachment depth_attachment{.view=target_depth.view,
-            .depthLoadOp=wgpu::LoadOp::Clear,.depthStoreOp=wgpu::StoreOp::Store,.depthClearValue=0.f};
-        const wgpu::RenderPassDescriptor pass_desc{.label="Retained rollback attachments",
-            .colorAttachmentCount=1,.colorAttachments=&attachment,.depthStencilAttachment=&depth_attachment};
-        auto encoder=gpu::g_device.CreateCommandEncoder();auto pass=encoder.BeginRenderPass(&pass_desc);
-        pass.SetPipeline(pipeline);pass.SetBindGroup(0,gpu::g_device.CreateBindGroup(&binding));pass.Draw(3);pass.End();
+
+static void rollback_copy(const RollbackEfb& source,const RollbackEfb& target) {
+    worker::enqueue_work([source,target] {
+        // Same-format whole-subresource copies preserve color and depth without
+        // shaders, attachment views, bind groups or raster passes. One ordered
+        // submission owns both native and high-resolution attachments.
+        auto encoder=gpu::g_device.CreateCommandEncoder();
+        auto copy=[&](const gpu::TextureWithSampler& from,const gpu::TextureWithSampler& to) {
+            const wgpu::TexelCopyTextureInfo src{.texture=from.texture};
+            const wgpu::TexelCopyTextureInfo dst{.texture=to.texture};
+            encoder.CopyTextureToTexture(&src,&dst,&from.size);
+        };
+        copy(source.color,target.color);copy(source.depth,target.depth);
+        if(source.scale>1) {
+            copy(source.raster_color,target.raster_color);copy(source.raster_depth,target.raster_depth);
+        }
         const auto commands=encoder.Finish();gpu::g_queue.Submit(1,&commands);
     });
 }
@@ -79,8 +60,7 @@ RollbackEfbHandle capture_rollback_efb() {
     // the running renderer intact. Every later exit reopens its continuation.
     finish();
     try {
-        rollback_copy(gpu::g_frameBuffer,gpu::g_depthBuffer,image->color,image->depth);
-        if(raster_scale>1)rollback_copy(raster_color,raster_depth,image->raster_color,image->raster_depth);
+        rollback_copy(rollback_live_efb(),*image);
         worker::synchronize();validate_submission();
     } catch(...) {
         (void)gfx::begin_frame(true);
@@ -95,8 +75,7 @@ bool restore_rollback_efb(const RollbackEfbHandle& image) {
        image->color.size.width!=gpu::g_frameBuffer.size.width ||
        image->color.size.height!=gpu::g_frameBuffer.size.height)return false;
     finish();
-    rollback_copy(image->color,image->depth,gpu::g_frameBuffer,gpu::g_depthBuffer);
-    if(raster_scale>1)rollback_copy(image->raster_color,image->raster_depth,raster_color,raster_depth);
+    rollback_copy(*image,rollback_live_efb());
     worker::synchronize();validate_submission();
     return gfx::begin_frame(true);
 }
