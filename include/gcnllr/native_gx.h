@@ -159,6 +159,19 @@ typedef struct {
 } GcnllrNativeGxCheckpointApi;
 typedef const GcnllrNativeGxCheckpointApi* (*GcnllrNativeGxGetCheckpointApi)(uint32_t abi);
 
+/* Owned, same-process rollback for the native retail renderer. A handle is
+ * tied to one running renderer session and retains immutable GPU resources.
+ * The machine separately owns the token/row memory map, CP/PE and RAM. Drain
+ * the machine producer first; restore its map before this renderer handle.
+ * Close every handle before stopping the renderer. These are not file blobs. */
+#define GCNLLR_NATIVE_GX_ROLLBACK_ABI 1u
+typedef struct {
+    int (*capture)(void** handle);
+    int (*restore)(const void* handle);
+    void (*release)(void* handle);
+} GcnllrNativeGxRollbackApi;
+typedef const GcnllrNativeGxRollbackApi* (*GcnllrNativeGxGetRollbackApi)(uint32_t abi);
+
 /* Optional GameCube input export. It does not change the renderer ABI used
  * by hosts with their own controller stack. */
 #define GCNLLR_GAMECUBE_INPUT_ABI 1u

@@ -100,6 +100,7 @@ struct EncodedImage {
 static gpu::TextureWithSampler scanout;
 static gpu::TextureWithSampler raster_color,raster_resolved,raster_depth;
 static uint32_t raster_scale=1;
+#include "rollback_efb.inc"
 static std::shared_ptr<gpu::TextureWithSampler> presentation_output;
 static wgpu::Buffer presentation_pixels;
 static uint64_t presentation_capacity{};

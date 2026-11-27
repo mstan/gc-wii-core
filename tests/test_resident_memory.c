@@ -276,7 +276,37 @@ static void exact_completion_does_not_observe_replacements(void) {
     f.fail_token=0;assert(gcn_resident_memory_complete(f.manager,3));
     assert(f.released[3]==1);close_fixture(&f);
 }
+static void retained_checkpoint_branches(void) {
+    Fixture f,other;open_fixture(&f,4);open_fixture(&other,4);
+    const GcnResidentRows rows={32,8,3,16};
+    const uint64_t first=publish(&f,1,rows);
+    GcnResidentCheckpoint* earlier=gcn_resident_memory_capture(f.manager);assert(earlier);
+    const uint64_t second=publish(&f,2,rows);assert(second>first);
+    GcnResidentCheckpoint* later=gcn_resident_memory_capture(f.manager);assert(later);
+    assert(!gcn_resident_memory_restore(other.manager,earlier));
+    assert(gcn_resident_memory_restore(f.manager,earlier));
+    assert(!f.attempts[1] && !f.attempts[2]);
+    GcnResidentCopy live;
+    assert(gcn_resident_memory_find(f.manager,32,&live) && live.token==1);
+    assert(gcn_resident_memory_pending(f.manager,32,8));
+    assert(!gcn_resident_memory_owned_range(f.manager,40,8)); /* padding */
+    assert(gcn_resident_memory_prepare_read(f.manager,32,8));
+    assert(f.ram[32]==value(1,0,0) && f.ram[40]==0xcc);
+    assert(publish(&f,3,(GcnResidentRows){512,8,1,8})>second);
+    assert(gcn_resident_memory_restore(f.manager,later));
+    assert(gcn_resident_memory_find(f.manager,32,&live) && live.token==2);
+    assert(!gcn_resident_memory_pending(f.manager,512,8));
+    assert(gcn_resident_memory_prepare_read(f.manager,32,8));
+    assert(f.ram[32]==value(2,0,0));
+    /* A third branch can still return to the older independently retained map. */
+    assert(gcn_resident_memory_restore(f.manager,earlier));
+    assert(gcn_resident_memory_find(f.manager,32,&live) && live.token==1);
+    gcn_resident_memory_checkpoint_close(later);
+    gcn_resident_memory_checkpoint_close(earlier);
+    close_fixture(&f);close_fixture(&other);
+}
 int main(void) {
+    retained_checkpoint_branches();
     configuration_and_floor();padding_and_cross_page();stores_and_generations();
     overlap_and_replacement();eviction();failures_preserve_ownership();
     reentrancy_and_atomic_page_words();layout_oracle();exact_completion_does_not_observe_replacements();
