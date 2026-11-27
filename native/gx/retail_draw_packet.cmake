@@ -5,14 +5,7 @@ set(_gcnllr_draw_packet_source "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/reta
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_LIST_FILE}" "${_gcnllr_gx_donor}/pipeline.hpp" "${_gcnllr_gx_donor}/pipeline.cpp")
 
-function(gcnllr_draw_packet_replace target anchor replacement)
-  string(FIND "${${target}}" "${anchor}" found)
-  if(found EQUAL -1)
-    message(FATAL_ERROR "Pinned retail draw packet boundary differs: ${anchor}")
-  endif()
-  string(REPLACE "${anchor}" "${replacement}" source "${${target}}")
-  set(${target} "${source}" PARENT_SCOPE)
-endfunction()
+include("${CMAKE_CURRENT_LIST_DIR}/source_replace.cmake")
 
 file(READ "${_gcnllr_gx_donor}/pipeline.hpp" _gcnllr_draw_packet)
 gcnllr_draw_packet_replace(_gcnllr_draw_packet "#include \"../gfx/common.hpp\""

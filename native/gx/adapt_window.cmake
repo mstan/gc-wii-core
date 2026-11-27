@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+include("${CMAKE_CURRENT_LIST_DIR}/source_replace.cmake")
 # Adapt a generated copy; preserve the pinned dependency checkout verbatim.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/window.cpp" _gcnllr_window)
 set(_gcnllr_hidden "if ((flags & SDL_WINDOW_HIDDEN) != 0u) {")
@@ -1008,6 +1009,13 @@ set(_gcnllr_resize_cache [=[void clear_caches() noexcept {
   std::lock_guard lock{g_bindGroupCacheMutex};
   g_cachedBindGroups.clear();
 }]=])
+if(GCNLLR_GPU_FRAME_PACKETS)
+  # The packet profile has already added a generation bump to every cache
+  # clear. Resize retains these owners; shutdown still clears and bumps.
+  string(REPLACE "  g_cachedBindGroups.clear();"
+    "  g_cachedBindGroups.clear();\n  g_machineBindGroupGeneration.fetch_add(1, std::memory_order_release);"
+    _gcnllr_resize_cache "${_gcnllr_resize_cache}")
+endif()
 string(FIND "${_gcnllr_common}" "${_gcnllr_resize_cache}" _gcnllr_resize_cache_at)
 if(_gcnllr_resize_cache_at EQUAL -1)
   message(FATAL_ERROR "Pinned native bind-group resize lifetime differs")
