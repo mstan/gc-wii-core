@@ -5,6 +5,7 @@ import ctypes as c
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import time
@@ -19,13 +20,15 @@ def main():
     args=p.parse_args();work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
     os.environ.update(SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0',SDL_AUDIODRIVER='dummy',GCN_AUDIO='0')
     directory=os.add_dll_directory(str(args.library.resolve().parent)) if os.name=='nt' else None
+    header=(Path(__file__).resolve().parents[2]/'include/gcnllr/native_gx.h').read_text(encoding='utf-8')
+    abi=int(re.search(r'^#define GCNLLR_NATIVE_GX_ABI (\d+)u',header,re.M)[1])
     dll=c.CDLL(str(args.library.resolve()))
     dll.gcnllr_native_gx_get_api.argtypes=[c.c_uint32];dll.gcnllr_native_gx_get_api.restype=c.POINTER(Api)
     dll.gc_wii_native_render_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_render_get_api.restype=c.POINTER(NativeApi)
-    gx=dll.gcnllr_native_gx_get_api(12).contents;native=dll.gc_wii_native_render_get_api(1).contents
+    gx=dll.gcnllr_native_gx_get_api(abi).contents;native=dll.gc_wii_native_render_get_api(1).contents
     ram=(c.c_uint8*(24*1024*1024))();c.memset(c.addressof(ram)+0x100,255,32)
     bp_callback=BP(lambda *args:None);write=WRITE(lambda *args:0)
-    config=Config(12,b'Native retail draw binding check',str(work).encode(),str(work/'cache').encode(),1,c.addressof(ram),len(ram),None,bp_callback,write,EPOCH(),EPOCH(),None,None,None,None,RESOLVE(),LOCATE())
+    config=Config(abi,b'Native retail draw binding check',str(work).encode(),str(work/'cache').encode(),1,c.addressof(ram),len(ram),None,bp_callback,write,EPOCH(),EPOCH(),None,None,None,None,RESOLVE(),LOCATE())
     def cp(reg,value):return b'\x08'+bytes([reg])+struct.pack('>I',value)
     def bp(values):return b''.join(b'\x61'+struct.pack('>I',reg<<24|value) for reg,value in values)
     def xf(reg,values,words=False):return b'\x10'+struct.pack('>I',(len(values)-1)<<16|reg)+struct.pack('>'+len(values)*('I' if words else 'f'),*values)

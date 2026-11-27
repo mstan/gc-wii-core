@@ -10,6 +10,7 @@ import ctypes as c
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import struct
 
@@ -102,9 +103,11 @@ def main():
     work=args.work_root.resolve();work.mkdir(parents=True,exist_ok=True);(work/'cache').mkdir(exist_ok=True)
     os.environ.update(SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0',SDL_AUDIODRIVER='dummy',GCN_AUDIO='0')
     directory=os.add_dll_directory(str(args.library.resolve().parent)) if os.name=='nt' else None
+    header=(Path(__file__).resolve().parents[2]/'include/gcnllr/native_gx.h').read_text(encoding='utf-8')
+    abi=int(re.search(r'^#define GCNLLR_NATIVE_GX_ABI (\d+)u',header,re.M)[1])
     dll=c.CDLL(str(args.library.resolve()))
     dll.gcnllr_native_gx_get_api.argtypes=[c.c_uint32];dll.gcnllr_native_gx_get_api.restype=c.POINTER(ExtendedApi)
-    gx=dll.gcnllr_native_gx_get_api(12).contents
+    gx=dll.gcnllr_native_gx_get_api(abi).contents
     dll.gc_wii_native_frame_get_api.argtypes=[c.c_uint32];dll.gc_wii_native_frame_get_api.restype=c.POINTER(FrameApi)
     assert not dll.gc_wii_native_frame_get_api(2),'Unknown native frame ABI accepted'
     frame=dll.gc_wii_native_frame_get_api(1).contents
@@ -194,7 +197,7 @@ def main():
     @BP
     def bp(user,reg,value):events.append(['pe',reg,value])
 
-    config=Config(12,b'Native frame component check',str(work).encode(),str(work/'cache').encode(),1,None,0,None,
+    config=Config(abi,b'Native frame component check',str(work).encode(),str(work/'cache').encode(),1,None,0,None,
         bp,write,EPOCH(),EPOCH(),c.cast(own,c.c_void_p),c.cast(pending,c.c_void_p),c.cast(prepare,c.c_void_p),
         c.cast(retire,c.c_void_p),resolve,locate)
     if args.eager:config.own=config.pending=config.prepare=config.retire=None
