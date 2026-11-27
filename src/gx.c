@@ -20,11 +20,17 @@
 #include <stdio.h>
 #include <stdlib.h>      /* getenv — GCN_GX_STATS cached read, see below */
 #include <string.h>
+#include "gx/gx_memory.h"
+#include "gx/gx_host.h"
+#ifdef _WIN32
 #include <x86intrin.h>   /* __rdtsc — GCN_GX_STATS attribution only */
 #include <windows.h>     /* G3 pipeline worker: CreateThread +
                           * WaitOnAddress/WakeByAddressAll (same idiom as
                           * gx_raster.c's GX-MT pool and dsp.c's worker). */
 #include <immintrin.h>   /* _mm_pause in the pipeline spin phases */
+#else
+#include <pthread.h>
+#endif
 
 /* Staging ("video buffer") capacity. Fifo.cpp keeps a linear buffer that
  * accumulates 32-byte chunks and is consumed a whole-command-at-a-time; leftover
@@ -114,6 +120,7 @@ typedef struct {
 } GcnGx;
 
 static GcnGx s_gx;
+static GcnGxCounters s_counters;
 
 /* ============================================================================
  * GCN_GX_STATS=1: rdtsc-based wall attribution WITHIN gcn_gx_tick, split
@@ -394,7 +401,9 @@ static volatile s32 s_pipe_waiting  = 0;   /* CPU inside WaitOnAddress          
 static volatile s32 s_pipe_epoch    = 0;   /* changed before every worker wake        */
 static volatile s32 s_pipe_quit     = 0;
 static volatile s32 s_pipe_failed   = 0;   /* worker cannot preserve command stream  */
+#ifdef _WIN32
 static HANDLE       s_pipe_h        = NULL;
+#endif
 static int          s_pipe_on       = -1;  /* default on; GCN_GX_PIPELINE=0 disables */
 static int          s_pipe_stats    = -1;  /* GCN_GX_PIPE_STATS=1 transition census */
 static int          s_pipe_unsafe_resume = -1; /* GCN_GX_PIPE_UNSAFE_RESUME=1: baseline-
@@ -424,12 +433,28 @@ static u32 s_pipe_max_deferred_carry = 0;
  * worker materializes that buffer row-by-row while VI runs on the CPU thread;
  * protect only those RAM accesses so scanout cannot publish a hybrid frame.
  * This is deliberately narrower than a pipeline drain. */
+#ifdef _WIN32
 static SRWLOCK s_xfb_lock = SRWLOCK_INIT;
 
 void gcn_gx_xfb_read_begin(void)  { AcquireSRWLockShared(&s_xfb_lock); }
 void gcn_gx_xfb_read_end(void)    { ReleaseSRWLockShared(&s_xfb_lock); }
 void gcn_gx_xfb_write_begin(void) { AcquireSRWLockExclusive(&s_xfb_lock); }
 void gcn_gx_xfb_write_end(void)   { ReleaseSRWLockExclusive(&s_xfb_lock); }
+
+#else
+static pthread_rwlock_t s_xfb_lock = PTHREAD_RWLOCK_INITIALIZER;
+void gcn_gx_xfb_read_begin(void)  { pthread_rwlock_rdlock(&s_xfb_lock); }
+void gcn_gx_xfb_read_end(void)    { pthread_rwlock_unlock(&s_xfb_lock); }
+void gcn_gx_xfb_write_begin(void) { pthread_rwlock_wrlock(&s_xfb_lock); }
+void gcn_gx_xfb_write_end(void)   { pthread_rwlock_unlock(&s_xfb_lock); }
+#endif
+static void gx_pipe_wake(volatile void* address) {
+#ifdef _WIN32
+    WakeByAddressAll((PVOID)address);
+#else
+    (void)address; /* Non-Windows GX executes synchronously. */
+#endif
+}
 
 /* GCN_GX_XFB_HASH=1: chained FNV-1a-64 over every byte ever written to the
  * guest XFB by an EFB->XFB copy, in publication order. This boundary (the
@@ -485,7 +510,7 @@ static int gx_xfb_dump_on(void) {
         const char* dir = getenv("GCN_GX_XFB_DUMP");
         if (dir && dir[0]) {
             snprintf(s_xfb_dump_dir, sizeof s_xfb_dump_dir, "%s", dir);
-            CreateDirectoryA(s_xfb_dump_dir, NULL);
+            gx_host_mkdir(s_xfb_dump_dir);
             const char* every = getenv("GCN_GX_XFB_DUMP_EVERY");
             if (every && every[0]) {
                 char* end = NULL;
@@ -596,7 +621,9 @@ void gcn_gx_set_frame_count(u64 frames) { s_gx_frames = frames; }
  * stream). Provenance stamp for gx_raster's coverage-anomaly census. */
 u32 gcn_gx_current_dl(void) { return s_gx.cur_dl_addr; }
 
+#ifdef _WIN32
 static DWORD WINAPI gx_pipe_worker(LPVOID param);
+#endif
 
 /* A worker failure cannot safely fall back to synchronous decode: CP already
  * consumed the queued bytes, and some may remain only in the worker staging
@@ -611,6 +638,8 @@ static void gx_pipe_abort_if_failed(void) {
 }
 
 static int gx_pipe_on(void) {
+#if defined(_WIN32) && !defined(GCN_GX_SOFTWARE_ONLY)
+
     if (s_pipe_on < 0) {
         const char* stats = getenv("GCN_GX_PIPE_STATS");
         s_pipe_stats = (stats && stats[0] == '1') ? 1 : 0;
@@ -640,16 +669,23 @@ static int gx_pipe_on(void) {
     }
     gx_pipe_abort_if_failed();
     return s_pipe_on && !s_pipe_poisoned && !s_pipe_syncmode;
+#else
+    s_pipe_on = 0;
+    return 0;
+#endif
+
 }
 
 /* Wait until the worker has retired through `target` produced-bytes. */
 static void gx_pipe_wait_retired(s64 target) {
+#ifdef _WIN32
+
     int spins = 0;
     for (;;) {
         gx_pipe_abort_if_failed();
         s64 r = __atomic_load_n(&s_pipe_retired, __ATOMIC_ACQUIRE);
         if (r >= target) return;
-        if (++spins < 16384) { _mm_pause(); continue; }
+        if (++spins < 16384) { gx_host_relax(); continue; }
         s64 expect = r;
         __atomic_store_n(&s_pipe_waiting, 1, __ATOMIC_SEQ_CST);
         /* A worker-failure wake does not change s_pipe_retired, so it can race
@@ -658,6 +694,10 @@ static void gx_pipe_wait_retired(s64 target) {
         WaitOnAddress((volatile VOID*)&s_pipe_retired, &expect, sizeof expect, 100u);
         __atomic_store_n(&s_pipe_waiting, 0, __ATOMIC_SEQ_CST);
     }
+#else
+    (void)target;
+#endif
+
 }
 
 /* Public join: every whole command pushed so far is decoded (a partial
@@ -669,6 +709,8 @@ static void gx_pipe_wait_retired(s64 target) {
  * end-of-run (boot.c pre-GCN_MEM_DUMP), debug-server screenshots, the PI
  * fifo-reset hook (gp.c), and the poison transition below. */
 static void gx_pipe_drain_worker(void) {
+#ifdef _WIN32
+
     if (s_pipe_on != 1) return;
     s64 target = __atomic_load_n(&s_pipe_produced, __ATOMIC_RELAXED);
     int spins = 0;
@@ -676,12 +718,16 @@ static void gx_pipe_drain_worker(void) {
         gx_pipe_abort_if_failed();
         s64 d = __atomic_load_n(&s_pipe_done_upto, __ATOMIC_ACQUIRE);
         if (d >= target) return;
-        if (++spins < 16384) { _mm_pause(); continue; }
+        if (++spins < 16384) { gx_host_relax(); continue; }
         s64 expect = d;
         __atomic_store_n(&s_pipe_waiting, 1, __ATOMIC_SEQ_CST);
         WaitOnAddress((volatile VOID*)&s_pipe_done_upto, &expect, sizeof expect, 100u);
         __atomic_store_n(&s_pipe_waiting, 0, __ATOMIC_SEQ_CST);
     }
+#else
+    /* The synchronous fallback has no queued worker. */
+#endif
+
 }
 
 void gcn_gx_pipeline_drain(void) {
@@ -763,12 +809,14 @@ void gcn_gx_pipeline_shutdown(void) {
         gcn_gx_pipeline_drain();
         __atomic_store_n(&s_pipe_quit, 1, __ATOMIC_RELEASE);
         __atomic_add_fetch(&s_pipe_epoch, 1, __ATOMIC_RELEASE);
-        WakeByAddressAll((PVOID)&s_pipe_epoch);
+        gx_pipe_wake(&s_pipe_epoch);
+#ifdef _WIN32
         if (s_pipe_h) {
             WaitForSingleObject(s_pipe_h, INFINITE);
             CloseHandle(s_pipe_h);
             s_pipe_h = NULL;
         }
+#endif
         s_pipe_on = 0;
     }
     if (s_gxstats == 1) {
@@ -846,7 +894,7 @@ static void gx_pipe_push_chunk(const u8* src) {
                      __ATOMIC_SEQ_CST);
     __atomic_add_fetch(&s_pipe_epoch, 1, __ATOMIC_RELEASE);
     if (__atomic_load_n(&s_pipe_parked, __ATOMIC_SEQ_CST))
-        WakeByAddressAll((PVOID)&s_pipe_epoch);
+        gx_pipe_wake(&s_pipe_epoch);
     if (s_pipe_lockstep == -1) {
         const char* e = getenv("GCN_GX_PIPE_LOCKSTEP");
         s_pipe_lockstep = (e && e[0] == '1') ? 1 : 0;
@@ -959,6 +1007,7 @@ static s64 gx_scan_chunk(const u8* chunk, s64 chunk_start_off, int* poison) {
     return last_fence;
 }
 
+#ifdef _WIN32
 static DWORD WINAPI gx_pipe_worker(LPVOID param) {
     (void)param;
     /* This producer shares the rendered path's real-time audio deadline with
@@ -977,7 +1026,7 @@ static DWORD WINAPI gx_pipe_worker(LPVOID param) {
                 produced = __atomic_load_n(&s_pipe_produced, __ATOMIC_ACQUIRE);
                 if (produced != pulled ||
                     __atomic_load_n(&s_pipe_quit, __ATOMIC_ACQUIRE)) break;
-                if (++spins < 16384) { _mm_pause(); continue; }
+                if (++spins < 16384) { gx_host_relax(); continue; }
                 s32 expect = epoch;
                 __atomic_store_n(&s_pipe_parked, 1, __ATOMIC_SEQ_CST);
                 WaitOnAddress((volatile VOID*)&s_pipe_epoch, &expect,
@@ -1008,8 +1057,8 @@ static DWORD WINAPI gx_pipe_worker(LPVOID param) {
             __atomic_store_n(&s_pipe_failed, 1, __ATOMIC_RELEASE);
             /* Published offsets intentionally do not advance. Wake every CPU
              * wait site so it observes s_pipe_failed and aborts loudly. */
-            WakeByAddressAll((PVOID)&s_pipe_retired);
-            WakeByAddressAll((PVOID)&s_pipe_done_upto);
+            gx_pipe_wake(&s_pipe_retired);
+            gx_pipe_wake(&s_pipe_done_upto);
             return 0;
         }
         memcpy(gx->buf + gx->buf_len, s_pipe_ring + (pulled & (GX_PIPE_CAP - 1)), take);
@@ -1030,11 +1079,12 @@ static DWORD WINAPI gx_pipe_worker(LPVOID param) {
         __atomic_store_n(&s_pipe_retired, pulled - (s64)gx->buf_len, __ATOMIC_SEQ_CST);
         __atomic_store_n(&s_pipe_done_upto, pulled, __ATOMIC_SEQ_CST);
         if (__atomic_load_n(&s_pipe_waiting, __ATOMIC_SEQ_CST)) {
-            WakeByAddressAll((PVOID)&s_pipe_retired);
-            WakeByAddressAll((PVOID)&s_pipe_done_upto);
+            gx_pipe_wake(&s_pipe_retired);
+            gx_pipe_wake(&s_pipe_done_upto);
         }
     }
 }
+#endif
 
 /* Sync-mode transition: an unsizable top-level command (the IPL draws one
  * 4-vertex quad per frame OUTSIDE any display list, so this fires every
@@ -1441,11 +1491,12 @@ static void gx_on_indexed_xf(GcnGx* gx, u8 op, u32 value) {
     u32 stride = gx->cpst.array_strides[array];
     u64 src = (u64)base + (u64)index * stride;
     u64 bytes = (u64)count * 4u;
-    if (!gx->cpu || !gx->cpu->ram || src + bytes > (u64)gx->cpu->ram_size) {
+    const u8* data = gcn_gx_memory(gx->cpu, src, bytes, NULL);
+    if (!data) {
         static u32 warned = 0;
         if (warned < 8u) {
             fprintf(stderr,
-                    "gx: indexed XF load out of MEM1 "
+                    "gx: indexed XF load out of main RAM "
                     "(op=0x%02X array=%u index=%u addr=0x%04X count=%u "
                     "base=0x%08X stride=%u)\n",
                     op, array, index, address, count, gx->cpst.array_bases[array],
@@ -1455,7 +1506,6 @@ static void gx_on_indexed_xf(GcnGx* gx, u8 op, u32 value) {
         return;
     }
 
-    const u8* data = gx->cpu->ram + src;
     for (u8 i = 0; i < count; ++i) {
         u32 addr = (u32)address + i;
         if (addr < GX_XF_MEM_WORDS) {
@@ -1507,7 +1557,12 @@ u32 gcn_gx_xf_words(void) { return GX_XF_MEM_WORDS; }
  * thread: call these before gcn_gx_tick/gcn_gx_pipeline_drain are ever
  * invoked again). */
 void gcn_gx_set_bp(const u32* bp) {
-    if (bp) memcpy(s_gx.bp, bp, sizeof s_gx.bp);
+    if (bp) {
+        memcpy(s_gx.bp, bp, sizeof s_gx.bp);
+#ifndef GCNLLR_NATIVE_GX
+        for (u32 cmd = 0; cmd < 256; ++cmd) gx_raster_notify_bp_write(cmd);
+#endif
+    }
 }
 void gcn_gx_set_xf(const u32* xf, u32 words) {
     if (!xf) return;
@@ -1552,9 +1607,10 @@ static void gx_on_bp(GcnGx* gx, u8 cmd, u32 value) {
 
     gx_raster_record_bp_write(cmd, value, gx->cpu ? gx->cpu->pc : 0u, gx->cur_dl_addr);
 
-    if (gx->bp[cmd] != value)
-        gx_raster_notify_bp_write(cmd);
+    const u32 previous = gx->bp[cmd];
     gx->bp[cmd] = value;
+    if (previous != value)
+        gx_raster_notify_bp_write(cmd);
 
     switch (cmd) {
     case GX_BP_SETDRAWDONE:            /* BPStructs.cpp:180-201 */
@@ -1610,23 +1666,27 @@ static void gx_on_bp(GcnGx* gx, u8 cmd, u32 value) {
          * clamped and logged instead of read out of bounds. */
         u32 tmem_addr = (value & 0x3FFu) << 9;
         u32 count = ((value >> 10) & 0x7FFu) * 32u;
-        u32 src = (gx->bp[GX_BP_LOADTLUT0] << 5) & 0x01FFFFFFu;
+        u32 src = (gx->bp[GX_BP_LOADTLUT0] << 5) &
+                  (gx->cpu && gx->cpu->mem2 ? 0x1fffffffu : 0x01ffffffu);
         CPUState* cpu = gx->cpu;
-        if (cpu && cpu->ram && (u64)src + count <= (u64)cpu->ram_size) {
-            memcpy(s_gx_tmem + tmem_addr, cpu->ram + src, count);
+        const u8* source = gcn_gx_memory(cpu, src, count, NULL);
+        if (source) {
+            memcpy(s_gx_tmem + tmem_addr, source, count);
         } else {
-            fprintf(stderr, "gx: LOADTLUT source out of MEM1 (src 0x%08X count %u) — skipped\n",
+            fprintf(stderr, "gx: LOADTLUT source out of main RAM (src 0x%08X count %u) — skipped\n",
                     src, count);
         }
         break;
     }
     case GX_BP_TRIGGER_EFB_COPY:       /* BPStructs.cpp:240-395 */
+        if (gx->bp[0x52] & (1u << 14)) ++s_counters.display_copies;
+        else ++s_counters.texture_copies;
         /* GCN_GX_STATS bucket 4 (EFB): timed only at this call site, not the
          * BP dispatch around it — the off path below is byte-identical work. */
         if (s_gxstats) {
-            u64 t0 = __rdtsc();
+            u64 t0 = gx_host_ticks();
             gx_render_efb_copy(&gx->cpst);
-            s_gx_tsc[GX_STAT_EFB] += __rdtsc() - t0;
+            s_gx_tsc[GX_STAT_EFB] += gx_host_ticks() - t0;
             s_gx_efbcopies++;
         } else {
             gx_render_efb_copy(&gx->cpst);
@@ -1698,8 +1758,7 @@ static u32 gx_run_command(GcnGx* gx, const u8* data, u32 available) {
     case GX_OP_LOAD_INDX_D: {
         if (available < 5u) return 0;
         if (note_once(&gx->seen_opcode[op]))
-            fprintf(stderr, "gx: opcode LOAD_INDX_%c first seen (indexed XF "
-                            "load) — payload consumed, load skipped\n",
+            fprintf(stderr, "gx: opcode LOAD_INDX_%c first seen (indexed XF load)\n",
                     'A' + (int)((op - GX_OP_LOAD_INDX_A) / 8));
         gx_on_indexed_xf(gx, op, rd32(&data[1]));
         return 5;
@@ -1724,16 +1783,16 @@ static u32 gx_run_command(GcnGx* gx, const u8* data, u32 available) {
         }
         CPUState* cpu = gx->cpu;
         u32 phys = addr & 0x1FFFFFFFu;
-        if (cpu && cpu->ram && size > 0u &&
-            (u64)phys + (u64)size <= (u64)cpu->ram_size) {
+        const u8* list = gcn_gx_memory(cpu, phys, size, NULL);
+        if (list && size > 0u) {
             if (s_gxstats) s_gx_dlcalls++;   /* GCN_GX_STATS: DL calls counter */
             gx->dl_depth++;
             gx->cur_dl_addr = addr;
-            u64 pre = dl_hash(cpu->ram + phys, size);
+            u64 pre = dl_hash(list, size);
             if (size > s_dl_max_bytes) s_dl_max_bytes = size;
-            gx_run(gx, cpu->ram + phys, size);
+            gx_run(gx, list, size);
             s_dl_execs++;
-            if (dl_hash(cpu->ram + phys, size) != pre) {
+            if (dl_hash(list, size) != pre) {
                 s_dl_tears++;
                 if (s_dl_tears <= 8u || (s_dl_tears & 1023u) == 0u)
                     fprintf(stderr,
@@ -1748,7 +1807,7 @@ static u32 gx_run_command(GcnGx* gx, const u8* data, u32 available) {
         } else if (size > 0u) {
             static int warned = 0;
             if (!warned) {
-                fprintf(stderr, "gx: display list 0x%08X size %u out of MEM1 range "
+                fprintf(stderr, "gx: display list 0x%08X size %u out of main RAM range "
                                 "— skipped\n", addr, size);
                 warned = 1;
             }
@@ -1818,14 +1877,15 @@ static u32 gx_run_command(GcnGx* gx, const u8* data, u32 available) {
             } else {
                 s_drawlog_overflow = 1;
             }
+            ++s_counters.draws;
             /* Rasterize (SWVertexLoader -> TransformUnit -> Clipper ->
              * Rasterizer -> Tev). The payload is contiguous in `data`.
              * GCN_GX_STATS bucket 3 (DRAW): timed only at this call site — the
              * off path below is byte-identical work. */
             if (s_gxstats) {
-                u64 t0 = __rdtsc();
+                u64 t0 = gx_host_ticks();
                 gx_render_draw(&gx->cpst, prim, vat, &data[3], nverts, vsize);
-                s_gx_tsc[GX_STAT_DRAW] += __rdtsc() - t0;
+                s_gx_tsc[GX_STAT_DRAW] += gx_host_ticks() - t0;
                 s_gx_draws++;
                 s_gx_verts += nverts;
             } else {
@@ -1895,6 +1955,7 @@ void gcn_gx_init(CPUState* cpu, GcnCp* cp, GcnPe* pe) {
      * would mask every BP command until the guest explicitly touched 0xFE. */
     s_gx.bp[GX_BP_MASK] = 0x00FFFFFFu;
     s_gx_frames = 0;
+    memset(&s_counters, 0, sizeof s_counters);
     __atomic_store_n(&s_xfb_generation, 0u, __ATOMIC_RELAXED);
     s_gx.cpu = cpu;
     s_gx.cp  = cp;
@@ -1905,6 +1966,31 @@ void gcn_gx_init(CPUState* cpu, GcnCp* cp, GcnPe* pe) {
     gcn_native_gx_machine_init(cpu,cp,pe);
 #else
     gx_render_init(cpu, s_gx.bp, s_gx.xf);
+#endif
+}
+
+void gcn_gx_counters(GcnGxCounters* counters) {
+    if (counters) *counters = s_counters;
+}
+
+int gcn_gx_submit(const u8* bytes, u32 size) {
+#ifdef GCNLLR_NATIVE_GX
+    (void)bytes; (void)size;
+    return 0;
+#else
+    GcnGx* gx = &s_gx;
+    if (!gx->cpu || s_pipe_on == 1 || (!bytes && size) || size > GX_BUF_CAP - gx->buf_len)
+        return 0;
+    /* The caller owns CP consumption. Decode immediately on its machine
+     * thread so RAM copies precede PE completion and CPU observations. */
+    s_pipe_on = 0;
+    if (size) memcpy(gx->buf + gx->buf_len, bytes, size);
+    gx->buf_len += size;
+    s_counters.fifo_bytes += size;
+    u32 used = gx_run(gx, gx->buf, gx->buf_len);
+    gx->buf_len -= used;
+    if (gx->buf_len) memmove(gx->buf, gx->buf + used, gx->buf_len);
+    return !gx->cpu->halted;
 #endif
 }
 
@@ -1951,16 +2037,16 @@ void gcn_gx_tick(u32 cycles) {
                !gcn_cp_at_breakpoint(gx->cp)) {
             u32 rptr = gcn_cp_fifo_read_pointer(gx->cp);
             u32 phys = rptr & 0x1FFFFFFFu;
-            if ((u64)phys + GCN_CP_GATHER_PIPE_SIZE > (u64)gx->cpu->ram_size) {
+            if (!gcn_gx_memory(gx->cpu, phys, GCN_CP_GATHER_PIPE_SIZE, NULL)) {
                 static int warned = 0;
                 if (!warned) {
-                    fprintf(stderr, "gx: FIFO read pointer 0x%08X out of MEM1 range — "
+                    fprintf(stderr, "gx: FIFO read pointer 0x%08X out of main RAM range — "
                                     "drain halted\n", rptr);
                     warned = 1;
                 }
                 break;
             }
-            const u8* chunk = gx->cpu->ram + phys;
+            const u8* chunk = gcn_gx_memory(gx->cpu, phys, GCN_CP_GATHER_PIPE_SIZE, NULL);
             s64 f = gx_scan_chunk(chunk, 0, &poison);
             if (poison) {
                 /* Do NOT push this chunk; the synchronous fall-through takes
@@ -1993,10 +2079,10 @@ void gcn_gx_tick(u32 cycles) {
          * :215-236 copies a GATHER_PIPE_SIZE chunk into the video buffer). */
         u32 rptr = gcn_cp_fifo_read_pointer(gx->cp);
         u32 phys = rptr & 0x1FFFFFFFu;
-        if ((u64)phys + GCN_CP_GATHER_PIPE_SIZE > (u64)gx->cpu->ram_size) {
+        if (!gcn_gx_memory(gx->cpu, phys, GCN_CP_GATHER_PIPE_SIZE, NULL)) {
             static int warned = 0;
             if (!warned) {
-                fprintf(stderr, "gx: FIFO read pointer 0x%08X out of MEM1 range — "
+                fprintf(stderr, "gx: FIFO read pointer 0x%08X out of main RAM range — "
                                 "drain halted\n", rptr);
                 warned = 1;
             }
@@ -2016,15 +2102,15 @@ void gcn_gx_tick(u32 cycles) {
         /* GCN_GX_STATS bucket 1 (FIFO): the chunk copy + CP consume. The off
          * path is byte-identical work, zero timing calls. */
         if (s_gxstats) {
-            u64 t0 = __rdtsc();
-            memcpy(gx->buf + gx->buf_len, gx->cpu->ram + phys, GCN_CP_GATHER_PIPE_SIZE);
+            u64 t0 = gx_host_ticks();
+            memcpy(gx->buf + gx->buf_len, gcn_gx_memory(gx->cpu, phys, GCN_CP_GATHER_PIPE_SIZE, NULL), GCN_CP_GATHER_PIPE_SIZE);
             gx->buf_len += GCN_CP_GATHER_PIPE_SIZE;
             /* Advance the read side (wrap + distance-32 + status/interrupt eval). */
             gcn_cp_gpu_consume_chunk(gx->cp);
-            s_gx_tsc[GX_STAT_FIFO] += __rdtsc() - t0;
+            s_gx_tsc[GX_STAT_FIFO] += gx_host_ticks() - t0;
             s_gx_chunks++;
         } else {
-            memcpy(gx->buf + gx->buf_len, gx->cpu->ram + phys, GCN_CP_GATHER_PIPE_SIZE);
+            memcpy(gx->buf + gx->buf_len, gcn_gx_memory(gx->cpu, phys, GCN_CP_GATHER_PIPE_SIZE, NULL), GCN_CP_GATHER_PIPE_SIZE);
             gx->buf_len += GCN_CP_GATHER_PIPE_SIZE;
             gcn_cp_gpu_consume_chunk(gx->cp);
         }
@@ -2051,9 +2137,9 @@ void gcn_gx_tick(u32 cycles) {
         u32 consumed;
         if (s_gxstats) {
             u64 draw_efb_before = s_gx_tsc[GX_STAT_DRAW] + s_gx_tsc[GX_STAT_EFB];
-            u64 t0 = __rdtsc();
+            u64 t0 = gx_host_ticks();
             consumed = gx_run(gx, gx->buf, gx->buf_len);
-            u64 t1 = __rdtsc();
+            u64 t1 = gx_host_ticks();
             u64 draw_efb_after = s_gx_tsc[GX_STAT_DRAW] + s_gx_tsc[GX_STAT_EFB];
             s_gx_tsc[GX_STAT_DECODE] += (t1 - t0) - (draw_efb_after - draw_efb_before);
         } else {
@@ -2063,11 +2149,11 @@ void gcn_gx_tick(u32 cycles) {
         if (consumed > 0u) {
             /* GCN_GX_STATS bucket 1 (FIFO) continued: the leftover memmove. */
             if (s_gxstats) {
-                u64 t0 = __rdtsc();
+                u64 t0 = gx_host_ticks();
                 if (consumed < gx->buf_len)
                     memmove(gx->buf, gx->buf + consumed, gx->buf_len - consumed);
                 gx->buf_len -= consumed;
-                s_gx_tsc[GX_STAT_FIFO] += __rdtsc() - t0;
+                s_gx_tsc[GX_STAT_FIFO] += gx_host_ticks() - t0;
             } else {
                 if (consumed < gx->buf_len)
                     memmove(gx->buf, gx->buf + consumed, gx->buf_len - consumed);

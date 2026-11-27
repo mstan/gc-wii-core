@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: MIT
+#pragma once
+#include <gcnllr/native_render.h>
+#include <gxruntime/gxcore/shader.hpp>
+#include <unordered_map>
+
+namespace gcnllr {
+bool valid_native_texture(const GcWiiNativeTexture&);
+// Owns converted native geometry, not a shadow CP/XF/BP state machine.
+// The GPU backend consumes DrawPlan directly: no FIFO or register decoder.
+class NativeScene {
+public:
+    uint64_t create_mesh(const GcWiiNativeMesh&,const float* extra_uv=nullptr,uint32_t extra_count=0);
+    uint32_t uv_count(uint64_t) const;
+    bool destroy_mesh(uint64_t);
+    gxruntime::gxcore::DrawPlan* prepare(const GcWiiNativeDraw&);
+    void submitted() { ++status_.draws; }
+    void rejected() { ++status_.rejected; }
+    void reset();
+    GcWiiNativeRenderStatus status() const { return status_; }
+private:
+    uint64_t next_handle_{1};
+    GcWiiNativeRenderStatus status_{};
+    struct Mesh {gxruntime::gxcore::DrawPlan plan;uint32_t uv_count=1;};
+    std::unordered_map<uint64_t, Mesh> meshes_;
+};
+}

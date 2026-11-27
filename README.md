@@ -36,8 +36,23 @@ the shared bus, and consumers may supply an ordered drain hook. The extracted
 audio-DMA register/pump functions serve both the legacy DSP wrapper and native
 consumers, with explicit transfer periods and optional multi-bank CPU memory.
 
+The portable row/token ownership manager in `resident_memory.h` and
+`src/resident_memory.c` is shared from gcnllr commit
+`97d2d4ea96d21a52319b7d45c9f504a496dd2596`, with its MIT notices retained.
+Consumers own memory-access guards and physical-bank normalization; merely
+publishing a retained generation does not make stale RAM safe to access.
+
 CPU DMAU/DMAL transfers use the locked-L1 backing and the ordinary memory bus,
 including MEM2 when supplied by a Wii consumer. Split block lengths, the
 zero-length 128-line encoding, direction and the self-clearing trigger are
 modeled. Transfers complete synchronously; hardware queue latency is not
 modeled. Writes retain native-code invalidation and reservation handling.
+
+The shared native providers retain both the owned-VI and typed-output profiles.
+`GCNLLR_NATIVE_TYPED_OUTPUT` selects the typed frame/raster presentation owner;
+GPU-owned display/copy profiles retain their established ownership contracts.
+Native GX ABI 13 assigns distinct capability bits to display color and serial
+RAM writes, and rejects older provider layouts at lookup. The shared resident
+memory manager also exposes page bounds and partial-page observations, while
+the domain scheduler supports the original four-domain callback profile and
+an explicit Wii time domain under the same cached deadline owner.

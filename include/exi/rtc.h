@@ -14,6 +14,7 @@ extern "C" {
 
 #define GCN_RTC_GC_EPOCH_UNIX 0x386D4380u
 #define GCN_RTC_CORE_CLOCK_HZ  486000000ull
+#define GCN_RTC_WII_CORE_CLOCK_HZ 729000000ull
 
 typedef struct {
     u32 counter;
@@ -24,6 +25,10 @@ typedef struct {
 void gcn_rtc_set_fixed(GcnRtc* rtc, u32 counter);
 void gcn_rtc_start(GcnRtc* rtc, u32 counter, u64 core_cycles);
 u32 gcn_rtc_read(GcnRtc* rtc, u64 core_cycles);
+/* Explicit caller clock; retain one profile for the lifetime of a running
+ * counter, including save/load. No frequency is stored in snapshot state.
+ * Zero Hz is invalid and leaves the counter/anchor unchanged. */
+u32 gcn_rtc_read_clock(GcnRtc* rtc, u64 core_cycles, u64 clock_hz);
 void gcn_rtc_write(GcnRtc* rtc, u32 counter, u64 core_cycles);
 
 /* Pure host-local-time conversion plus the production one-shot sampler. */

@@ -38,20 +38,11 @@
  *                                         EncodeXFB:577-664; clear-color unpack
  *                                         VideoBackends/Software/EfbCopy.cpp:18-19
  *
- * SCOPE THIS INCREMENT (ROADMAP M2 first half): command drain + CP/XF/BP state +
- * the EFB copy-CLEAR to the XFB. Geometry rasterization is the NEXT increment:
- * draw commands (0x80-0xBF) have their vertex payload SKIPPED by the exact byte
- * count computed from VCD/VAT — a wrong count desyncs the stream, so if the size
- * cannot be computed exactly the drain ERRORS loudly and stops rather than
- * guessing. Everything unimplemented is LOUD (one-time stderr per opcode /
- * register), never silently skipped.
- *
- * DELIBERATELY DEFERRED (diverges loudly if exercised, never silently faked):
- *   - Geometry: draws are decoded + skipped, one-time loud per primitive type.
- *   - Real EFB->XFB content copy (needs a rasterizer): destination left
- *     untouched, one-time loud. Honest stale/black output beats fake content.
- *   - EFB->texture copy (copy_to_xfb=0): one-time loud no-op.
- *   - LOAD_INDX_A..D: one-time loud (reported if the IPL uses them).
+ * Commands execute CP/XF/BP state, indexed XF loads, display lists, geometry
+ * rasterization, EFB copies and completion signals. Main-RAM resources may
+ * reside in MEM1 or the Wii's distinct MEM2 bank. Unsupported raster behavior
+ * remains visible in diagnostics; command sizing never guesses past a partial
+ * primitive. See gx_raster.h for the software rendering transcription map.
  */
 #ifndef GCN_GX_GX_H
 #define GCN_GX_GX_H
@@ -83,6 +74,15 @@ static inline int gcn_gx_pipeline_carry_can_resume(u32 carry_len,
  * access), the CP register file (read pointer / distance / enables), and the PE
  * (token/finish latches raised by SETDRAWDONE / PE_TOKEN commands). */
 void gcn_gx_init(CPUState* cpu, GcnCp* cp, GcnPe* pe);
+
+/* Synchronous ingress for machines which already own CP/FIFO advancement.
+ * Preserves incomplete commands across submissions; never consumes CP twice
+ * or starts the asynchronous GameCube FIFO worker. */
+int gcn_gx_submit(const u8* bytes, u32 size);
+typedef struct {
+    u64 fifo_bytes, draws, display_copies, texture_copies;
+} GcnGxCounters;
+void gcn_gx_counters(GcnGxCounters* counters);
 
 /* Drain up to GCN_GX_DRAIN_BYTES_PER_TICK from the FIFO and execute whole
  * commands. Called once per retired block by the dispatch loop, after

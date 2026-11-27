@@ -12,6 +12,15 @@ def once(text,old,new):
     return text.replace(old,new,1)
 
 def compose(text,root,packet_draw_state=False,draw_packet_header=None):
+    text=once(text,'''            if (srcRow < 13) {
+              tcg.src = rowToSrc[srcRow];
+            }''','''            if (tgType == 2 || tgType == 3) {
+              // Both color texgens use XF source row 2. The texgen type
+              // selects which computed color channel supplies S/T.
+              tcg.src = tgType == 2 ? GX_TG_COLOR0 : GX_TG_COLOR1;
+            } else if (srcRow < 13) {
+              tcg.src = rowToSrc[srcRow];
+            }''')
     # Materialize the hardware's full 1..1024 range. The donor's raw fallback
     # getters mask after adding one, which turns a 1024-pixel axis into zero.
     text=once(text,'        slot.mWidth = 0;\n        slot.mHeight = 0;',

@@ -58,6 +58,15 @@ set_source_files_properties("${_gcnllr_device_cache_adapted}" TARGET_DIRECTORY a
 # service cannot assume that the caller's executable sits beside Dawn/DXC.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu.cpp" _gcnllr_gpu)
 string(PREPEND _gcnllr_gpu "#include <atomic>\n#include <SDL3/SDL_hints.h>\n")
+set(_gcnllr_display_viewport "  uint32_t viewport_width = surface_width;")
+string(FIND "${_gcnllr_gpu}" "${_gcnllr_display_viewport}" _gcnllr_display_offset)
+if(_gcnllr_display_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned native presentation viewport differs")
+endif()
+string(REPLACE "${_gcnllr_display_viewport}"
+  "  gcnllr::display_aspect::apply_dimensions(content_width, content_height);\n${_gcnllr_display_viewport}"
+  _gcnllr_gpu "${_gcnllr_gpu}")
+string(PREPEND _gcnllr_gpu "#include \"${GC_WII_GX_ROOT}/native/gx/display_aspect.hpp\"\n")
 set(_gcnllr_power ".powerPreference = wgpu::PowerPreference::HighPerformance,")
 string(FIND "${_gcnllr_gpu}" "${_gcnllr_power}" _gcnllr_power_offset)
 if(_gcnllr_power_offset EQUAL -1)
@@ -217,6 +226,42 @@ list(REMOVE_ITEM _gcnllr_readback_sources lib/gfx/efb_readback.cpp)
 list(APPEND _gcnllr_readback_sources "${_gcnllr_readback_path}")
 set_property(TARGET aurora_gx PROPERTY SOURCES "${_gcnllr_readback_sources}")
 target_include_directories(aurora_gx PRIVATE "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx")
+# Pass timestamp descriptors own QuerySet handles. Release the descriptor ring
+# during normal shutdown, rather than from a function-static destructor under
+# the Windows loader lock after the shader compiler has torn down its TLS.
+file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/webgpu/gpu_prof.cpp" _gcnllr_gpu_prof)
+set(_profiler_ring "std::array<Slot, RingDepth> g_slots;")
+set(_profiler_shutdown "void shutdown() {\n  g_querySet = {};")
+set(_profiler_local [=[  static std::array<wgpu::PassTimestampWrites, 4> writes;
+  static size_t writesIndex = 0;
+  auto& out = writes[writesIndex++ % writes.size()];]=])
+foreach(_profiler_anchor IN ITEMS "${_profiler_ring}" "${_profiler_shutdown}" "${_profiler_local}")
+  string(FIND "${_gcnllr_gpu_prof}" "${_profiler_anchor}" _profiler_offset)
+  if(_profiler_offset EQUAL -1)
+    message(FATAL_ERROR "Pinned Aurora GPU profiler lifetime boundary differs")
+  endif()
+endforeach()
+string(REPLACE "${_profiler_ring}"
+  "${_profiler_ring}\nstd::array<wgpu::PassTimestampWrites, 4> g_passWrites;\nsize_t g_passWritesIndex = 0;"
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+string(REPLACE "${_profiler_shutdown}"
+  "void shutdown() {\n  g_passWrites = {};\n  g_passWritesIndex = 0;\n  g_querySet = {};"
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+string(REPLACE "${_profiler_local}"
+  "  auto& out = g_passWrites[g_passWritesIndex++ % g_passWrites.size()];"
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+string(REPLACE "#include \"../internal.hpp\"" "#include \"internal.hpp\""
+  _gcnllr_gpu_prof "${_gcnllr_gpu_prof}")
+set(_profiler_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gpu_prof.cpp")
+file(CONFIGURE OUTPUT "${_profiler_path}" CONTENT "${_gcnllr_gpu_prof}" @ONLY)
+get_target_property(_profiler_sources aurora_core SOURCES)
+list(FIND _profiler_sources lib/webgpu/gpu_prof.cpp _profiler_source_index)
+if(_profiler_source_index EQUAL -1)
+  message(FATAL_ERROR "Pinned Aurora GPU profiler target source differs")
+endif()
+list(REMOVE_ITEM _profiler_sources lib/webgpu/gpu_prof.cpp)
+list(APPEND _profiler_sources "${_profiler_path}")
+set_property(TARGET aurora_core PROPERTY SOURCES "${_profiler_sources}")
 
 # Release live-device owners during shutdown, before Windows' loader lock is
 # held by FreeLibrary. The unmodified donor executable never tested DLL unload.
@@ -271,9 +316,9 @@ endif()
 if(GCNLLR_RENDER_PIPELINE STREQUAL "retail")
   # Retail keys include captured texgen state. Use their version for both
   # loading and pruning, so persisted keys can be compiled before first use.
-  set(_gcnllr_retail_key_version 3)
+  set(_gcnllr_retail_key_version 6)
   if(_gcnllr_draw_packet_header)
-    set(_gcnllr_retail_key_version 5)
+    set(_gcnllr_retail_key_version 7)
   endif()
   target_compile_definitions(aurora_gx PRIVATE GCNLLR_RETAIL_GX_CONFIG_VERSION_OFFSET=${_gcnllr_retail_key_version})
   set(_gcnllr_gx_version "gx::GXPipelineConfigVersion")
@@ -380,6 +425,7 @@ if(GCNLLR_GPU_FRAME_PACKETS)
       _gcnllr_pipeline "${_gcnllr_pipeline}")
   endif()
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_pipeline.cmake")
 set(_gcnllr_pipeline_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/pipeline_cache.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_pipeline_path}" CONTENT "${_gcnllr_pipeline}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
@@ -431,6 +477,23 @@ set_property(TARGET gxruntime_retail_gx_frontend PROPERTY SOURCES "${_gcnllr_fro
 # The donor only encoded I8/RGB565 because its own CPU path bypassed other
 # consumers. Our actual retail CPU can observe every copied buffer.
 file(READ "${GXRUNTIME_DIR}/graphics/aurora/lib/gfx/gxcore_draw.cpp" _gcnllr_draw)
+# Dawn platform packages can declare these fields in different orders.
+# Named assignments retain the descriptor values without an order-sensitive initializer.
+set(_gcnllr_vertex_layout [=[  const wgpu::VertexBufferLayout vertexLayout{
+      .arrayStride = gxc::kVertexStrideBytes,
+      .stepMode = wgpu::VertexStepMode::Vertex,
+      .attributeCount = attributes.size(),
+      .attributes = attributes.data(),
+  };]=])
+string(FIND "${_gcnllr_draw}" "${_gcnllr_vertex_layout}" _gcnllr_vertex_layout_offset)
+if(_gcnllr_vertex_layout_offset EQUAL -1)
+  message(FATAL_ERROR "Pinned Dawn vertex-buffer layout differs")
+endif()
+string(REPLACE "${_gcnllr_vertex_layout}" [=[  wgpu::VertexBufferLayout vertexLayout{};
+  vertexLayout.arrayStride = gxc::kVertexStrideBytes;
+  vertexLayout.stepMode = wgpu::VertexStepMode::Vertex;
+  vertexLayout.attributeCount = attributes.size();
+  vertexLayout.attributes = attributes.data();]=] _gcnllr_draw "${_gcnllr_draw}")
 set(_gcnllr_copy_guard "it == g_efbCopyTextures.end() || !it->second.handle ||\n      (cmd.format != 1u && cmd.format != 4u)")
 string(FIND "${_gcnllr_draw}" "${_gcnllr_copy_guard}" _gcnllr_copy_offset)
 if(_gcnllr_copy_offset EQUAL -1)
@@ -548,6 +611,7 @@ string(REPLACE "${_gcnllr_owned_tail}"
   _gcnllr_draw "${_gcnllr_draw}")
 string(PREPEND _gcnllr_draw "#include \"${CMAKE_CURRENT_LIST_DIR}/owned_texture.hpp\"\n#include <stdexcept>\n")
 string(PREPEND _gcnllr_draw "#include \"${CMAKE_CURRENT_LIST_DIR}/texture_encode.hpp\"\n")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_draw.cmake")
 set(_gcnllr_draw_path "${CMAKE_BINARY_DIR}/gcnllr-services/adapted/gxcore_draw.cpp")
 file(CONFIGURE OUTPUT "${_gcnllr_draw_path}" CONTENT "${_gcnllr_draw}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
@@ -934,6 +998,37 @@ gcnllr_trace_boundary(_gcnllr_common "  if (frame_interp::tracing() || g_present
         frame.verts.size(), frame.indices.size(), size_t(g_drawCallCount), size_t(g_mergedDrawCallCount));
   if (frame_interp::tracing() ||]=])
 string(PREPEND _gcnllr_common "#include \"${CMAKE_CURRENT_LIST_DIR}/present_trace.hpp\"\n#include <cstdint>\n#include <memory>\nnamespace hitch = gcnllr::present_trace;\nnamespace aurora::webgpu {\nvoid set_fixed_present_aspect(std::uint32_t width, std::uint32_t height) noexcept;\n}\n")
+# A resize can occur with a partially recorded frame that has not reached
+# the render queue yet. Those draws retain descriptor-keyed bind-group IDs.
+# Resize must retain their owners: new resource descriptors naturally get new
+# IDs, and the existing frame-age sweep retires unused entries. Normal shutdown
+# still clears the cache after every recorded and queued frame is drained.
+set(_gcnllr_resize_cache [=[void clear_caches() noexcept {
+  g_offscreenCache.clear();
+  std::lock_guard lock{g_bindGroupCacheMutex};
+  g_cachedBindGroups.clear();
+}]=])
+string(FIND "${_gcnllr_common}" "${_gcnllr_resize_cache}" _gcnllr_resize_cache_at)
+if(_gcnllr_resize_cache_at EQUAL -1)
+  message(FATAL_ERROR "Pinned native bind-group resize lifetime differs")
+endif()
+string(REPLACE "${_gcnllr_resize_cache}" [=[void clear_caches() noexcept {
+  g_offscreenCache.clear();
+  // Recording/queued packets still own IDs from the current descriptor cache.
+  // Keep those bindings alive until the normal frame-age retirement.
+}]=] _gcnllr_common "${_gcnllr_common}")
+# The donor's CHECK is compiled out in release. Guard a violated lifetime
+# explicitly instead of dereferencing end() and allowing an unbounded lookup.
+set(_gcnllr_find_binding [=[  CHECK(it != g_cachedBindGroups.end(), "get_bind_group: failed to locate {:x}", id);]=])
+string(FIND "${_gcnllr_common}" "${_gcnllr_find_binding}" _gcnllr_find_binding_at)
+if(_gcnllr_find_binding_at EQUAL -1)
+  message(FATAL_ERROR "Pinned native bind-group lookup differs")
+endif()
+string(REPLACE "${_gcnllr_find_binding}"
+  "  if (it == g_cachedBindGroups.end()) throw std::runtime_error(\"Native draw lost its recorded bind group\");"
+  _gcnllr_common "${_gcnllr_common}")
+string(PREPEND _gcnllr_common "#include <stdexcept>\n")
+include("${CMAKE_CURRENT_LIST_DIR}/adapt_resident_frame.cmake")
 file(CONFIGURE OUTPUT "${_gcnllr_common_path}" CONTENT "${_gcnllr_common}" @ONLY)
 get_target_property(_gcnllr_gx_sources aurora_gx SOURCES)
 list(REMOVE_ITEM _gcnllr_gx_sources lib/gfx/common.cpp)

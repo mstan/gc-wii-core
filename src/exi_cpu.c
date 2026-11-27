@@ -43,10 +43,15 @@ u32 gcn_exi_read(void* user, CPUState* cpu, u32 addr, u8 size) {
 }
 
 void gcn_exi_write(void* user, CPUState* cpu, u32 addr, u32 value, u8 size) {
+    gcn_exi_write_clock(user, cpu, addr, value, size, GCN_RTC_CORE_CLOCK_HZ);
+}
+
+void gcn_exi_write_clock(void* user, CPUState* cpu, u32 addr, u32 value, u8 size, u64 clock_hz) {
+    if (!clock_hz) return;
     install_trace((GcnExi*)user);
     const GcnExiAccess access = {
         cpu, resolve, before_write, written,
         cpu ? cpu->cycles : 0, cpu ? cpu->pc : 0
     };
-    gcn_exi_bus_write((GcnExi*)user, &access, addr, value, size);
+    gcn_exi_bus_write_clock((GcnExi*)user, &access, addr, value, size, clock_hz);
 }

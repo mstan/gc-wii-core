@@ -29,6 +29,7 @@
 #include "cpu/title_module.h"
 #include "cpu/overlay_module.h"
 #include "debug/rings.h"   /* gcn_ring_psq — [gx-fifoprov] psq value audit */
+#include "debug/cost_ring.h"
 #include "memory/memory.h"
 
 #include <stdio.h>
@@ -146,11 +147,44 @@ void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia) {
  * core/12). Nintendo's OS alarm queue programs DEC and relies on vector 0x900
  * to resume alarm-suspended threads. */
 static bool s_decrementer_pending;
+static CPUState* s_time_cpu;
+static PpcTimeObserver s_time_observer;
+static void* s_time_user;
+static CPUState* s_idle_cpu;
+static PpcIdleAdmission s_idle_admission;
+static void* s_idle_user;
+
+void ppc_idle_set_admission(CPUState* cpu,PpcIdleAdmission admission,void* user) {
+    s_idle_cpu=cpu;s_idle_admission=admission;s_idle_user=user;
+}
+bool ppc_idle_can_skip(CPUState* cpu,u32 address) {
+    return cpu && cpu==s_idle_cpu && s_idle_admission && !cpu->exception &&
+           (cpu->msr&PPC_MSR_EE) && s_idle_admission(cpu,address,s_idle_user);
+}
+void ppc_idle_note_cycles(u64 cycles) {
+#if GCN_COST_RING_ENABLED
+    gcn_cost_note_idle(cycles);
+#else
+    (void)cycles;
+#endif
+}
+
+void ppc_timing_set_observer(CPUState* cpu,PpcTimeObserver observer,void* user) {
+    s_time_cpu=cpu;s_time_observer=observer;s_time_user=user;
+}
+void ppc_timing_observe(CPUState* cpu) {
+    if(cpu==s_time_cpu && s_time_observer)s_time_observer(cpu,s_time_user,false);
+}
+void ppc_timing_changed(CPUState* cpu) {
+    if(cpu==s_time_cpu && s_time_observer)s_time_observer(cpu,s_time_user,true);
+}
 const bool* ppc_native_decrementer_pending(void) {return &s_decrementer_pending;}
 bool ppc_decrementer_pending(void) {return s_decrementer_pending;}
 
 void ppc_decrementer_reset(CPUState* cpu) {
     s_decrementer_pending = false;
+    ppc_timing_set_observer(NULL,NULL,NULL);
+    ppc_idle_set_admission(NULL,NULL,NULL);
     if (cpu)
         cpu->spr[22] = 0xFFFFFFFFu;
 }
@@ -177,6 +211,7 @@ void ppc_deliver_decrementer(CPUState* cpu) {
 /* --- time base + SPRs --- */
 
 u32 ppc_mftb(CPUState* cpu, u16 tbr, u32 cia) {
+    ppc_timing_observe(cpu);
     if (tbr == 268)
         return (u32)cpu->timebase;
     if (tbr == 269)
@@ -236,6 +271,7 @@ static u16 ppc_spr_storage_index(u16 spr) {
 }
 
 u32 ppc_mfspr(CPUState* cpu, u16 spr, u32 cia) {
+    if(spr==22)ppc_timing_observe(cpu);
     switch (spr) {
     case 1:   return cpu->xer;
     case 8:   return cpu->lr;
@@ -289,15 +325,23 @@ void ppc_mtspr(CPUState* cpu, u16 spr, u32 value, u32 cia) {
     case 18:  cpu->dsisr = value; return;
     case 19:  cpu->dar = value; return;
     case 22:
+        ppc_timing_observe(cpu);
         cpu->spr[22] = value;
         if (!(value & 0x80000000u))
             s_decrementer_pending = false;
+        ppc_timing_changed(cpu);
         return;
     case 26:  cpu->srr0 = value; return;
     case 27:  cpu->srr1 = value; return;
     case 282: cpu->ear = value; return;
-    case 284: cpu->timebase = (cpu->timebase & 0xFFFFFFFF00000000ull) | value; return;
-    case 285: cpu->timebase = ((u64)value << 32) | (cpu->timebase & 0xFFFFFFFFull); return;
+    case 284:
+        ppc_timing_observe(cpu);
+        cpu->timebase = (cpu->timebase & 0xFFFFFFFF00000000ull) | value;
+        ppc_timing_changed(cpu);return;
+    case 285:
+        ppc_timing_observe(cpu);
+        cpu->timebase = ((u64)value << 32) | (cpu->timebase & 0xFFFFFFFFull);
+        ppc_timing_changed(cpu);return;
     case 912: case 913: case 914: case 915:
     case 916: case 917: case 918: case 919:
         cpu->gqr[spr - 912] = value; return;

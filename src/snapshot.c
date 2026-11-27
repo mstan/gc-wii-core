@@ -395,7 +395,9 @@ static void write_di(SnapBuf* b, const GcnDi* di_in) {
     sb_u64(b, di->read_buffer_end_time);
 }
 
-/* GX register files: BP[256] + XF[gcn_gx_xf_words()] (gx.c's GcnGx mirror,
+/* GX register files: BP[256] + XF[gcn_gx_xf_words()] + both eight-word TEV
+ * banks (64 bytes total; raw BP retains only the most recently selected bank).
+ * The BP/XF files are gx.c's GcnGx mirror,
  * gcn_gx_bp/gcn_gx_xf accessors) followed by GcnCp.reg[] and GcnPe.reg[]
  * plus PE's token/enable/signal state. TMEM and the EFB planes are their
  * own sections (large, and gx_raster.h already exposes read-only pointers
@@ -413,6 +415,7 @@ static void write_gx_regs(SnapBuf* b, const GcnCp* cp_in, const GcnPe* pe_in) {
     sb_put(b, gcn_gx_bp(), 256 * sizeof(u32));
     sb_u32(b, gcn_gx_xf_words());
     sb_put(b, gcn_gx_xf(), (size_t)gcn_gx_xf_words() * sizeof(u32));
+    sb_put(b, gx_raster_tev_state(), 16 * sizeof(u32));
 
     GcnCp cp_zero; if (!cp_in) memset(&cp_zero, 0, sizeof cp_zero);
     const GcnCp* cp = cp_in ? cp_in : &cp_zero;
@@ -959,6 +962,8 @@ static void read_gx_regs(SnapCur* c, GcnCp* cp, GcnPe* pe) {
         gcn_gx_set_bp(bp);
     }
 
+    u32 tev_words[16]; cr_bytes(c, tev_words, sizeof tev_words);
+    gx_raster_set_tev_state(tev_words);
     u16 cp_reg[GCN_CP_SIZE / 2]; cr_bytes(c, cp_reg, sizeof cp_reg);
     u32 gp_read_enable = cr_u32(c), bp_enable = cr_u32(c);
     u32 hi_wm_int = cr_u32(c), lo_wm_int = cr_u32(c);

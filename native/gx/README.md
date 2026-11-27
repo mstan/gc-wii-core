@@ -26,3 +26,138 @@ isolation against that build. It requires `--library` and `--work-root` paths.
 
 Extraction and multi-bank support require consumer build/runtime qualification;
 the service test does not establish a working Wii machine or menu rendering.
+
+The optional `gc_wii_native_render_get_api` export in
+`include/gcnllr/native_render.h` accepts native meshes and material draws without
+constructing or decoding FIFO commands. Geometry is copied and converted once;
+draws reuse it with explicit transforms, clipping and material inputs. The
+current material family is unlit vertex color with one optional texture and one
+mip level. The existing host GPU service still owns lifecycle, memory coherence,
+copies and scanout. Calls run on its recording owner after earlier FIFO work has
+been drained. Consumers select the rendering provider when building.
+
+`test_native_render_gpu.py` checks actual GPU pixels, mesh ownership/reuse,
+texture rewrites, ordering, clipping, transforms and zero submitted FIFO bytes.
+It uses a hidden window and muted output. This is an experimental component:
+title bindings, complete model/material families and end-to-end performance
+qualification remain open. Retained geometry is currently staged to the GPU
+through the shared draw backend; permanent GPU mesh residency is not claimed.
+
+`gc_wii_native_gui_get_api` adds a named GUI color-range material while keeping
+RenderAPI1 unchanged. It shares the same mesh handles, texture resources and
+recording owner. One texture is mapped between byte RGBA endpoints, clamped,
+then multiplied by pane color; a flat material uses its high endpoint instead.
+The existing integer shader compiler lowers that complete expression. Wider
+source colors and unsupported inputs reject before submission. Run the same
+component check with `--gui` for range, tint, alpha and rejection coverage.
+
+`gc_wii_native_gui_layers_get_api` accepts a fixed three-image GUI background:
+remap the primary RGB range, then add two weighted overlays with saturation
+after each operation. Opacity uses the high endpoint. Each overlay has its own
+affine transform of the retained primary UVs. Resources share the existing
+multi-texture cache and bank resolution. GUI1, Render1 and Frame1 layouts remain
+unchanged. Add `--layers` to the component check for independent coordinates,
+texture rewrites, saturation and explicit unsupported-input rejection.
+
+`gc_wii_native_gui_mask_get_api` adds two-image color/coverage materials. It
+recolors a primary image, applies independently transformed mask alpha and byte
+opacity, and optionally multiplies RGB by the mask or pane. Primary alpha and
+pane alpha are excluded from this named family. Add `--mask` for actual pixel checks of
+coverage, opacity, RGB masking and independent coordinates. The mutually
+exclusive pane-RGB mode retains pane RGB while ignoring pane alpha. Existing API layouts
+remain unchanged.
+
+`gc_wii_native_capture_get_api(1)` accepts an unscaled color EFB rectangle and
+a coherent tiled-texture destination, reusing the copy backend and immutable
+ownership without command submission. Formats 0 through 6 are supported;
+depth, scaling, clearing and mip chains reject. Frame1 layouts remain unchanged.
+`test_native_frame_gpu.py --capture` checks actual RGBA8 tiled bytes, bank
+isolation, immutable capture after subsequent clears and invalid descriptors.
+Run both the retained-owner profile and `--eager` for CPU-backed consumers.
+
+`gc_wii_native_gui_effects_get_api` provides complete alpha-cutoff, two-image
+additive and alpha-product materials. It shares the same draw owner, mesh
+handles and texture cache. Its mesh creation method copies additional raw UV
+channels once, preserving independent non-affine coordinates; live product
+texture matrices stay separate from that geometry. Run the component check
+with `--effects` to cover threshold boundaries, composition, UV ownership and
+resetting transforms when a mesh returns to an ordinary material.
+
+`GC_WII_NATIVE_J3D=ON` additionally builds the native BMD/BDL material and mesh
+provider, exported by `gc_wii_native_j3d_get_api`. See `native/j3d/README.md` and
+`include/gcnllr/native_j3d.h`. Its per-instance rendering inputs are explicit;
+missing poses, texture matrices or referenced lights reject the draw. These
+experimental APIs do not enable a title replacement automatically.
+
+Color-source texture generators consume the computed XF color, including its
+material registers and lighting. The selected Aurora renderer applies scoped
+source adaptations for this dependency and COLOR0/COLOR1 selection without
+editing the donor checkout. `test_color_texgen_gpu.py` checks actual GPU pixels
+for missing/contrasting raw vertex colors, register changes and light masks.
+
+`gc_wii_native_output_get_api(1)` supplies an optional owned-output submission
+boundary, separate from NativeFrame1. It requires the serial owner profile and
+all three memory-ownership callbacks. The caller must guard every actual memory
+observer, including raw compiled pointers. Submission acknowledges host encoding
+and immutable resource capture without waiting for GPU execution or copying
+bytes into RAM. It emits no PE notification. NativeFrame1 completion retains
+its existing physical/owned policy. Retained display generations use the same
+YUY2 presentation shader as ordinary CPU-backed scanout.
+
+`GCNLLR_NATIVE_OUTPUT_SUBMISSION=queued` keeps that serial machine-memory owner
+and queues GPU copy encoding, scanout and optional title-margin composition.
+The recording owner allocates each immutable copy buffer before publishing its
+handle; output submission seals the packet without waiting for worker encoding.
+Each frame retains its source pixels, copy generation and target geometry;
+uploads run on the rendering worker after earlier submissions. Resizing drains
+borrowed target descriptors. CPU reads, screenshots and shutdown still join the
+required work. The default `serial` provider remains available. This selection
+does not enable the legacy streamed/FIFO provider group and cannot combine with
+it. NativePresentation1 is available in either presentation mode.
+
+NativePresentation2 adds a nearest-sampled logical view with an explicit tint.
+The immutable display generation retains the copy's real vertical filter and
+uses the same integer YUY2 conversion and VI decoding for its margins. The
+center remains the actual stock or high-resolution native display. This path
+requires both vertical copy clamps. Zero-alpha input marks excluded canvas;
+it stays opaque black after filtering, including finite room/panel borders.
+ABI1 retains its direct-RGB margin contract;
+existing consumers do not acquire filtering by changing the service DLL.
+`test_native_frame_gpu.py --filtered-presentation` compares margins with actual
+copy/VI pixels through row changes, tints and retained generations.
+
+The existing `test_native_frame_gpu.py --output --efb-height 528` exercises the
+new submission contract and compares all pixels of a colored direct scanout
+with its materialized YUY2 presentation. It remains a hidden, silent component
+check; title correctness and throughput require their own replay gates.
+
+Optional NativeVideo ABI1 selects normal output or the Wii SDK's 25% idle-dim
+preset on the machine owner. It changes the host presentation decoder and
+preserves EFB/XFB bytes, immutable copy generations and alpha. Each presentation
+captures the selected immutable brightness uniform, including queued and owned
+scanouts. Unknown ABI versions and modes reject without changing state.
+`test_native_frame_gpu.py --output --video --efb-height 528` verifies dimming,
+exact restoration and direct/materialized presentation parity on the real GPU.
+
+Optional `gc_wii_native_resolution_get_api(1)` selects an integer display raster
+scale between frames and reports its actual attachment dimensions. One prepared
+native draw stream is encoded into the original EFB and an independent display
+target. Original EFB color/depth, tiled captures, XFB bytes and CPU observations
+remain authoritative and independent of display scale. Display copies retain
+their own high-resolution generation through later clears and scale edits.
+The extension performs no extra guest scene traversal or CPU image rendering.
+Bitmap textures retain their original detail. Scale 1 uses the original route.
+Hardware texture limits reject unsupported scales before replacing targets;
+very wide final composites keep their aspect within the device texture extent.
+`test_native_frame_gpu.py --resolution 2 --efb-height 528 --capture --output`
+checks actual subpixel raster detail, original copy contracts, live edits and
+immutable presentation. These are component checks, separate from title-wide
+correctness, renderer coverage and sustained performance qualification.
+
+`GCNLLR_RENDER_WORKER_TIMES` optionally names a new CSV file for render-worker
+callback and idle-hook service intervals. Existing files are never overwritten.
+Rows retain monotonic begin/end nanoseconds, queue-item type, frame identity and
+pass index; queue waits are excluded. This is host-thread wall service time,
+not GPU execution time. Unidentified synchronous jobs use frame identity zero
+and need their actual queue-order relationship before per-field attribution.
+The trace is disabled when the variable is unset.

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#include <gcnllr/native_resolution.h>
+static uint32_t internal_scale=1;
 #include "gcnllr/native_gx.h"
 #include "gamecube_input.hpp"
 #include "keyboard_mouse_input.hpp"
@@ -8,6 +10,18 @@
 #include "raster_viewport.hpp"
 #include "pointer.hpp"
 #include "gpu_bridge.hpp"
+#include "efb_geometry.hpp"
+#include "native_scene.hpp"
+#include "native_gui.hpp"
+#include "native_gui_effects.hpp"
+#include "native_gui_program.hpp"
+#include "gcnllr/native_frame.h"
+#include "gcnllr/native_output.h"
+#include "gcnllr/native_presentation.h"
+#include "gcnllr/native_video.h"
+#if GC_WII_NATIVE_J3D
+#include "native_j3d.hpp"
+#endif
 #include "present_trace.hpp"
 #include <unordered_map>
 #include "fifo_worker.hpp"
@@ -20,6 +34,9 @@
 #include "webgpu/gpu.hpp"
 #include "window.hpp"
 #include <imgui.h>
+#include <gcnllr/native_session.h>
+#include <gcnllr/native_display.h>
+#include "display_aspect.hpp"
 #if GCNLLR_NATIVE_DRAW_SINK
 #include "native_draw_sink.hpp"
 #endif
@@ -102,6 +119,7 @@ using gxruntime::gxcore::GxCoreSink;
 void flush_display_copies();
 GcnllrNativeGxConfig config{};
 GcnllrNativeGxStatus state{};
+GcWiiNativeFrameStatus native_frame_state{};
 std::atomic<bool> failed{};
 std::atomic<uint64_t> readback_ns{};
 std::atomic<uint64_t> resident_textures{},resident_texture_hits{},resident_texture_materializations{},resident_texture_incompatible{};
@@ -210,6 +228,11 @@ bool texture_epoch(uint32_t address,uint32_t size,uint64_t* epoch) {
     return config.texture_epoch(config.user,address,size,epoch)!=0;
 }
 bool initialized{}, frame_open{};
+bool retain_next_host{}, retained_host{};
+gcnllr::NativeScene native_scene;
+#if GC_WII_NATIVE_J3D
+gcnllr::NativeJ3D native_j3d;
+#endif
 std::array<uint8_t,64> fifo_tail{};
 std::vector<uint8_t> xfb;
 Clock::time_point last_events{};
@@ -221,6 +244,7 @@ std::atomic<uint64_t> completion_service_ns{};
 uint64_t last_completion_service_ns{};
 std::array<char,4u*1024u*1024u> frame_times_buffer;
 bool profile{};
+bool gpu_trace{};
 // Diagnostic-only, bounded distinct layouts; FIFO translation owns the set.
 // This identifies why actual copied textures still require materialization.
 std::array<std::array<uint32_t,10>,128> incompatible_views{};
@@ -319,10 +343,12 @@ void pump(bool force=false) {
     if(window && SDL_GetMouseFocus()==window && SDL_GetKeyboardFocus()==window) {
         float x,y;const auto buttons=SDL_GetMouseState(&x,&y);
         const auto size=aurora::window::get_window_size();
+        uint32_t pointer_width=size.fb_width,pointer_height=size.fb_height;
+        gcnllr::display_aspect::pointer_dimensions(pointer_width,pointer_height);
         state.pointer=gcnllr::image_pointer(x,y,
             ((buttons&SDL_BUTTON_LMASK)?1u:0u)|((buttons&SDL_BUTTON_RMASK)?2u:0u)|
             ((buttons&SDL_BUTTON_MMASK)?4u:0u),size.width,size.height,
-            size.native_fb_width,size.native_fb_height,size.fb_width,size.fb_height);
+            size.native_fb_width,size.native_fb_height,pointer_width,pointer_height);
     }
     const bool* keys=SDL_GetKeyboardState(nullptr);
     if (gamecube_pads.enabled()) {
@@ -699,23 +725,25 @@ int materialize_copy_range(uint64_t token,uint32_t offset,uint32_t size) {
         return 1;
     } catch(const std::exception& e) {fail(e.what());return -1;}
 }
-void display_readback(const gxruntime::gxcore::EfbCopyCommand& copy) {
+void display_readback(const gxruntime::gxcore::EfbCopyCommand& copy,uint32_t destination,
+                      uint32_t stride,float yscale,const gcnllr::gpu_bridge::DisplayCopyFilter& filter) {
     if (pending_displays.size()>=16) flush_display_copies();
-    const auto& bp=sink->bp;
-    const uint32_t scale=bp[0x4E]&0xFFFFu;
-    const bool invert=(bp[0x52]&(1u<<10))!=0;
-    const float yscale=invert ? (scale ? 256.f/float(scale) : 1.f) : float(scale)/256.f;
     const uint32_t h=uint32_t(float(copy.height)*yscale),w=copy.width;
-    const uint32_t stride=(bp[0x4D]&0x3FFu)<<5;
     if (!w || !h || (w&1) || w>640 || h>576 || stride<w*2 || stride>2048)
         throw std::runtime_error("Invalid guest XFB dimensions/stride");
     // Snapshot the live BP filter/clamp state with this immutable copy.
     // A programmed (or reset) all-zero filter is black, not identity.
-    const gcnllr::gpu_bridge::DisplayCopyFilter filter{
-        bp[0x53],bp[0x54],(bp[0x52]&1u)!=0,(bp[0x52]&2u)!=0};
     gcnllr::gpu_bridge::record_display_copy(copy,filter,!config.own_copy,h,yscale);
-    pending_displays.push_back({(bp[0x4B]&guest_gpu_address_mask)<<5,w,h,stride,yscale});
+    pending_displays.push_back({destination,w,h,stride,yscale});
     ++state.display_copies;
+}
+void display_readback(const gxruntime::gxcore::EfbCopyCommand& copy) {
+    const auto& bp=sink->bp;
+    const uint32_t scale=bp[0x4E]&0xFFFFu;
+    const bool invert=(bp[0x52]&(1u<<10))!=0;
+    const float yscale=invert ? (scale ? 256.f/float(scale) : 1.f) : float(scale)/256.f;
+    display_readback(copy,(bp[0x4B]&guest_gpu_address_mask)<<5,(bp[0x4D]&0x3FFu)<<5,yscale,
+        {bp[0x53],bp[0x54],(bp[0x52]&1u)!=0,(bp[0x52]&2u)!=0});
 }
 void flush_display_copies() {
     if (pending_displays.empty()) return;
@@ -785,17 +813,13 @@ void flush_display_copies() {
     }
     pending_displays.clear();
 }
-void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
-    Measure measurement(copy_cost);
-    if (command.clear) ++efb_generation;
-    if (command.format==0xFu) { display_readback(command); return; }
+void texture_copy(const gxruntime::gxcore::EfbCopyCommand& command,uint32_t stride) {
     flush_display_copies();
     const auto tile=gcnllr::native_copy_layout(command.format);
     if(!tile.bytes || !command.destination_width || !command.destination_height)
         throw std::runtime_error("Native texture-copy format/size is unsupported");
     const uint32_t row_bytes=((command.destination_width+tile.width-1)/tile.width)*tile.bytes;
     const uint32_t rows=(command.destination_height+tile.height-1)/tile.height;
-    const uint32_t stride=(sink->bp[0x4D]&0x3FFu)<<5;
     const uint64_t extent=uint64_t(rows-1)*stride+row_bytes;
     GcnllrNativeGxMemory destination{};
     if (!stride || extent>UINT32_MAX ||
@@ -858,7 +882,15 @@ void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
     sink->memory_boundary();
     ++state.texture_copies;
 }
+void copy(const gxruntime::gxcore::EfbCopyCommand& command,void*) {
+    Measure measurement(copy_cost);
+    if (command.clear) ++efb_generation;
+    if (command.format==0xFu) { display_readback(command); return; }
+    texture_copy(command,(sink->bp[0x4D]&0x3FFu)<<5);
+}
 void stop() {
+    const bool retain_host=retain_next_host;
+    retain_next_host=false;
     if(fifo_worker) {
         try {fifo_worker->wait(true);}catch(const std::exception& e){fail(e.what());}
         fifo_worker->stop();
@@ -923,6 +955,12 @@ void stop() {
         texture_producers.clear();retained_copies.clear();
     }
     aurora::gfx::gxcore::set_owned_texture_lookup(nullptr);
+    aurora::gfx::gxcore::set_texture_dirty_epoch_observer(nullptr);
+    aurora::gfx::gxcore::set_efb_copy_epoch_observer(nullptr);
+    native_scene.reset();
+#if GC_WII_NATIVE_J3D
+    native_j3d.reset();
+#endif
     frontend.reset(); sink.reset();
 #if GCNLLR_RETAIL_PIPELINE
     std::fprintf(stderr,"[native-retail-textures] queries=%llu reused=%llu stable_array_hits=%llu\n",
@@ -933,7 +971,15 @@ void stop() {
     if (gamepad) { SDL_CloseGamepad(gamepad);gamepad=nullptr; }
     mouse_controls.stop();
     gamecube_pads.stop();
-    if (initialized) { gcnllr::gpu_bridge::release();aurora_shutdown();initialized=false; }
+    if (initialized) {
+        gcnllr::gpu_bridge::release();
+        retained_host=retain_host && !failed.load();
+        if(!retained_host)aurora_shutdown();
+        initialized=false;
+    } else if(retained_host && !retain_host) {
+        aurora_shutdown();retained_host=false;
+    }
+    config={};memory_epochs.clear();
     gcnllr::present_trace::finish();
     if (frame_times) {std::fclose(frame_times);frame_times=nullptr;}
     frame_open=false;
@@ -950,7 +996,8 @@ int start(const GcnllrNativeGxConfig* input) {
     if(ownership!=3 || !input->retire_copy)return 0;
     streamed_retired=streamed_polls=streamed_barriers=0;
 #endif
-    config=*input;state={};failed.store(false);readback_ns.store(0);next_copy_token=0;
+    config=*input;state={};native_frame_state={};failed.store(false);readback_ns.store(0);next_copy_token=0;
+    aurora::gfx::gxcore::reset_resident_geometry_stats();
     resident_textures.store(0);resident_texture_hits.store(0);
     resident_texture_materializations.store(0);resident_texture_incompatible.store(0);
 #if GCNLLR_GX_FIFO_WORKER
@@ -960,6 +1007,7 @@ int start(const GcnllrNativeGxConfig* input) {
     ++efb_generation;color_peek_generation=depth_peek_generation=0;
     color_peek.clear();depth_peek.clear();
     profile=std::getenv("GCNLLR_GX_PROFILE")!=nullptr;
+    gpu_trace=std::getenv("GCNLLR_GPU_TRACE")!=nullptr;
     incompatible_view_count=0;
     fifo_cost={};draw_cost={};copy_cost={};present_cost={};status_cost={};owner_effect_cost={};last_profile=Clock::now();
     try {
@@ -1019,6 +1067,12 @@ int start(const GcnllrNativeGxConfig* input) {
         settings.windowPosX=-1;settings.windowPosY=-1;
         settings.vsync=false;settings.startFullscreen=false;settings.pauseOnFocusLost=false;
         settings.allowJoystickBackgroundEvents=true;settings.logLevel=LOG_INFO;settings.logCallback=log_message;
+        if(retained_host) {
+            retained_host=false;initialized=true;
+            auto* window=aurora::window::get_sdl_window();
+            if(!window || !SDL_SetWindowTitle(window,input->title?input->title:"Wii"))
+                throw std::runtime_error("Retained native GPU window is unavailable");
+        } else {
         gcnllr::present_trace::start();
         auto info=aurora_initialize(0,nullptr,&settings);
         initialized=true;
@@ -1035,14 +1089,16 @@ int start(const GcnllrNativeGxConfig* input) {
         if (!compatible) throw std::runtime_error("Requested native GPU backend is unavailable");
         if (input->hidden) SDL_HideWindow(info.window);
         else place_playtest_window(info.window);
+        }
         gcnllr::gpu_bridge::initialize();
         GXInit(nullptr,0);
         GXSetCopyClear(GXColor{0,0,0,255},0xFFFFFFu);
         GXRenderModeObj mode{};mode.viTVmode=VI_TVMODE_NTSC_PROG;
         mode.fbWidth=mode.viWidth=640;mode.efbHeight=mode.xfbHeight=mode.viHeight=480;
         VIConfigure(&mode);
-        aurora_set_frame_buffer_scale(float(gcnllr::gpu_bridge::efb_scale(std::getenv("GCNLLR_EFB_SCALE"))));
-        /* The machine owns a 640x480 EFB; resizing the presentation window
+        if(GCNLLR_NATIVE_TYPED_OUTPUT) {aurora_set_frame_buffer_scale(1.0f);internal_scale=1;}
+        else aurora_set_frame_buffer_scale(float(gcnllr::gpu_bridge::efb_scale(std::getenv("GCNLLR_EFB_SCALE"))));
+        /* The machine owns its physical EFB; resizing the presentation window
          * must not expand its raster grid to the host window's aspect. */
         aurora::window::set_frame_buffer_aspect_fit(true);
         aurora_set_frame_interpolation(false);
@@ -1146,7 +1202,12 @@ int start(const GcnllrNativeGxConfig* input) {
 }
 int fifo(const uint8_t* bytes,uint32_t size) {
     if (!initialized || failed.load() || (!bytes && size)) return 0;
-    if(std::getenv("GCNLLR_GPU_TRACE")) {
+#if GCNLLR_GPU_TRACE_CACHE
+    const bool trace=gpu_trace;
+#else
+    const bool trace=std::getenv("GCNLLR_GPU_TRACE")!=nullptr;
+#endif
+    if(trace) {
         const auto count=std::min<size_t>(size,fifo_tail.size());
         std::memmove(fifo_tail.data(),fifo_tail.data()+count,fifo_tail.size()-count);
         if(count)std::memcpy(fifo_tail.data()+fifo_tail.size()-count,bytes+size-count,count);
@@ -1244,26 +1305,27 @@ int peek(uint32_t depth,uint16_t x,uint16_t y,uint32_t* value) {
         try {return gcnllr::gpu_bridge::peek_scanout(x,y,value);}
         catch(const std::exception& e) {fail(e.what());return 0;}
     }
-    // This renderer's raster grid is 640x480. Reads must observe the current
+    // Reads address the physical EFB independently of VI's scanout height.
+    // They must observe the current
     // ordered EFB, including before the first VI presentation. Reuse a CPU
     // download only until an accepted draw, clearing copy or new frame.
-    if (x>=640 || y>=480 || depth>1) return 0;
+    if (x>=gcnllr::efb_width || y>=gcnllr::efb_height || depth>1) return 0;
     try {
         if (depth) {
             if (depth_peek_generation!=efb_generation) {
                 depth_peek=gcnllr::gpu_bridge::read_depth(depth_peek_width,depth_peek_height);
                 depth_peek_generation=efb_generation;
             }
-            const auto sx=std::min(depth_peek_width-1,uint32_t((uint64_t(x)*2+1)*depth_peek_width/1280));
-            const auto sy=std::min(depth_peek_height-1,uint32_t((uint64_t(y)*2+1)*depth_peek_height/960));
+            const auto sx=std::min(depth_peek_width-1,uint32_t((uint64_t(x)*2+1)*depth_peek_width/(2*gcnllr::efb_width)));
+            const auto sy=std::min(depth_peek_height-1,uint32_t((uint64_t(y)*2+1)*depth_peek_height/(2*gcnllr::efb_height)));
             *value=depth_peek[size_t(sy)*depth_peek_width+sx];
         } else {
             if (color_peek_generation!=efb_generation) {
                 color_peek=gcnllr::gpu_bridge::read_efb(color_peek_width,color_peek_height);
                 color_peek_generation=efb_generation;
             }
-            const auto sx=std::min(color_peek_width-1,uint32_t((uint64_t(x)*2+1)*color_peek_width/1280));
-            const auto sy=std::min(color_peek_height-1,uint32_t((uint64_t(y)*2+1)*color_peek_height/960));
+            const auto sx=std::min(color_peek_width-1,uint32_t((uint64_t(x)*2+1)*color_peek_width/(2*gcnllr::efb_width)));
+            const auto sy=std::min(color_peek_height-1,uint32_t((uint64_t(y)*2+1)*color_peek_height/(2*gcnllr::efb_height)));
             const auto* p=color_peek.data()+(size_t(sy)*color_peek_width+sx)*4;
             *value=(uint32_t(p[3])<<24)|(uint32_t(p[0])<<16)|(uint32_t(p[1])<<8)|p[2];
 #if GCNLLR_RETAIL_PIPELINE
@@ -1369,14 +1431,42 @@ const GcnllrNativeGxApi api={GCNLLR_NATIVE_GX_ABI,start,fifo,drain,status,peek,s
         |(GCNLLR_COMPOSED_SCANOUT ? GCNLLR_NATIVE_GX_DEFERRED_RETIREMENT : 0u)
         |(GCNLLR_GPU_OWNED_DISPLAY ? GCNLLR_NATIVE_GX_DISPLAY_COLOR|GCNLLR_NATIVE_GX_COPY_RANGE : 0u)
         |(GCNLLR_GPU_OWNED_TEXTURES ? GCNLLR_NATIVE_GX_TEXTURE_VIEWS : 0u)
-        |(GCNLLR_GX_COOPERATIVE_VI && !GCNLLR_GPU_OWNED_DISPLAY ? GCNLLR_NATIVE_GX_COMPOSED_SCANOUT : 0u),
+        |(GCNLLR_GX_COOPERATIVE_VI && !GCNLLR_GPU_OWNED_DISPLAY ? GCNLLR_NATIVE_GX_COMPOSED_SCANOUT : 0u)
+        |(!GCNLLR_GX_FIFO_WORKER && !GCNLLR_ASYNC_COPIES && !GCNLLR_COMPOSED_SCANOUT && !GCNLLR_GX_COOPERATIVE_VI &&
+          !GCNLLR_RESIDENT_XFB ? GCNLLR_NATIVE_GX_SERIAL_RAM_WRITES : 0u),
+
     materialize_copy,release_copy,present_copy,present_spans,materialize_copy_range};
+int retain_session() {
+    if(!initialized || failed.load() || retain_next_host || retained_host || !SDL_IsMainThread())return 0;
+    retain_next_host=true;return 1;
+}
+void cancel_session() {
+    retain_next_host=false;
+    if(retained_host) {aurora_shutdown();retained_host=false;}
+}
+uint64_t session_window_identity() {
+    if(!initialized && !retained_host)return 0;
+    auto* window=aurora::window::get_sdl_window();
+    return window?uint64_t(SDL_GetWindowID(window)):0;
+}
+const GcWiiNativeSessionApi session_api={GC_WII_NATIVE_SESSION_ABI,retain_session,cancel_session,session_window_identity};
+int display_aspect(uint32_t numerator,uint32_t denominator) {
+    return initialized && !failed.load() && SDL_IsMainThread() &&
+        gcnllr::display_aspect::set({numerator,denominator});
+}
+const GcWiiNativeDisplayApi display_api={GC_WII_NATIVE_DISPLAY_ABI,display_aspect};
 }
 #ifdef _WIN32
 #define GCNLLR_EXPORT __declspec(dllexport)
 #else
 #define GCNLLR_EXPORT __attribute__((visibility("default")))
 #endif
+extern "C" GCNLLR_EXPORT const GcWiiNativeSessionApi* gc_wii_native_session_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_SESSION_ABI?&session_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeDisplayApi* gc_wii_native_display_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_DISPLAY_ABI?&display_api:nullptr;
+}
 #if GCNLLR_RETAIL_PIPELINE
 #if GCNLLR_PERSISTENT_GEOMETRY
 extern "C" bool gcnllr_aurora_geometry_epoch(const void* data,uint32_t size,uint32_t* address,uint64_t* epoch) {
@@ -1629,3 +1719,387 @@ extern "C" GCNLLR_EXPORT int gcnllr_native_gx_fullscreen(int enabled) {
     auto* window=initialized ? aurora::window::get_sdl_window():nullptr;
     return window && SDL_SetWindowFullscreen(window,enabled!=0);
 }
+namespace {
+int native_idle_dimming(uint32_t enabled) {
+    if(!initialized || failed.load() || enabled>1)return 0;
+    gcnllr::gpu_bridge::set_idle_dimming(enabled!=0);return 1;
+}
+const GcWiiNativeVideoApi native_video_api={GC_WII_NATIVE_VIDEO_ABI,native_idle_dimming};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeVideoApi* gc_wii_native_video_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_VIDEO_ABI?&native_video_api:nullptr;
+}
+namespace {
+int resolution_set(uint32_t scale) {
+    if(!initialized || failed.load() || !frame_open || scale<1 || scale>16)return 0;
+    if(scale==internal_scale)return 1;
+    if(fifo_worker)return 0;
+    try {
+        if(!drain() || !gcnllr::gpu_bridge::set_internal_scale(scale))return 0;
+        ++efb_generation;internal_scale=scale;return 1;
+    }catch(const std::exception& e){fail(e.what());return 0;}
+}
+int resolution_size(uint32_t* width,uint32_t* height) {
+    return initialized && !failed.load() && gcnllr::gpu_bridge::raster_size(width,height);
+}
+const GcWiiNativeResolutionApi resolution_api={GC_WII_NATIVE_RESOLUTION_ABI,resolution_set,resolution_size};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeResolutionApi* gc_wii_native_resolution_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_RESOLUTION_ABI?&resolution_api:nullptr;
+}
+namespace {
+int presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* frame) {
+    if(!initialized || failed.load())return 0;
+    try{return gcnllr::gpu_bridge::set_presentation_frame(address,frame);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int presentation_filtered_frame(uint32_t address,const GcWiiNativePresentationFrame* frame,uint32_t tint) {
+    if(!initialized || failed.load())return 0;
+    try{return gcnllr::gpu_bridge::set_filtered_presentation_frame(address,frame,tint);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int presentation_source(uint32_t address) {
+    if(!initialized || failed.load())return 0;
+    gcnllr::gpu_bridge::select_presentation_source(address);return 1;
+}
+int presentation_window(uint32_t* width,uint32_t* height) {
+    if(!initialized || !width || !height)return 0;
+    int w=0,h=0;auto* window=aurora::window::get_sdl_window();
+    if(!window || !SDL_GetWindowSizeInPixels(window,&w,&h) || w<=0 || h<=0)return 0;
+    *width=uint32_t(w);*height=uint32_t(h);return 1;
+}
+int presentation_read(uint8_t* output,uint32_t capacity,uint32_t* width,uint32_t* height) {
+    if(!initialized || failed.load())return 0;
+    try{return gcnllr::gpu_bridge::read_presentation(output,capacity,width,height);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int presentation_resize(uint32_t width,uint32_t height) {
+    if(!initialized || width<160 || height<120 || width>8192 || height>8192)return 0;
+    auto* window=aurora::window::get_sdl_window();
+    return window && SDL_SetWindowSize(window,int(width),int(height));
+}
+const GcWiiNativePresentationApi presentation_api={GC_WII_NATIVE_PRESENTATION_ABI,
+    presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read,presentation_filtered_frame};
+const GcWiiNativePresentationApi legacy_presentation_api={1,
+    presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read,nullptr};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativePresentationApi* gc_wii_native_presentation_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:abi==1?&legacy_presentation_api:nullptr;
+}
+
+namespace {
+uint64_t create_native_mesh(const GcWiiNativeMesh* mesh) {
+    if (!initialized || failed.load() || fifo_worker || !mesh) {
+        native_scene.rejected(); return 0;
+    }
+    try { return native_scene.create_mesh(*mesh); }
+    catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int destroy_native_mesh(uint64_t mesh) { return native_scene.destroy_mesh(mesh); }
+bool native_scene_ready() {
+    if (!initialized || !frame_open || failed.load() || fifo_worker ||
+        !frontend || frontend->pending_fifo_size()) {
+        std::fprintf(stderr,"[native-scene-boundary] initialized=%u frame=%u failed=%u worker=%u frontend=%u pending=%zu\n",
+            unsigned(initialized),unsigned(frame_open),unsigned(failed.load()),unsigned(bool(fifo_worker)),
+            unsigned(bool(frontend)),frontend?size_t(frontend->pending_fifo_size()):size_t(0));
+        native_scene.rejected(); return false;
+    }
+    return true;
+}
+int submit_native_scene(gxruntime::gxcore::DrawPlan* plan) {
+        if (!plan) return 0;
+        const auto image=[](uint32_t address,uint32_t bytes,const void*& data,uint32_t& available,DolGuestResourceKind kind) {
+            DolGuestResolvedRange range{};
+            if(!resolve(nullptr,address,bytes,DOL_GUEST_ADDRESS_AUTO,kind,&range)){std::fprintf(stderr,"[native-scene-rejected] Unreadable resource address=%08x size=%u\n",address,bytes);return false;}
+            data=range.data;available=range.available;return true;
+        };
+        if (plan->has_texture) {
+            if(plan->texmap_mask) {
+                for(unsigned i=0;i<8;++i)if(plan->texmap_mask&(1u<<i)) {
+                    auto& t=plan->textures[i];
+                    if(!t.valid || !image(t.address,t.size,t.data,t.available,DOL_GUEST_RESOURCE_TEXTURE) ||
+                       (t.has_tlut && (t.tlut_entries>16384 || t.tlut_format>2 ||
+                        !image(t.tlut_address,t.tlut_entries*2,t.tlut_data,t.tlut_available,DOL_GUEST_RESOURCE_TLUT)))) {
+                        native_scene.rejected();return 0;
+                    }
+                }
+            } else {
+                if(!image(plan->tex_address,plan->tex_size,plan->tex_data,plan->tex_available,DOL_GUEST_RESOURCE_TEXTURE) ||
+                   (plan->has_tlut && (plan->tlut_entries>16384 || plan->tlut_format>2 ||
+                    !image(plan->tlut_address,plan->tlut_entries*2,plan->tlut_data,plan->tlut_available,DOL_GUEST_RESOURCE_TLUT)))) {
+                    native_scene.rejected();return 0;
+                }
+            }
+        }
+        // Direct typed submission. No command construction, FIFO append,
+        // register decoding or original guest renderer executes here.
+        if (!aurora::gfx::gxcore::submit_draw_plan(*plan)) {
+            native_scene.rejected(); fail("Native scene draw submission failed"); return 0;
+        }
+        native_scene.submitted(); ++state.draws; ++efb_generation;
+        return 1;
+}
+int draw_native_mesh(const GcWiiNativeDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try {return submit_native_scene(native_scene.prepare(*job));}
+    catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int draw_native_gui(const GcWiiNativeGuiDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try {return submit_native_scene(gcnllr::prepare_gui(native_scene,*job));}
+    catch (const std::exception& e) { fail(e.what()); return 0; }
+}
+int draw_native_gui_layers(const GcWiiNativeGuiLayersDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try {return submit_native_scene(gcnllr::prepare_gui_layers(native_scene,*job));}
+    catch(const std::exception& e){fail(e.what());return 0;}
+}
+int draw_native_gui_mask(const GcWiiNativeGuiMaskDraw* job) {
+    if(!job){native_scene.rejected();return 0;}
+    if(!native_scene_ready())return 0;
+    try{return submit_native_scene(gcnllr::prepare_gui_mask(native_scene,*job));}
+    catch(const std::exception& e){fail(e.what());return 0;}
+}
+void native_scene_status(GcWiiNativeRenderStatus* output) {
+    if (output) *output=native_scene.status();
+}
+const GcWiiNativeRenderApi native_scene_api={GC_WII_NATIVE_RENDER_ABI,
+    create_native_mesh,destroy_native_mesh,draw_native_mesh,native_scene_status};
+const GcWiiNativeGuiApi native_gui_api={GC_WII_NATIVE_GUI_ABI,draw_native_gui};
+const GcWiiNativeGuiLayersApi native_gui_layers_api={GC_WII_NATIVE_GUI_LAYERS_ABI,draw_native_gui_layers};
+const GcWiiNativeGuiMaskApi native_gui_mask_api={GC_WII_NATIVE_GUI_MASK_ABI,draw_native_gui_mask};
+template<class Input> int draw_gui_effect(const Input* input,gxruntime::gxcore::DrawPlan* (*prepare)(gcnllr::NativeScene&,const Input&)) {
+    if(!input){native_scene.rejected();return 0;}if(!native_scene_ready())return 0;
+    try{return submit_native_scene(prepare(native_scene,*input));}catch(const std::exception& e){fail(e.what());return 0;}
+}
+int draw_gui_cutout(const GcWiiNativeGuiCutoutDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_cutout);}
+int draw_gui_add(const GcWiiNativeGuiAddDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_add);}
+int draw_gui_product(const GcWiiNativeGuiProductDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_product);}
+int draw_gui_program(const GcWiiNativeGuiProgramDraw* input){return draw_gui_effect(input,gcnllr::prepare_gui_program);}
+uint64_t create_gui_mesh(const GcWiiNativeGuiMesh* input) {
+    if(!initialized || failed.load() || fifo_worker || !input){native_scene.rejected();return 0;}
+    try{return native_scene.create_mesh(input->mesh,input->extra_uv,input->extra_uv_count);}catch(const std::exception& e){fail(e.what());return 0;}
+}
+const GcWiiNativeGuiEffectsApi native_gui_effects_api={GC_WII_NATIVE_GUI_EFFECTS_ABI,create_gui_mesh,draw_gui_cutout,draw_gui_add,draw_gui_product};
+const GcWiiNativeGuiProgramApi native_gui_program_api={GC_WII_NATIVE_GUI_PROGRAM_ABI,create_gui_mesh,draw_gui_program};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeRenderApi* gc_wii_native_render_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_RENDER_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_scene_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiApi* gc_wii_native_gui_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_ABI && !GCNLLR_GX_FIFO_WORKER ? &native_gui_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiLayersApi* gc_wii_native_gui_layers_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_LAYERS_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_layers_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiMaskApi* gc_wii_native_gui_mask_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_MASK_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_mask_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiEffectsApi* gc_wii_native_gui_effects_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_EFFECTS_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_effects_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeGuiProgramApi* gc_wii_native_gui_program_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_GUI_PROGRAM_ABI && !GCNLLR_GX_FIFO_WORKER?&native_gui_program_api:nullptr;
+}
+
+namespace {
+int reject_native_frame(const char* error) {
+    ++native_frame_state.rejected;
+    std::snprintf(native_frame_state.error,sizeof(native_frame_state.error),"%s",error);return 0;
+}
+bool native_frame_ready() {
+    if(!initialized || !frame_open || failed.load() || fifo_worker || !frontend || frontend->pending_fifo_size()) {
+        reject_native_frame("Native frame requires an open frame and drained machine ingress");return false;
+    }
+    return true;
+}
+bool native_clear_value(const GcWiiNativeClear& value) {
+    return value.red<=255 && value.green<=255 && value.blue<=255 && value.alpha<=255 &&
+        value.depth<=0xffffff && !(value.flags&~7u);
+}
+bool native_frame_rect(uint32_t x,uint32_t y,uint32_t width,uint32_t height) {
+    return x<gcnllr::efb_width && y<gcnllr::efb_height && width && height &&
+        width<=gcnllr::efb_width-x && height<=gcnllr::efb_height-y;
+}
+gxruntime::gxcore::EfbCopyCommand native_clear_command(const GcWiiNativeClear& value) {
+    return {.src_x=value.x,.src_y=value.y,.width=value.width,.height=value.height,.clear=true,
+        .clear_r=value.red,.clear_g=value.green,.clear_b=value.blue,.clear_a=value.alpha,.clear_z=value.depth,
+        .color_update=bool(value.flags&GC_WII_NATIVE_CLEAR_COLOR),
+        .alpha_update=bool(value.flags&GC_WII_NATIVE_CLEAR_ALPHA),
+        .depth_update=bool(value.flags&GC_WII_NATIVE_CLEAR_DEPTH)};
+}
+int native_frame_clear(const GcWiiNativeClear* value) {
+    std::unique_lock recording(recording_mutex,std::defer_lock);
+    if(GCNLLR_GX_COOPERATIVE_VI)recording.lock();
+    if(!native_frame_ready())return 0;
+    if(!value || !native_clear_value(*value) || !native_frame_rect(value->x,value->y,value->width,value->height))
+        return reject_native_frame("Unsupported native EFB clear rectangle/value/masks");
+    try {
+        flush_geometry();flush_display_copies();
+        gcnllr::gpu_bridge::record_efb_clear(native_clear_command(*value));
+        if(value->flags)++efb_generation;
+        ++native_frame_state.clears;return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
+int native_frame_display_copy(const GcWiiNativeDisplayCopy* value) {
+    std::unique_lock recording(recording_mutex,std::defer_lock);
+    if(GCNLLR_GX_COOPERATIVE_VI)recording.lock();
+    if(!native_frame_ready())return 0;
+    if(!value || !native_frame_rect(value->x,value->y,value->width,value->height) ||
+        ((value->x|value->width)&1u) || !value->scale_y || value->scale_y>65535 || value->invert_y_scale>1 ||
+        value->gamma || (value->flags&~7u) || value->stride!=value->width*2 ||
+        ((value->destination|value->stride)&31u) || !native_clear_value(value->clear_value))
+        return reject_native_frame("Unsupported native YUY2 display-copy descriptor");
+    for(auto tap:value->filter)if(tap>63)return reject_native_frame("Native display filter tap exceeds six bits");
+    if(!gcnllr::gpu_bridge::presentation_matches_copy(value->destination))
+        return reject_native_frame("Presentation does not name this display copy");
+    const float scale=value->invert_y_scale?256.f/float(value->scale_y):float(value->scale_y)/256.f;
+    const auto rows=uint32_t(float(value->height)*scale);
+    GcnllrNativeGxMemory memory{};
+    if(!rows || rows>576 || !gcnllr::gx_memory(config,value->destination,value->stride*rows,memory))
+        return reject_native_frame("Native display-copy destination is outside its coherent memory bank");
+    auto command=native_clear_command(value->clear_value);
+    command.dest_address=memory.physical_address;command.format=0xf;
+    command.src_x=value->x;command.src_y=value->y;command.width=command.destination_width=value->width;
+    command.height=command.destination_height=value->height;command.clear=bool(value->flags&GC_WII_NATIVE_COPY_CLEAR);
+    const auto* taps=value->filter;
+    const gcnllr::gpu_bridge::DisplayCopyFilter filter{
+        taps[0]|(taps[1]<<6)|(taps[2]<<12)|(taps[3]<<18),taps[4]|(taps[5]<<6)|(taps[6]<<12),
+        bool(value->flags&GC_WII_NATIVE_COPY_CLAMP_TOP),bool(value->flags&GC_WII_NATIVE_COPY_CLAMP_BOTTOM)};
+    try {
+        flush_geometry();
+        display_readback(command,memory.physical_address,value->stride,scale,filter);
+        if(command.clear)++efb_generation;
+        flush_display_copies();++native_frame_state.display_copies;return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
+int native_frame_complete(uint32_t events,uint32_t token) {
+    std::unique_lock recording(recording_mutex,std::defer_lock);
+    if(GCNLLR_GX_COOPERATIVE_VI)recording.lock();
+    if(!native_frame_ready())return 0;
+    if((events&~7u) || (events&6u)==6u || token>65535u)
+        return reject_native_frame("Unsupported native completion event/token");
+    try {
+        flush_geometry();flush_display_copies();
+        gcnllr::gpu_bridge::complete_frame(!GCNLLR_OWNED_COMPLETION);
+        if(events&GC_WII_NATIVE_COMPLETE_TOKEN)ordered_bp_effect(0x47,token);
+        if(events&GC_WII_NATIVE_COMPLETE_TOKEN_INTERRUPT)ordered_bp_effect(0x48,token);
+        if(events&GC_WII_NATIVE_COMPLETE_DRAW_DONE)ordered_bp_effect(0x45,2);
+        retire_streams(true);++native_frame_state.completions;return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
+int native_capture_texture(const GcWiiNativeTextureCopy* value) {
+    std::unique_lock recording(recording_mutex,std::defer_lock);
+    if(GCNLLR_GX_COOPERATIVE_VI)recording.lock();
+    if(!native_frame_ready())return 0;
+    if(!value || !native_frame_rect(value->x,value->y,value->width,value->height) ||
+       value->format>6 || (value->destination&31u))
+        return reject_native_frame("Unsupported native color texture capture");
+    const auto tile=gcnllr::native_copy_layout(value->format);
+    const uint32_t stride=((value->width+tile.width-1)/tile.width)*tile.bytes;
+    const uint32_t size=stride*((value->height+tile.height-1)/tile.height);
+    GcnllrNativeGxMemory memory{};
+    if(!gcnllr::gx_memory(config,value->destination,size,memory))
+        return reject_native_frame("Native texture capture crosses its coherent memory bank");
+    const gxruntime::gxcore::EfbCopyCommand command{
+        .dest_address=memory.physical_address,.byte_size=size,.format=value->format,
+        .src_x=value->x,.src_y=value->y,.width=value->width,.height=value->height,
+        .destination_width=value->width,.destination_height=value->height};
+    try {
+        flush_geometry();texture_copy(command,stride);return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
+void native_frame_status(GcWiiNativeFrameStatus* value){if(value)*value=native_frame_state;}
+const GcWiiNativeFrameApi native_frame_api={GC_WII_NATIVE_FRAME_ABI,native_frame_clear,native_frame_display_copy,
+    native_frame_complete,native_frame_status};
+const GcWiiNativeCaptureApi native_capture_api={GC_WII_NATIVE_CAPTURE_ABI,native_capture_texture};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeFrameApi* gc_wii_native_frame_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_FRAME_ABI && !GCNLLR_GX_FIFO_WORKER?&native_frame_api:nullptr;
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeCaptureApi* gc_wii_native_capture_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_CAPTURE_ABI && !GCNLLR_GX_FIFO_WORKER?&native_capture_api:nullptr;
+}
+
+namespace {
+int native_output_submit() {
+    // This extension deliberately retains the serial machine-owner profile.
+    // Only immutable GPU resources are deferred, never guest-memory stores.
+    if(!config.own_copy || !config.pending_read || !config.prepare_read ||
+       GCNLLR_GX_FIFO_WORKER || GCNLLR_ASYNC_COPIES || GCNLLR_COMPOSED_SCANOUT ||
+       GCNLLR_GX_COOPERATIVE_VI || GCNLLR_RESIDENT_XFB)
+        return reject_native_frame("Native output requires guarded serial ownership");
+    if(!native_frame_ready())return 0;
+    try {
+        flush_geometry();flush_display_copies();
+        gcnllr::gpu_bridge::complete_frame(false);
+        ++native_frame_state.completions;return 1;
+    } catch(const std::exception& e){reject_native_frame(e.what());fail(e.what());return 0;}
+}
+const GcWiiNativeOutputApi native_output_api={GC_WII_NATIVE_OUTPUT_ABI,native_output_submit};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeOutputApi* gc_wii_native_output_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_OUTPUT_ABI && !GCNLLR_GX_FIFO_WORKER && !GCNLLR_ASYNC_COPIES &&
+        !GCNLLR_COMPOSED_SCANOUT && !GCNLLR_GX_COOPERATIVE_VI && !GCNLLR_RESIDENT_XFB?&native_output_api:nullptr;
+}
+
+#if GC_WII_NATIVE_J3D
+namespace {
+std::span<const uint8_t> native_j3d_resolve(void*,uint32_t address,size_t length) {
+    if(length>UINT32_MAX)return {};
+    DolGuestResolvedRange range{};
+    if(!resolve(nullptr,address,uint32_t(length),DOL_GUEST_ADDRESS_AUTO,DOL_GUEST_RESOURCE_TEXTURE,&range) || range.available<length)return {};
+    return {static_cast<const uint8_t*>(range.data),length};
+}
+uint64_t create_native_j3d(uint32_t address) {
+    if(!initialized || failed.load() || fifo_worker){native_j3d.rejected("Native J3D service is unavailable");return 0;}
+    try {
+        auto header=native_j3d_resolve(nullptr,address,32);
+        if(header.empty())throw std::runtime_error("Native J3D resource header is unreadable");
+        const auto size=uint32_t(header[8])<<24|uint32_t(header[9])<<16|uint32_t(header[10])<<8|header[11];
+        if(size<32 || size>64u*1024u*1024u)throw std::runtime_error("Native J3D resource size is invalid");
+        auto bytes=native_j3d_resolve(nullptr,address,size);
+        if(bytes.empty())throw std::runtime_error("Native J3D resource is incomplete");
+        return native_j3d.create(bytes,{address,nullptr,native_j3d_resolve});
+    }catch(const std::exception& e){native_j3d.rejected(e.what());return 0;}
+}
+int destroy_native_j3d(uint64_t handle){return native_j3d.destroy(handle);}
+int draw_native_j3d(const GcWiiJ3DDraw* input) {
+    if(!initialized || !frame_open || failed.load() || fifo_worker || !input || !frontend || frontend->pending_fifo_size()) {
+        char reason[192];
+        std::snprintf(reason,sizeof(reason),"Native J3D boundary unavailable: initialized=%u frame=%u failed=%u worker=%u input=%u frontend=%u pending=%zu",
+            unsigned(initialized),unsigned(frame_open),unsigned(failed.load()),unsigned(bool(fifo_worker)),unsigned(input!=nullptr),unsigned(bool(frontend)),
+            frontend?size_t(frontend->pending_fifo_size()):size_t(0));
+        native_j3d.rejected(reason);return 0;
+    }
+    try {
+        auto* prepared=native_j3d.prepare(*input);
+        auto image=[&](uint32_t& address,uint32_t size,const void*& data,uint32_t& available,DolGuestResourceKind kind) {
+            GcnllrNativeGxMemory range{};
+            if(!gcnllr::gx_memory(config,address,size,range) || range.available<size ||
+               (kind==DOL_GUEST_RESOURCE_TLUT && !observe_pending_memory(range.physical_address,size)))
+                throw std::runtime_error("Native J3D texture memory is unreadable");
+            address=range.physical_address;data=range.bytes;available=range.available;
+        };
+        // Texture memory may be rewritten by the CPU or owned by an earlier
+        // GPU copy. Use the consumer's coherent physical identity and current
+        // bytes; a one-time model import must not freeze animated image data.
+        auto& material=prepared->draw.material;
+        for(unsigned t=0;t<8;++t)if(material.texture_mask&(1u<<t)) {
+            auto& texture=material.textures[t];image(texture.address,texture.size,texture.data,texture.available,DOL_GUEST_RESOURCE_TEXTURE);
+            if(texture.has_tlut)image(texture.tlut_address,texture.tlut_entries*2,texture.tlut_data,texture.tlut_available,DOL_GUEST_RESOURCE_TLUT);
+        }
+        for(const auto& mesh:prepared->meshes) {
+            if(!aurora::gfx::gxcore::submit_resident_draw(mesh,prepared->draw))throw std::runtime_error("Native resident J3D GPU submission failed");
+            ++state.draws;++efb_generation;native_j3d.submitted();
+        }
+        return 1;
+    }catch(const std::exception& e){native_j3d.rejected(e.what());return 0;}
+}
+void native_j3d_status(GcWiiJ3DStatus* output){if(output)*output=native_j3d.status();}
+const GcWiiNativeJ3DApi native_j3d_api={GC_WII_NATIVE_J3D_ABI,create_native_j3d,destroy_native_j3d,draw_native_j3d,native_j3d_status};
+}
+extern "C" GCNLLR_EXPORT const GcWiiNativeJ3DApi* gc_wii_native_j3d_get_api(uint32_t abi) {
+    return abi==GC_WII_NATIVE_J3D_ABI?&native_j3d_api:nullptr;
+}
+#endif

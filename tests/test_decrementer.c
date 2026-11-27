@@ -12,6 +12,16 @@
     } \
 } while (0)
 
+static unsigned observed,changed;
+static bool idle_admitted(CPUState* cpu,u32 address,void* user) {
+    (void)cpu;return address==*(u32*)user;
+}
+static void observe(CPUState* cpu,void* user,bool mutation) {
+    (void)user;
+    if(mutation)++changed;
+    else {++observed;cpu->timebase=cpu->cycles/12;}
+}
+
 int main(void) {
     CPUState cpu;
     memset(&cpu, 0, sizeof cpu);
@@ -46,6 +56,24 @@ int main(void) {
     ppc_mtspr(&cpu, 22u, 123u, cpu.pc);
     CHECK(cpu.spr[22] == 123u);
 
+    ppc_timing_set_observer(&cpu,observe,NULL);
+    cpu.cycles=120;
+    CHECK(ppc_mftb(&cpu,268,cpu.pc)==10 && observed==1);
+    ppc_mfspr(&cpu,8,cpu.pc);CHECK(observed==1);
+    ppc_mfspr(&cpu,22,cpu.pc);CHECK(observed==2);
+    ppc_mtspr(&cpu,22,12,cpu.pc);CHECK(observed==3 && changed==1);
+    ppc_mtspr(&cpu,284,42,cpu.pc);CHECK(cpu.timebase==42 && observed==4 && changed==2);
+    ppc_decrementer_reset(&cpu);
+    ppc_mftb(&cpu,268,cpu.pc);CHECK(observed==4);
+    u32 idle_address=0x80001000;
+    ppc_idle_set_admission(&cpu,idle_admitted,&idle_address);
+    cpu.exception=0;cpu.msr=0;
+    CHECK(!ppc_idle_can_skip(&cpu,idle_address));
+    cpu.msr=0x8000;CHECK(ppc_idle_can_skip(&cpu,idle_address));
+    CHECK(!ppc_idle_can_skip(&cpu,idle_address+4));
+    cpu.exception=PPC_EXC_DECREMENTER;CHECK(!ppc_idle_can_skip(&cpu,idle_address));
+    ppc_decrementer_reset(&cpu);cpu.exception=0;
+    CHECK(!ppc_idle_can_skip(&cpu,idle_address));
     puts("decrementer timing: PASS");
     return 0;
 }
