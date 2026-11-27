@@ -130,6 +130,8 @@ if(BUILD_TESTING)
   target_include_directories(test_native_gx_api PRIVATE "${GC_WII_GX_ROOT}/include")
   target_link_libraries(test_native_gx_api PRIVATE gcnllr-native-gx)
   add_test(NAME native_gx_capability_abi_contract COMMAND test_native_gx_api)
+  set_tests_properties(native_gx_capability_abi_contract PROPERTIES ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:$<TARGET_FILE_DIR:gcnllr-native-gx>")
   find_package(Threads REQUIRED)
   add_executable(test_native_display "${GC_WII_GX_ROOT}/tests/test_native_display.cpp")
   target_include_directories(test_native_display PRIVATE "${GC_WII_GX_ROOT}/include")
