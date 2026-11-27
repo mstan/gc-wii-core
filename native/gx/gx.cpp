@@ -1727,7 +1727,7 @@ int native_idle_dimming(uint32_t enabled) {
 const GcWiiNativeVideoApi native_video_api={GC_WII_NATIVE_VIDEO_ABI,native_idle_dimming};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeVideoApi* gc_wii_native_video_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_VIDEO_ABI?&native_video_api:nullptr;
+    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_VIDEO_ABI?&native_video_api:nullptr;
 }
 namespace {
 int resolution_set(uint32_t scale) {
@@ -1745,7 +1745,7 @@ int resolution_size(uint32_t* width,uint32_t* height) {
 const GcWiiNativeResolutionApi resolution_api={GC_WII_NATIVE_RESOLUTION_ABI,resolution_set,resolution_size};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeResolutionApi* gc_wii_native_resolution_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_RESOLUTION_ABI?&resolution_api:nullptr;
+    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_RESOLUTION_ABI?&resolution_api:nullptr;
 }
 namespace {
 int presentation_frame(uint32_t address,const GcWiiNativePresentationFrame* frame) {
@@ -1781,7 +1781,7 @@ const GcWiiNativePresentationApi legacy_presentation_api={1,
     presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read,nullptr};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativePresentationApi* gc_wii_native_presentation_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:abi==1?&legacy_presentation_api:nullptr;
+    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:abi==1?&legacy_presentation_api:nullptr;
 }
 
 namespace {
@@ -2015,10 +2015,10 @@ const GcWiiNativeFrameApi native_frame_api={GC_WII_NATIVE_FRAME_ABI,native_frame
 const GcWiiNativeCaptureApi native_capture_api={GC_WII_NATIVE_CAPTURE_ABI,native_capture_texture};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeFrameApi* gc_wii_native_frame_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_FRAME_ABI && !GCNLLR_GX_FIFO_WORKER?&native_frame_api:nullptr;
+    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_FRAME_ABI && !GCNLLR_GX_FIFO_WORKER?&native_frame_api:nullptr;
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeCaptureApi* gc_wii_native_capture_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_CAPTURE_ABI && !GCNLLR_GX_FIFO_WORKER?&native_capture_api:nullptr;
+    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_CAPTURE_ABI && !GCNLLR_GX_FIFO_WORKER?&native_capture_api:nullptr;
 }
 
 namespace {
@@ -2039,7 +2039,7 @@ int native_output_submit() {
 const GcWiiNativeOutputApi native_output_api={GC_WII_NATIVE_OUTPUT_ABI,native_output_submit};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativeOutputApi* gc_wii_native_output_get_api(uint32_t abi) {
-    return abi==GC_WII_NATIVE_OUTPUT_ABI && !GCNLLR_GX_FIFO_WORKER && !GCNLLR_ASYNC_COPIES &&
+    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_OUTPUT_ABI && !GCNLLR_GX_FIFO_WORKER && !GCNLLR_ASYNC_COPIES &&
         !GCNLLR_COMPOSED_SCANOUT && !GCNLLR_GX_COOPERATIVE_VI && !GCNLLR_RESIDENT_XFB?&native_output_api:nullptr;
 }
 

@@ -129,6 +129,7 @@ if(BUILD_TESTING)
   add_executable(test_native_gx_api "${CMAKE_CURRENT_LIST_DIR}/test_api.cpp")
   target_include_directories(test_native_gx_api PRIVATE "${GC_WII_GX_ROOT}/include")
   target_link_libraries(test_native_gx_api PRIVATE gcnllr-native-gx)
+  target_compile_definitions(test_native_gx_api PRIVATE TEST_NATIVE_TYPED_OUTPUT=$<BOOL:${GCNLLR_NATIVE_TYPED_OUTPUT}>)
   add_test(NAME native_gx_capability_abi_contract COMMAND test_native_gx_api)
   set_tests_properties(native_gx_capability_abi_contract PROPERTIES ENVIRONMENT_MODIFICATION
     "PATH=path_list_prepend:$<TARGET_FILE_DIR:gcnllr-native-gx>")
@@ -188,4 +189,11 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_RUNTIME_DLLS:gcnllr-native-gx> $<TARGET_FILE_DIR:gcnllr-native-gx>
     COMMAND_EXPAND_LISTS)
+endif()
+
+# The graphics donor graph also exposes its generic DVD binding. Keep its
+# existing seek semantics on the Windows C ABI without changing the donor.
+if(TARGET gxruntime AND WIN32 AND (MSVC OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC"))
+  set_property(SOURCE "${GXRUNTIME_DIR}/src/dvd.c" TARGET_DIRECTORY gxruntime
+    APPEND PROPERTY COMPILE_DEFINITIONS fseeko=_fseeki64 off_t=__int64)
 endif()
