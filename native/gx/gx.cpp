@@ -1781,7 +1781,8 @@ const GcWiiNativePresentationApi legacy_presentation_api={1,
     presentation_frame,presentation_source,presentation_window,presentation_resize,presentation_read,nullptr};
 }
 extern "C" GCNLLR_EXPORT const GcWiiNativePresentationApi* gc_wii_native_presentation_get_api(uint32_t abi) {
-    return GCNLLR_NATIVE_TYPED_OUTPUT && abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:abi==1?&legacy_presentation_api:nullptr;
+    if (!GCNLLR_NATIVE_TYPED_OUTPUT) return nullptr;
+    return abi==GC_WII_NATIVE_PRESENTATION_ABI?&presentation_api:abi==1?&legacy_presentation_api:nullptr;
 }
 
 namespace {
